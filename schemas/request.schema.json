@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/wlyaaaaa/llm-backend-toolkit/schemas/request.schema.json",
+  "title": "LLM Backend Toolkit Request",
+  "type": "object",
+  "required": ["provider", "task"],
+  "properties": {
+    "provider": {
+      "enum": ["qwen3.7-plus", "qwen-main-v1"]
+    },
+    "task": {
+      "type": "object",
+      "required": ["goal"],
+      "properties": {
+        "goal": {"type": "string", "minLength": 1},
+        "instructions": {"type": "array"},
+        "inputs": {"type": "array"},
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "path"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "path": {"type": "string", "minLength": 1},
+              "top_k": {"type": "integer", "minimum": 1},
+              "max_chars": {"type": "integer", "minimum": 256}
+            },
+            "additionalProperties": false
+          }
+        },
+        "expected_output": {
+          "type": "object",
+          "properties": {
+            "format": {"enum": ["text", "json"]},
+            "required_keys": {"type": "array", "items": {"type": "string"}}
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "context": {
+      "type": "object",
+      "properties": {
+        "mode": {"enum": ["compact", "passthrough"], "default": "compact"},
+        "target_tokens": {"type": "integer", "minimum": 16},
+        "pinned": {"type": "array"}
+      },
+      "additionalProperties": false
+    },
+    "reasoning": {
+      "type": "object",
+      "properties": {
+        "mode": {"enum": ["off", "on"], "default": "off"}
+      },
+      "additionalProperties": false
+    },
+    "media": {
+      "type": "object",
+      "properties": {
+        "mode": {"enum": ["auto", "native", "specialist"], "default": "auto"},
+        "attachments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "path", "kind"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "path": {"type": "string", "minLength": 1},
+              "kind": {"enum": ["image", "audio"]},
+              "route": {"enum": ["auto", "native", "specialist"]},
+              "purpose": {"type": "string"}
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "privacy": {
+      "type": "object",
+      "properties": {
+        "cloud_allowed": {"type": "boolean", "default": false}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

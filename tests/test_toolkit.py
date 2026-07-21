@@ -1,0 +1,128 @@
+import unittest
+import tempfile
+from pathlib import Path
+
+from llm_backend_toolkit.errors import ProviderCallError, ToolError
+from llm_backend_toolkit.providers import ProviderResponse
+from llm_backend_toolkit.toolkit import Toolkit
+
+
+class FakeProvider:
+    def __init__(self, response=None, error=None, cloud=False):
+        self.response = response
+        self.error = error
+        self.cloud = cloud
+        self.calls = []
+
+    def invoke(self, prompt, native_images, reasoning_mode):
+        self.calls.append(
+            {"prompt": prompt, "native_images": list(native_images), "reasoning_mode": reasoning_mode}
+        )
+        if self.error:
+            raise self.error
+        return self.response
+
+
+def base_request(provider="qwen-main-v1"):
+    return {
+        "provider": provider,
+        "task": {
+            "goal": "Return JSON",
+            "instructions": ["Return only the final result"],
+            "inputs": ["7 multiplied by 8"],
+            "expected_output": {"format": "json", "required_keys": ["answer"]},
+        },
+        "privacy": {"cloud_allowed": provider == "qwen3.7-plus"},
+    }
+
+
+class ToolkitTests(unittest.TestCase):
+    def test_success_returns_result_side_checks_and_no_reasoning(self):
+        provider = FakeProvider(
+            ProviderResponse(
+                content='{"answer": 56}',
+                model="qwen-main-v1",
+                finish_reason="stop",
+                usage={"prompt_tokens": 20, "completion_tokens": 5},
+                reasoning="hidden trace",
+            )
+        )
+        toolkit = Toolkit(providers={"qwen-main-v1": provider})
+
+        result = toolkit.invoke(base_request())
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual({"answer": 56}, result["output"])
+        self.assertNotIn("reasoning", result)
+        self.assertTrue(all(check["passed"] for check in result["checks"]))
+        self.assertEqual("off", provider.calls[0]["reasoning_mode"])
+        self.assertEqual("compact", result["context_receipt"]["mode"])
+
+    def test_failed_primary_never_calls_an_unrequested_local_provider(self):
+        primary = FakeProvider(
+            error=ProviderCallError(
+                ToolError(
+                    category="billing_unavailable",
+                    provider_code="Arrearage",
+                    summary="billing unavailable",
+                    retryable=False,
+                )
+            ),
+            cloud=True,
+        )
+        local = FakeProvider(ProviderResponse(content="local", model="qwen-main-v1"))
+        toolkit = Toolkit(providers={"qwen3.7-plus": primary, "qwen-main-v1": local})
+
+        result = toolkit.invoke(base_request("qwen3.7-plus"))
+
+        self.assertEqual("failed", result["status"])
+        self.assertEqual("billing_unavailable", result["error"]["category"])
+        self.assertEqual("top_model", result["decision"]["owner"])
+        self.assertEqual([], local.calls)
+
+    def test_cloud_media_requires_explicit_permission(self):
+        provider = FakeProvider(ProviderResponse(content="ok", model="qwen3.7-plus"), cloud=True)
+        toolkit = Toolkit(providers={"qwen3.7-plus": provider})
+        request = base_request("qwen3.7-plus")
+        request["privacy"]["cloud_allowed"] = False
+        request["media"] = {
+            "mode": "native",
+            "attachments": [{"id": "img", "path": "missing.png", "kind": "image"}],
+        }
+
+        result = toolkit.invoke(request)
+
+        self.assertEqual("blocked", result["status"])
+        self.assertEqual("privacy_block", result["error"]["category"])
+        self.assertEqual([], provider.calls)
+
+    def test_invalid_json_is_partial_and_visible_to_the_caller(self):
+        provider = FakeProvider(ProviderResponse(content="not-json", model="qwen-main-v1"))
+        toolkit = Toolkit(providers={"qwen-main-v1": provider})
+
+        result = toolkit.invoke(base_request())
+
+        self.assertEqual("partial", result["status"])
+        self.assertTrue(any(not check["passed"] for check in result["checks"]))
+        self.assertEqual("not-json", result["output"])
+
+    def test_source_references_are_loaded_inside_the_tool_and_reported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "facts.txt"
+            source.write_text("irrelevant\n" * 30 + "The launch code is ORBIT-71.\n", encoding="utf-8")
+            provider = FakeProvider(ProviderResponse(content='{"code":"ORBIT-71"}', model="qwen-main-v1"))
+            toolkit = Toolkit(providers={"qwen-main-v1": provider})
+            request = base_request()
+            request["task"]["goal"] = "Return the launch code"
+            request["task"]["sources"] = [{"id": "facts", "path": str(source), "top_k": 2}]
+            request["task"]["expected_output"] = {"format": "json", "required_keys": ["code"]}
+
+            result = toolkit.invoke(request)
+
+            self.assertEqual("ok", result["status"])
+            self.assertIn("ORBIT-71", provider.calls[0]["prompt"])
+            self.assertEqual("facts", result["source_receipt"][0]["id"])
+
+
+if __name__ == "__main__":
+    unittest.main()

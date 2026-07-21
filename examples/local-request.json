@@ -1,0 +1,27 @@
+{
+  "provider": "qwen-main-v1",
+  "task": {
+    "goal": "Calculate seven multiplied by eight.",
+    "instructions": [
+      "Return strict JSON without a Markdown fence."
+    ],
+    "inputs": [],
+    "expected_output": {
+      "format": "json",
+      "required_keys": [
+        "answer"
+      ]
+    }
+  },
+  "context": {
+    "mode": "compact",
+    "target_tokens": 2048,
+    "pinned": []
+  },
+  "reasoning": {
+    "mode": "off"
+  },
+  "privacy": {
+    "cloud_allowed": false
+  }
+}
