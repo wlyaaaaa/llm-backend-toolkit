@@ -18,7 +18,13 @@ def _read_request(path_value: str) -> dict[str, Any]:
     return value
 
 
-def _probe_request(provider: str, case: str, attachment: str | None) -> dict[str, Any]:
+def _probe_request(
+    provider: str,
+    case: str,
+    attachment: str | None,
+    *,
+    cloud_allowed: bool = False,
+) -> dict[str, Any]:
     if case == "instruction":
         task = {
             "goal": "Return exactly LOCAL_OK and nothing else.",
@@ -67,7 +73,7 @@ def _probe_request(provider: str, case: str, attachment: str | None) -> dict[str
         "context": {"mode": "compact", "target_tokens": 2048},
         "reasoning": {"mode": "off"},
         "media": media,
-        "privacy": {"cloud_allowed": False},
+        "privacy": {"cloud_allowed": cloud_allowed},
     }
 
 
@@ -97,6 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--attachment")
     probe.add_argument("--state-dir")
     probe.add_argument("--force", action="store_true", help="Create a new probe attempt instead of using the cache")
+    probe.add_argument("--cloud-allowed", action="store_true", help="Explicitly allow this probe to send content to a cloud provider")
     worker = subparsers.add_parser("_worker", help=argparse.SUPPRESS)
     worker.add_argument("--job-id", required=True)
     worker.add_argument("--state-dir", required=True)
@@ -122,7 +129,12 @@ def main(argv: list[str] | None = None) -> int:
             toolkit = Toolkit()
             result = toolkit.status(args.provider)
         elif args.command == "probe":
-            request = _probe_request(args.provider, args.case, args.attachment)
+            request = _probe_request(
+                args.provider,
+                args.case,
+                args.attachment,
+                cloud_allowed=args.cloud_allowed,
+            )
             result = JobStore(args.state_dir).submit(request, force=args.force)
             result["probe"] = {"provider": args.provider, "case": args.case, "scope": "bounded"}
         elif args.command == "_worker":

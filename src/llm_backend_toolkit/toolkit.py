@@ -31,10 +31,10 @@ class Toolkit:
         media_config = request.get("media") or {}
         attachments = list(media_config.get("attachments") or [])
         privacy = request.get("privacy") or {}
-        if attachments and bool(getattr(provider, "cloud", False)) and not bool(privacy.get("cloud_allowed")):
+        if bool(getattr(provider, "cloud", False)) and not bool(privacy.get("cloud_allowed")):
             return self._blocked(
                 "privacy_block",
-                "Cloud media transfer requires privacy.cloud_allowed=true.",
+                "Any cloud provider transfer requires privacy.cloud_allowed=true.",
                 options=("use-local-provider", "allow-cloud-explicitly", "handle-in-codex"),
             )
 

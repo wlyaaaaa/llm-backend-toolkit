@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -122,6 +123,9 @@ class OllamaProvider:
     def __init__(self, *, base_url: str | None = None, model: str = "qwen-main-v1", timeout: int = 900) -> None:
         self.model = model
         self.base_url = (base_url or os.environ.get("LLM_TOOLKIT_OLLAMA_BASE_URL") or "http://127.0.0.1:32100").rstrip("/")
+        parsed = urllib.parse.urlparse(self.base_url)
+        if (parsed.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"} and parsed.port == 32101:
+            raise ValueError("Internal Ollama backend 32101 is forbidden; use the managed public endpoint.")
         self.timeout = timeout
         self.keep_alive: int | str = os.environ.get("LLM_TOOLKIT_OLLAMA_KEEP_ALIVE", "0")
 

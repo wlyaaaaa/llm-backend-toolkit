@@ -81,7 +81,11 @@
     "privacy": {
       "type": "object",
       "properties": {
-        "cloud_allowed": {"type": "boolean", "default": false}
+        "cloud_allowed": {
+          "type": "boolean",
+          "default": false,
+          "description": "Explicitly permits task text, selected source excerpts, and media to be sent to the chosen cloud provider."
+        }
       },
       "additionalProperties": false
     }

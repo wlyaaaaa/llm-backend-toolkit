@@ -6,7 +6,7 @@ Pass credentials through environment variables or another caller-owned secret re
 
 ## Local data
 
-Job state and artifacts are local runtime data and must remain outside Git. Cloud media transfer requires an explicit `privacy.cloud_allowed=true` request. Source and attachment paths are accepted only from the top-level caller; backend models never choose arbitrary local paths.
+Job state and artifacts are local runtime data and must remain outside Git. Any transfer to a cloud provider requires an explicit `privacy.cloud_allowed=true` request, covering task text, selected source excerpts, and media. Source and attachment paths are accepted only from the top-level caller; backend models never choose arbitrary local paths.
 
 ## Resource isolation
 

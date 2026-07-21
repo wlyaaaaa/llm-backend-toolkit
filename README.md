@@ -15,6 +15,7 @@
 - 支持本地模型原生图片、LocalOCR 和 ChineseASR 三种媒体路线。
 - 异步 Smart Job：提交立即返回，顶级模型无需被长时间命令阻塞。
 - 欠费、权限、GPU 占用等错误只返回裁决选项，不自动调用另一个模型。
+- 任何云端调用都要求显式 `privacy.cloud_allowed=true`，包括 task 文本、source 片段与媒体。
 
 ## 安装
 
@@ -112,6 +113,7 @@ LLM_TOOLKIT_QWEN_BASE_URL
 ```
 
 默认 model 固定为 `qwen3.7-plus`。测试套件不会发起真实云端调用；云端请求格式和错误分类使用 mock 验证。
+选择云端 provider 仍不等于授权传输；请求必须同时设置 `privacy.cloud_allowed=true`。云端 probe 还需显式传入 `--cloud-allowed`。
 
 百炼官方资料：
 

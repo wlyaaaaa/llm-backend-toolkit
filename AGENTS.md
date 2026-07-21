@@ -11,6 +11,7 @@ This is a public, secret-free tool project. Collaborate with the owner in Simpli
 - Use asynchronous `submit` plus `job` as the normal AI entry. Keep synchronous `invoke` as a low-level interface.
 - Keep native multimodal input, LocalOCR, and ChineseASR as distinct selectable routes.
 - Never bypass LocalGpuBroker or call an internal Ollama backend directly.
+- Require explicit `privacy.cloud_allowed=true` for all cloud-bound text, source excerpts, and media.
 
 ## Public safety
 

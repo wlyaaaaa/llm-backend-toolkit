@@ -96,6 +96,20 @@ class ToolkitTests(unittest.TestCase):
         self.assertEqual("privacy_block", result["error"]["category"])
         self.assertEqual([], provider.calls)
 
+    def test_cloud_text_and_source_refs_require_explicit_permission_before_local_reads(self):
+        provider = FakeProvider(ProviderResponse(content="ok", model="qwen3.7-plus"), cloud=True)
+        toolkit = Toolkit(providers={"qwen3.7-plus": provider})
+        request = base_request("qwen3.7-plus")
+        request["privacy"]["cloud_allowed"] = False
+        request["task"]["sources"] = [{"id": "private", "path": "missing-private-source.txt"}]
+
+        result = toolkit.invoke(request)
+
+        self.assertEqual("blocked", result["status"])
+        self.assertEqual("privacy_block", result["error"]["category"])
+        self.assertIn("allow-cloud-explicitly", result["decision"]["options"])
+        self.assertEqual([], provider.calls)
+
     def test_invalid_json_is_partial_and_visible_to_the_caller(self):
         provider = FakeProvider(ProviderResponse(content="not-json", model="qwen-main-v1"))
         toolkit = Toolkit(providers={"qwen-main-v1": provider})

@@ -20,6 +20,10 @@ class FakeHttpResponse:
 
 
 class ProviderContractTests(unittest.TestCase):
+    def test_ollama_adapter_rejects_known_internal_broker_backend(self):
+        with self.assertRaisesRegex(ValueError, "managed public endpoint"):
+            OllamaProvider(base_url="http://127.0.0.1:32101")
+
     def test_qwen_adapter_disables_thinking_and_uses_only_qwen37plus(self):
         seen = []
 
