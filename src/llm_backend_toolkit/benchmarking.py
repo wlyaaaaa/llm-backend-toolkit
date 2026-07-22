@@ -32,9 +32,10 @@ def discover_tasks(suite_root: Path) -> list[BenchmarkTask]:
 
 def suite_fingerprint(suite_root: Path) -> str:
     digest = hashlib.sha256()
+    contract_root = suite_root / "tasks"
     files = sorted(
         path
-        for path in suite_root.rglob("*")
+        for path in contract_root.rglob("*")
         if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
     )
     if not files:

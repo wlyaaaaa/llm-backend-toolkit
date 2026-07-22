@@ -7,6 +7,8 @@
 
 适用范围：仅覆盖本报告中的 9 行合成 JSONL、任务合同、verifier、模型身份和 CLI/沙箱版本；不等于 PersonalOS 完整数据工厂验收，也不外推到其他场景。
 
+通用代码修复、证据推理和约束规划的后续四 harness 实测见 [通用代理验收报告](general-agent-benchmark-v1.md)。它补充本专项，不追溯改写本报告的历史版本锚点。
+
 版本锚点：`qwen-main-v1:latest` digest `46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a`，父模型 `qwen3.6:35b`，`Q4_K_M`，262144 context；Toolkit `628e25c`，aicli `9674a94`。模型 alias/digest、CLI 版本、沙箱合同或任务提交发生实质变化后，本报告只能作为历史基线。
 
 ## 结论

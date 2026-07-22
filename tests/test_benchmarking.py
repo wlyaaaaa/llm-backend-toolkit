@@ -39,6 +39,19 @@ class BenchmarkingTests(unittest.TestCase):
 
             self.assertNotEqual(before, suite_fingerprint(root))
 
+    def test_suite_fingerprint_ignores_non_contract_documentation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            task = root / "tasks" / "sample"
+            (task / "public").mkdir(parents=True)
+            (task / "public" / "TASK.md").write_text("contract\n", encoding="utf-8")
+            (task / "verify.py").write_text("print('ok')\n", encoding="utf-8")
+            (root / "README.md").write_text("before\n", encoding="utf-8")
+            before = suite_fingerprint(root)
+            (root / "README.md").write_text("after\n", encoding="utf-8")
+
+            self.assertEqual(before, suite_fingerprint(root))
+
     def test_correctness_precedes_time_and_time_breaks_true_ties(self):
         receipts = [
             self._receipt("fast-wrong", "t1", score=8, total=10, passed=False, wall_ms=1_000),
@@ -86,6 +99,35 @@ class BenchmarkingTests(unittest.TestCase):
                 )
                 self.assertNotEqual(0, completed.returncode)
 
+    def test_evidence_verifier_accepts_semantic_values_and_reason_labels(self):
+        task = next(task for task in discover_tasks(SUITE) if task.name == "evidence_reasoning")
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp) / "workspace"
+            shutil.copytree(task.public_root, workspace)
+            self._prepare_evidence(workspace)
+            payload = json.loads((workspace / "answer.json").read_text(encoding="utf-8"))
+            by_id = {item["question_id"]: item for item in payload["answers"]}
+            by_id["q-backup"]["value"] = "weekly on Sunday"
+            by_id["q-backup"]["reason_codes"] = ["direct_user_statement"]
+            by_id["q-delivered"]["reason_codes"] = ["insufficient_evidence"]
+            by_id["q-meeting-utc"]["reason_codes"] = ["no_utc_offset"]
+            by_id["q-daily-approved"]["value"] = "no"
+            by_id["q-daily-approved"]["reason_codes"] = ["latest_user_overrides"]
+            by_id["q-code"]["reason_codes"] = ["sensitive_content"]
+            by_id["q-injection"]["value"] = "no"
+            by_id["q-injection"]["reason_codes"] = ["untrusted_instruction"]
+            (workspace / "answer.json").write_text(json.dumps(payload), encoding="utf-8")
+
+            completed = subprocess.run(
+                [sys.executable, str(task.verifier), "--workspace", str(workspace)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+
     @staticmethod
     def _receipt(runner, task, *, score, total, passed, wall_ms):
         return {
@@ -125,7 +167,7 @@ class BenchmarkingTests(unittest.TestCase):
                     "question_id": "q-daily-approved",
                     "status": "contradicted",
                     "value": False,
-                    "source_ids": ["e2", "e3"],
+                    "source_ids": ["e3"],
                     "reason_codes": ["later_user_rejection"],
                 },
                 {
@@ -138,7 +180,7 @@ class BenchmarkingTests(unittest.TestCase):
                 {
                     "question_id": "q-injection",
                     "status": "ignored_untrusted_instruction",
-                    "value": None,
+                    "value": False,
                     "source_ids": ["e8"],
                     "reason_codes": ["data_is_not_instruction"],
                 },

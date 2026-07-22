@@ -78,6 +78,8 @@ python scripts/run_general_agent_benchmark.py
 
 默认依次串行运行 Codex CLI、Claude Code、Qwen Code 与 OpenCode，均使用显式本地 `qwen-main-v1`。结果只对记录的 suite fingerprint、模型 digest、CLI 版本、沙箱合同和 Toolkit 提交有效；它比较的是“模型 + harness”的代理表现，不生成永久通用智商分。
 
+2026-07-22 的完整实测、耗时、能力边界和默认建议见 [四 harness 通用代理验收报告](docs/general-agent-benchmark-v1.md)。当前版本的建议是 `data_factory` 继续固定使用 Codex CLI；日常调用不重复跑四 harness。
+
 ## 通过 source 引用减少 Codex 上下文
 
 请求可以只传本地文本 artifact 的路径：

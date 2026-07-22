@@ -1,13 +1,21 @@
 import json
 import re
+import tomllib
 import unittest
 from pathlib import Path
+
+from llm_backend_toolkit import __version__
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class ContractFileTests(unittest.TestCase):
+    def test_package_versions_match(self):
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+        self.assertEqual(project["project"]["version"], __version__)
+
     def test_schemas_and_example_are_valid_json(self):
         request_schema = json.loads((ROOT / "schemas" / "request.schema.json").read_text(encoding="utf-8"))
         response_schema = json.loads((ROOT / "schemas" / "response.schema.json").read_text(encoding="utf-8"))

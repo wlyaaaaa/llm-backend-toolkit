@@ -16,3 +16,6 @@ runtime, agent CLI versions, sandbox contract, and toolkit commit.
 
 The PersonalOS data-factory benchmark remains a separate scenario-specific
 acceptance and is not included in a universal score.
+
+The version-bound 2026-07-22 acceptance is recorded in
+[`docs/general-agent-benchmark-v1.md`](../../docs/general-agent-benchmark-v1.md).
