@@ -16,7 +16,7 @@
 - 异步 Smart Job：提交立即返回，顶级模型无需被长时间命令阻塞。
 - 欠费、权限、GPU 占用等错误只返回裁决选项，不自动调用另一个模型。
 - 任何云端调用都要求显式 `privacy.cloud_allowed=true`，包括 task 文本、source 片段与媒体。
-- 本地 agent mode 通过 aicli 的 Windows 外层沙箱调用 Qwen Code、OpenCode、Codex CLI 或 Claude Code；稳定别名 `data_factory` 固定指向已验收的 Codex CLI，不做运行时猜测。
+- agent mode 通过 aicli 的 Windows 外层沙箱调用原生 CLI；稳定别名 `data_factory` 固定指向 Codex CLI，再按调用者显式选择的 provider 锁定 Profile 与模型，不做运行时猜测或 fallback。
 
 ## 安装
 
@@ -52,18 +52,23 @@ python -m venv .venv
 不含外部文件引用的相同请求默认复用已完成结果；agent workspace、source 或 media 等可变引用默认不缓存。只有调用者提供绑定真实内容 hash 的 `cache_key` 才允许这类请求命中缓存。明确需要一次新尝试时使用 `submit --force`。
 回执同时给出 `monitor_until_utc`。任务超过硬期限会显示 `stale`、停止建议轮询，并把重试或接管交回顶级模型。
 
-## 本地数据工厂智能体
+## 数据工厂智能体
 
 默认请求见 [examples/local-agent-request.json](examples/local-agent-request.json)。关键字段：
 
 - `execution.mode=agent`
-- `execution.runner=data_factory`（固定为 Codex CLI + `qwen-main-v1`）
+- `execution.runner=data_factory`（可省略；固定为 Codex CLI，并按 provider 锁定精确 Profile/模型）
 - `execution.policy=workspace-write|read-only`
 - `execution.budget`（墙钟上限是所有 harness 的硬边界；step/tool-call 上限仅在上游 CLI 支持时强制）
 
 `workspace-write` 必须指向隔离 worktree 或暂存任务目录。canonical raw、唯一事实源和不可恢复数据应留在可写根之外；智能体只产生 derived、checkpoint 和 receipt。可变工作区默认不复用已完成 job；只有调用者提供绑定输入内容 hash 的 `execution.cache_key` 才允许 cache hit。
 
 显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或 chain-of-thought。
+
+本地 `qwen-main-v1` 的默认目标是 `codex-ollama-main + qwen-main-v1`，已经过本机版本绑定验收。云端 `qwen3.7-plus` 的默认目标是 `codex-qwen-paygo + qwen3.7-plus`；这是根据阿里云官方 Codex/Responses 兼容性和同系本地模型的 harness 结果形成的**未实测推荐**，不是云端四 harness 排名。云端 Agent 请求仍须显式设置 `privacy.cloud_allowed=true`。`claude-code` 可作为顶级模型显式选择的未验收云端覆盖；没有精确云端 Profile 的 Qwen Code/OpenCode 会失败关闭。
+`status` 会在不发模型请求的情况下返回 `agent_default`、支持的 runner、路由依据和 `live_verified`；实际任务回执同时记录精确 Profile、模型与是否采用默认。
+
+云端示例见 [examples/cloud-agent-request.json](examples/cloud-agent-request.json)。普通单次摘要、抽取和结构化生成继续使用 `execution.mode=direct`，避免为不需要文件/命令循环的任务增加 Agent 调用成本。
 
 本机 35B 的 PersonalOS 风格小型清洗专项、选择理由和严格适用范围见 [数据工厂智能体验收报告](docs/agent-data-factory.md)。该报告不代表通用智能排名。
 
@@ -144,10 +149,13 @@ LLM_TOOLKIT_QWEN_BASE_URL
 
 默认 model 固定为 `qwen3.7-plus`。测试套件不会发起真实云端调用；云端请求格式和错误分类使用 mock 验证。
 选择云端 provider 仍不等于授权传输；请求必须同时设置 `privacy.cloud_allowed=true`。云端 probe 还需显式传入 `--cloud-allowed`。
+Agent 模式下 Toolkit 会把 Codex 原生参数显式锁定为 `--model qwen3.7-plus`，不会继承 AICLI 通用千问 Profile 的 Max 默认值。欠费会归一化为 `billing_unavailable` 并把本地调用、顶级模型接管或账务处理选项返回调用者，不会自动降级。
 
 百炼官方资料：
 
 - [OpenAI 兼容 Chat Completions](https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope)
+- [Codex 接入](https://help.aliyun.com/zh/model-studio/codex)
+- [OpenAI 兼容 Responses API](https://help.aliyun.com/zh/model-studio/compatibility-with-openai-responses-api)
 - [错误码](https://help.aliyun.com/zh/model-studio/error-code)
 
 ## 有界能力探测

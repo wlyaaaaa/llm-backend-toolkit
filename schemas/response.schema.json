@@ -17,6 +17,7 @@
     "uncertainties": {"type": "array"},
     "artifacts": {"type": "array"},
     "media_routes": {"type": "array"},
+    "execution_receipt": {"type": "object"},
     "error": {"type": "object"},
     "decision": {},
     "job_id": {"type": "string"},

@@ -1,0 +1,39 @@
+{
+  "provider": "qwen3.7-plus",
+  "task": {
+    "goal": "Clean the staged records and write derived output only",
+    "instructions": [
+      "Preserve source identifiers",
+      "Return strict JSON"
+    ],
+    "inputs": [],
+    "expected_output": {
+      "format": "json",
+      "required_keys": ["answer"]
+    }
+  },
+  "context": {
+    "mode": "compact",
+    "target_tokens": 4096,
+    "pinned": [
+      "Do not modify canonical raw data"
+    ]
+  },
+  "reasoning": {
+    "mode": "off"
+  },
+  "privacy": {
+    "cloud_allowed": true
+  },
+  "execution": {
+    "mode": "agent",
+    "workspace": "C:/staging/job-001",
+    "policy": "workspace-write",
+    "cache_key": "raw-sha256:replace-with-real-input-hash",
+    "budget": {
+      "timeout_seconds": 900,
+      "max_steps": 30,
+      "max_tool_calls": 120
+    }
+  }
+}

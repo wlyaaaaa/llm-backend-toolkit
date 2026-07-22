@@ -12,6 +12,73 @@ from .providers import default_providers
 from .sources import SourceLoader
 
 
+_AGENT_ROUTES: dict[str, dict[str, dict[str, Any]]] = {
+    "qwen-main-v1": {
+        "data_factory": {
+            "runner": "codex-cli",
+            "profile": "codex-ollama-main",
+            "model": "qwen-main-v1",
+            "basis": "accepted_local_bakeoff",
+            "live_verified": True,
+        },
+        "codex-cli": {
+            "runner": "codex-cli",
+            "profile": "codex-ollama-main",
+            "model": "qwen-main-v1",
+            "basis": "accepted_local_bakeoff",
+            "live_verified": True,
+        },
+        "claude-code": {
+            "runner": "claude-code",
+            "profile": "claude-ollama-main",
+            "model": "qwen-main-v1",
+            "basis": "version_bound_local_bakeoff",
+            "live_verified": True,
+        },
+        "qwen-code": {
+            "runner": "qwen-code",
+            "profile": "qwen-code-ollama-main",
+            "model": "qwen-main-v1",
+            "basis": "version_bound_local_bakeoff",
+            "live_verified": True,
+        },
+        "opencode": {
+            "runner": "opencode",
+            "profile": "opencode-ollama-main",
+            "model": "qwen-main-v1",
+            "basis": "version_bound_local_bakeoff",
+            "live_verified": True,
+        },
+    },
+    "qwen3.7-plus": {
+        "data_factory": {
+            "runner": "codex-cli",
+            "profile": "codex-qwen-paygo",
+            "model": "qwen3.7-plus",
+            "basis": "official_codex_responses_plus_local_sibling_bakeoff",
+            "live_verified": False,
+        },
+        "codex-cli": {
+            "runner": "codex-cli",
+            "profile": "codex-qwen-paygo",
+            "model": "qwen3.7-plus",
+            "basis": "official_codex_responses_plus_local_sibling_bakeoff",
+            "live_verified": False,
+        },
+        "claude-code": {
+            "runner": "claude-code",
+            "profile": "claude-qwen-paygo",
+            "model": "qwen3.7-plus",
+            "basis": "explicit_unverified_cloud_override",
+            "live_verified": False,
+        },
+    },
+}
+_KNOWN_AGENT_RUNNERS = frozenset(
+    {"data_factory", "codex-cli", "claude-code", "qwen-code", "opencode"}
+)
+
+
 class Toolkit:
     def __init__(
         self,
@@ -124,19 +191,27 @@ class Toolkit:
         media: Any,
         sources: Any,
     ) -> dict[str, Any]:
-        if bool(getattr(provider, "cloud", False)) or provider_name != "qwen-main-v1":
-            return self._blocked(
-                "invalid_request",
-                "Agent execution is local-only; provider must be qwen-main-v1.",
-                options=("use-local-provider", "handle-in-codex"),
-            )
         workspace = Path(str(execution.get("workspace") or "")).expanduser()
         if not workspace.is_absolute() or not workspace.resolve().is_dir():
             return self._blocked("invalid_request", "execution.workspace must be an existing absolute directory.")
         policy = str(execution.get("policy") or "read-only")
         if policy not in {"read-only", "workspace-write"}:
             return self._blocked("invalid_request", f"Unsupported agent policy: {policy}")
-        runner_name = str(execution.get("runner") or "data_factory")
+        requested_runner = str(execution.get("runner") or "").strip()
+        runner_name = requested_runner or "data_factory"
+        if runner_name not in _KNOWN_AGENT_RUNNERS:
+            return self._blocked(
+                "agent_runner_unavailable",
+                f"Requested agent runner is unavailable: {runner_name}",
+                options=("inspect-runner", "handle-in-codex"),
+            )
+        route = (_AGENT_ROUTES.get(provider_name) or {}).get(runner_name)
+        if route is None:
+            return self._blocked(
+                "agent_runner_incompatible",
+                f"Runner {runner_name} has no exact profile for provider {provider_name}.",
+                options=("select-compatible-runner", "handle-in-codex"),
+            )
         runner = self.runners.get(runner_name)
         if runner is None:
             return self._blocked(
@@ -166,8 +241,17 @@ class Toolkit:
                 "policy": policy,
                 "budget": budget,
                 "native_images": list(media.native_images),
+                "profile": route["profile"],
+                "model": route["model"],
             }
         )
+        route_receipt = {
+            "resolved_runner": route["runner"],
+            "profile": route["profile"],
+            "route_basis": route["basis"],
+            "route_live_verified": bool(route["live_verified"]),
+            "default_applied": not bool(requested_runner),
+        }
         prompt = compacted.prompt
         if media.native_images:
             prompt += "\n\nApproved native image paths:\n" + "\n".join(media.native_images)
@@ -186,6 +270,7 @@ class Toolkit:
                 "policy": policy,
                 "budget": budget,
             }
+            result["execution_receipt"].update(route_receipt)
             result["execution_receipt"].update(exc.receipt)
             return result
         output, checks = self._check_output(response.content, (request.get("task") or {}).get("expected_output") or {})
@@ -215,6 +300,7 @@ class Toolkit:
                 "policy": policy,
                 "budget": budget,
                 "fallback_used": False,
+                **route_receipt,
             },
             "decision": None,
         }
@@ -224,7 +310,20 @@ class Toolkit:
         if provider is None:
             return self._blocked("invalid_request", f"Unsupported provider: {provider_name}")
         try:
-            return {"status": "ok", "provider_status": provider.status()}
+            provider_status = provider.status()
+            routes = _AGENT_ROUTES.get(provider_name) or {}
+            default_route = routes.get("data_factory")
+            if default_route:
+                provider_status["agent_default"] = {
+                    "runner_alias": "data_factory",
+                    "runner": default_route["runner"],
+                    "profile": default_route["profile"],
+                    "model": default_route["model"],
+                    "basis": default_route["basis"],
+                    "live_verified": bool(default_route["live_verified"]),
+                }
+                provider_status["agent_supported_runners"] = sorted(routes)
+            return {"status": "ok", "provider_status": provider_status}
         except ProviderCallError as exc:
             return self._from_error("failed", exc.error)
 

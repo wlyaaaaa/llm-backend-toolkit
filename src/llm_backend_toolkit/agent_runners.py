@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .errors import ToolError
+from .errors import ToolError, classify_agent_process_error
 
 
 @dataclass(frozen=True)
@@ -330,7 +330,7 @@ class AiCliProfileRunner:
         if self.engine == "codex":
             native = [
                 "exec", "--json", "--ephemeral", "--dangerously-bypass-approvals-and-sandbox",
-                "--skip-git-repo-check", "--disable", "plugins",
+                "--skip-git-repo-check", "--disable", "plugins", "--model", model,
             ]
             for path in native_images:
                 native.extend(["--image", path])
@@ -417,22 +417,21 @@ class AiCliProfileRunner:
             session_id = str(last.get("session_id") or "") if isinstance(last, dict) else ""
         child_code = int(run.get("exitCode") if run.get("exitCode") is not None else code)
         if code != 0 or child_code != 0:
-            detail = str(run.get("stderr") or stderr or child_stdout).strip()[-500:]
-            raise _runner_error(
-                "agent_failed",
-                f"{self.name} exited with code {child_code}: {detail}",
-                retryable=True,
-                receipt={
-                    "runner": self.name,
-                    "model": model,
-                    "exit_code": child_code,
-                    "duration_ms": int(run.get("durationMs") or duration_ms),
-                    "tool_calls": tool_calls,
-                    "session_id": session_id,
-                    "stop_reason": "failed",
-                    "limit_enforcement": dict(run.get("limitEnforcement") or {}),
-                },
-            )
+            detail = "\n".join(
+                part for part in (str(run.get("stderr") or ""), stderr, child_stdout) if part
+            ).strip()[-2000:]
+            error = classify_agent_process_error(detail)
+            receipt = {
+                "runner": self.name,
+                "model": model,
+                "exit_code": child_code,
+                "duration_ms": int(run.get("durationMs") or duration_ms),
+                "tool_calls": tool_calls,
+                "session_id": session_id,
+                "stop_reason": "failed",
+                "limit_enforcement": dict(run.get("limitEnforcement") or {}),
+            }
+            raise AgentRunnerError(error, receipt)
         if not final:
             raise _runner_error("agent_failed", f"{self.name} returned no final answer.", retryable=True)
         return AgentResponse(

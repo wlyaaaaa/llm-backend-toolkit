@@ -122,3 +122,38 @@ def classify_provider_error(status: int | None, payload: Any) -> ToolError:
         retryable=True,
         options=("retry-later", "handle-in-codex"),
     )
+
+
+def classify_agent_process_error(detail: str) -> ToolError:
+    """Normalize provider failures surfaced through an agent CLI process."""
+    combined = str(detail or "").lower()
+    if any(
+        token in combined
+        for token in ("arrearage", "allocationquota.freetieronly", "insufficient balance")
+    ):
+        return ToolError(
+            category="billing_unavailable",
+            summary="The requested cloud provider is unavailable because of its billing state.",
+            retryable=False,
+            options=("invoke:qwen-main-v1", "handle-in-codex", "report-billing-action"),
+        )
+    if any(token in combined for token in ("invalid_api_key", "invalid api key", "http 401", "status 401")):
+        return ToolError(
+            category="authentication_failed",
+            summary="The requested provider rejected its credential.",
+            retryable=False,
+            options=("repair-credential", "handle-in-codex"),
+        )
+    if any(token in combined for token in ("rate limit", "http 429", "status 429")):
+        return ToolError(
+            category="rate_limited",
+            summary="The requested provider is rate limited.",
+            retryable=True,
+            options=("retry-later", "handle-in-codex"),
+        )
+    return ToolError(
+        category="agent_failed",
+        summary="The selected agent process failed before returning a usable result.",
+        retryable=True,
+        options=("inspect-agent-run", "handle-in-codex"),
+    )

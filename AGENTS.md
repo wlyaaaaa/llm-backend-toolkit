@@ -9,6 +9,7 @@ This is a public, secret-free tool project. Collaborate with the owner in Simpli
 - Keep context compaction visible through receipts and keep reasoning output disabled by default.
 - Prefer result-side checks and compact artifacts over continuous process monitoring.
 - Use asynchronous `submit` plus `job` as the normal AI entry. Keep synchronous `invoke` as a low-level interface.
+- In agent mode, `data_factory` resolves to Codex CLI with an exact provider-bound profile and model. Cloud `qwen3.7-plus` is an explicitly unverified recommendation based on official Responses/Codex compatibility plus the version-bound local sibling bake-off; never describe it as a cloud bake-off result.
 - Keep native multimodal input, LocalOCR, and ChineseASR as distinct selectable routes.
 - Never bypass LocalGpuBroker or call an internal Ollama backend directly.
 - Require explicit `privacy.cloud_allowed=true` for all cloud-bound text, source excerpts, and media.
