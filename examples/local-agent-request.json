@@ -1,0 +1,41 @@
+{
+  "provider": "qwen-main-v1",
+  "task": {
+    "goal": "Process the staged records and make the supplied verifier pass.",
+    "instructions": [
+      "Preserve immutable-source lineage and uncertainty.",
+      "Write only derived outputs inside the supplied staging workspace.",
+      "Return only a brief final verification result."
+    ],
+    "inputs": [],
+    "expected_output": {
+      "format": "text"
+    }
+  },
+  "context": {
+    "mode": "compact",
+    "target_tokens": 4096,
+    "pinned": [
+      "Do not expose chain-of-thought."
+    ]
+  },
+  "reasoning": {
+    "mode": "off"
+  },
+  "privacy": {
+    "cloud_allowed": false
+  },
+  "execution": {
+    "mode": "agent",
+    "runner": "data_factory",
+    "workspace": "C:/staging/job-001",
+    "policy": "workspace-write",
+    "cache_key": "raw-sha256:<replace-with-real-input-hash>",
+    "model": "qwen-main-v1",
+    "budget": {
+      "timeout_seconds": 900,
+      "max_steps": 30,
+      "max_tool_calls": 120
+    }
+  }
+}

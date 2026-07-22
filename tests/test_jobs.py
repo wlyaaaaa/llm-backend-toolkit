@@ -116,6 +116,73 @@ class JobStoreTests(unittest.TestCase):
             self.assertEqual("blocked", duplicate["status"])
             self.assertIn("retry-with-force", duplicate["decision"]["options"])
 
+    def test_agent_job_monitor_deadline_uses_the_explicit_wall_budget(self):
+        request = {
+            "provider": "qwen-main-v1",
+            "task": {"goal": "g"},
+            "execution": {
+                "mode": "agent",
+                "runner": "data_factory",
+                "workspace": "C:/work",
+                "budget": {"timeout_seconds": 1800},
+            },
+        }
+
+        self.assertEqual(1920, JobStore._timeout_seconds(request))
+
+    def test_mutable_agent_workspace_is_not_cached_without_an_explicit_cache_key(self):
+        with tempfile.TemporaryDirectory() as temp:
+            spawned = []
+            store = JobStore(Path(temp), spawner=lambda job_id, _root: spawned.append(job_id))
+            request = {
+                "provider": "qwen-main-v1",
+                "task": {"goal": "g"},
+                "execution": {"mode": "agent", "workspace": "C:/staging"},
+            }
+            first = store.submit(request)
+            store.complete(first["job_id"], {"status": "ok", "output": "done"})
+
+            second = store.submit(request)
+
+            self.assertFalse(first["cacheable"])
+            self.assertNotEqual(first["job_id"], second["job_id"])
+            self.assertEqual(2, len(spawned))
+
+    def test_agent_cache_requires_a_caller_supplied_input_fingerprint(self):
+        with tempfile.TemporaryDirectory() as temp:
+            spawned = []
+            store = JobStore(Path(temp), spawner=lambda job_id, _root: spawned.append(job_id))
+            request = {
+                "provider": "qwen-main-v1",
+                "task": {"goal": "g"},
+                "execution": {"mode": "agent", "workspace": "C:/staging", "cache_key": "raw-sha256:abc"},
+            }
+            first = store.submit(request)
+            store.complete(first["job_id"], {"status": "ok", "output": "done"})
+
+            second = store.submit(request)
+
+            self.assertTrue(first["cacheable"])
+            self.assertEqual("cache_hit", second["status"])
+            self.assertEqual(1, len(spawned))
+
+    def test_mutable_file_references_are_not_cached_without_a_content_fingerprint(self):
+        with tempfile.TemporaryDirectory() as temp:
+            spawned = []
+            store = JobStore(Path(temp), spawner=lambda job_id, _root: spawned.append(job_id))
+            request = {
+                "provider": "qwen-main-v1",
+                "task": {"goal": "g", "sources": [{"id": "data", "path": "C:/mutable/data.jsonl"}]},
+            }
+            first = store.submit(request)
+            store.complete(first["job_id"], {"status": "ok", "output": "done"})
+
+            second = store.submit(request)
+
+            self.assertFalse(first["cacheable"])
+            self.assertNotEqual(first["job_id"], second["job_id"])
+            self.assertEqual(2, len(spawned))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,9 @@
+{"source_id":"chat-a","event_id":"evt-001","event_time":"2026-01-02T03:04:05+08:00","observed_at":"2026-01-02T03:05:00+08:00","kind":"note","text":"Alpha record"}
+{"source_id":"chat-a","event_id":"evt-001","event_time":"2026-01-02T03:04:05+08:00","observed_at":"2026-01-02T03:05:00+08:00","kind":"note","text":"Alpha record"}
+{"source_id":"chat-a","event_id":"evt-002","event_time":"2026-02-03T10:00:00Z","observed_at":"2026-02-03T10:01:00Z","kind":"decision","text":"Use plan A"}
+{"source_id":"chat-a","event_id":"evt-002","event_time":"2026-02-03T10:00:00Z","observed_at":"2026-02-03T10:02:00Z","kind":"decision","text":"Use plan B"}
+{"source_id":"sms-a","event_id":"evt-003","event_time":"2026-03-04T11:00:00+08:00","observed_at":"2026-03-04T11:00:10+08:00","kind":"message","text":"Your verification code is 834921"}
+{"source_id":"import-a","event_id":"evt-004","event_time":null,"observed_at":"2026-04-05T12:00:00+08:00","kind":"legacy","text":"Date was absent in source"}
+{"source_id":"import-a","event_id":"evt-005","event_time":"2026-05-06 13:00:00","observed_at":"2026-05-06T13:01:00+08:00","kind":"legacy","text":"Timezone was absent"}
+{"source_id":"import-a","event_id":"evt-006","event_time":"2026-06-07T14:00:00+08:00","observed_at":"2026-06-07T14:01:00+08:00","kind":"legacy","text":"Damaged byte marker: �"}
+{"source_id":"chat-b","event_id":"evt-007","event_time":"2026-07-08T15:00:00+08:00","observed_at":"2026-07-08T15:01:00+08:00","kind":"note","text":"中文记录保持原样"}

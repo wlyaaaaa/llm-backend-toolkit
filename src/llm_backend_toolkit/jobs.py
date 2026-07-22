@@ -95,7 +95,14 @@ class JobStore:
 
     def submit(self, request: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
         digest = self.request_digest(request)
-        job_id = self._new_attempt_id(digest) if force else digest[:24]
+        execution = request.get("execution") or {}
+        is_agent = str(execution.get("mode") or "direct") == "agent"
+        task = request.get("task") or {}
+        media = request.get("media") or {}
+        has_mutable_references = bool(task.get("sources") or media.get("attachments"))
+        explicit_cache_key = str(execution.get("cache_key") or request.get("cache_key") or "").strip()
+        cacheable = (not is_agent and not has_mutable_references) or bool(explicit_cache_key)
+        job_id = self._new_attempt_id(digest) if force or not cacheable else digest[:24]
         job_dir = self._job_dir(job_id)
         state_path = job_dir / "state.json"
         if state_path.is_file():
@@ -137,6 +144,7 @@ class JobStore:
                 "created_utc": _utc_now(),
                 "updated_utc": _utc_now(),
                 "monitor_until_utc": _utc_after(self._timeout_seconds(request)),
+                "cacheable": cacheable,
             },
         )
         try:
@@ -150,6 +158,7 @@ class JobStore:
             "job_status": "queued",
             "poll_after_ms": 2000,
             "forced": force,
+            "cacheable": cacheable,
             "monitor_until_utc": self._read_state(job_id).get("monitor_until_utc"),
         }
 
@@ -235,6 +244,14 @@ class JobStore:
 
     @staticmethod
     def _timeout_seconds(request: dict[str, Any]) -> int:
+        execution = request.get("execution") or {}
+        if str(execution.get("mode") or "direct") == "agent":
+            budget = execution.get("budget") or {}
+            try:
+                wall = int(budget.get("timeout_seconds") or 900)
+            except (TypeError, ValueError):
+                wall = 900
+            return max(150, min(86_520, wall + 120))
         media = request.get("media") or {}
         attachments = list(media.get("attachments") or [])
         exact_image_purposes = {"exact_text", "table", "formula", "scan", "layout", "coordinates"}

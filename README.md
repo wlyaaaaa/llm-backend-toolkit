@@ -16,6 +16,7 @@
 - 异步 Smart Job：提交立即返回，顶级模型无需被长时间命令阻塞。
 - 欠费、权限、GPU 占用等错误只返回裁决选项，不自动调用另一个模型。
 - 任何云端调用都要求显式 `privacy.cloud_allowed=true`，包括 task 文本、source 片段与媒体。
+- 本地 agent mode 通过 aicli 的 Windows 外层沙箱调用 Qwen Code、OpenCode、Codex CLI 或 Claude Code；稳定别名 `data_factory` 固定指向已验收的 Codex CLI，不做运行时猜测。
 
 ## 安装
 
@@ -48,8 +49,23 @@ python -m venv .venv
 
 `invoke` 是同步底层接口，不是 Codex 调用本地大模型的默认入口。
 
-相同请求默认复用已完成结果；只有明确需要一次新尝试时才使用 `submit --force`。
+不含外部文件引用的相同请求默认复用已完成结果；agent workspace、source 或 media 等可变引用默认不缓存。只有调用者提供绑定真实内容 hash 的 `cache_key` 才允许这类请求命中缓存。明确需要一次新尝试时使用 `submit --force`。
 回执同时给出 `monitor_until_utc`。任务超过硬期限会显示 `stale`、停止建议轮询，并把重试或接管交回顶级模型。
+
+## 本地数据工厂智能体
+
+默认请求见 [examples/local-agent-request.json](examples/local-agent-request.json)。关键字段：
+
+- `execution.mode=agent`
+- `execution.runner=data_factory`（固定为 Codex CLI + `qwen-main-v1`）
+- `execution.policy=workspace-write|read-only`
+- `execution.budget`（墙钟上限是所有 harness 的硬边界；step/tool-call 上限仅在上游 CLI 支持时强制）
+
+`workspace-write` 必须指向隔离 worktree 或暂存任务目录。canonical raw、唯一事实源和不可恢复数据应留在可写根之外；智能体只产生 derived、checkpoint 和 receipt。可变工作区默认不复用已完成 job；只有调用者提供绑定输入内容 hash 的 `execution.cache_key` 才允许 cache hit。
+
+显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或 chain-of-thought。
+
+本机 35B 验收、选择理由和能力边界见 [数据工厂智能体验收报告](docs/agent-data-factory.md)。
 
 ## 通过 source 引用减少 Codex 上下文
 
@@ -102,6 +118,7 @@ LLM_TOOLKIT_CHINESEASR_ENTRY
 
 本地 Ollama 默认访问 `http://127.0.0.1:32100`。该入口应由机器自己的 GPU broker 管理。
 专项媒体在后台 worker 内串行完成；OCR 使用 `-StopAfter` 释放 GPU 后才启动本地 Qwen，ASR 完成并释放 Broker 租约后才进入模型阶段。
+agent mode 的默认 Codex CLI 会用原生 `--image` 附加一般图片；OpenCode 使用文件附件。精确 OCR 仍走 LocalOCR，音频仍走 ChineseASR。Qwen Code/Claude Code 对本地图片的 CLI 传递能力标为有限制，不把“能看到路径”冒充原生多模态已验证。
 
 ## 云端千问
 
@@ -139,6 +156,7 @@ LLM_TOOLKIT_QWEN_BASE_URL
 - 不自动 fallback。
 - 不持续监控模型思考过程。
 - 不提供长期记忆或 Agent loop。
+- 不让低级模型决定云端授权、fallback、公开发布、不可逆操作或验收结论。
 - 不保存 API Key、原始媒体、OCR/ASR 私人结果或完整提示词日志。
 - 不建立新的 GPU 锁、常驻端口或 Windows 计划任务。
 
