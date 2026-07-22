@@ -65,7 +65,18 @@ python -m venv .venv
 
 显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或 chain-of-thought。
 
-本机 35B 验收、选择理由和能力边界见 [数据工厂智能体验收报告](docs/agent-data-factory.md)。
+本机 35B 的 PersonalOS 风格小型清洗专项、选择理由和严格适用范围见 [数据工厂智能体验收报告](docs/agent-data-factory.md)。该报告不代表通用智能排名。
+
+## 四 harness 通用代理基准
+
+`general_agent_v1` 将 PersonalOS 专项题之外的能力拆成三个可复现任务：证据推理与抗提示注入、代码修复、约束工作流规划。隐藏 verifier 不进入智能体可写工作区，安全和正确性是门禁，只有同分才比较时间。
+
+```powershell
+python scripts/run_general_agent_benchmark.py --list
+python scripts/run_general_agent_benchmark.py
+```
+
+默认依次串行运行 Codex CLI、Claude Code、Qwen Code 与 OpenCode，均使用显式本地 `qwen-main-v1`。结果只对记录的 suite fingerprint、模型 digest、CLI 版本、沙箱合同和 Toolkit 提交有效；它比较的是“模型 + harness”的代理表现，不生成永久通用智商分。
 
 ## 通过 source 引用减少 Codex 上下文
 

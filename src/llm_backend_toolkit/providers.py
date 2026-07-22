@@ -173,7 +173,28 @@ class OllamaProvider:
             method="POST",
         )
         show = _read_json_response(show_request, 15)
+        tags_request = urllib.request.Request(f"{self.base_url}/api/tags", method="GET")
+        tags = _read_json_response(tags_request, 10)
+        version_request = urllib.request.Request(f"{self.base_url}/api/version", method="GET")
+        version = _read_json_response(version_request, 10)
         details = show.get("details") or {}
+        aliases = {self.model, f"{self.model}:latest"}
+        aliases.add(self.model.removesuffix(":latest"))
+        tag = next(
+            (
+                item
+                for item in tags.get("models") or []
+                if str(item.get("name") or item.get("model") or "") in aliases
+                or str(item.get("name") or item.get("model") or "").removesuffix(":latest")
+                == self.model.removesuffix(":latest")
+            ),
+            {},
+        )
+        model_info = show.get("model_info") or {}
+        context_length = next(
+            (value for key, value in model_info.items() if str(key).endswith(".context_length")),
+            None,
+        )
         return {
             "provider": self.model,
             "cloud": False,
@@ -186,8 +207,12 @@ class OllamaProvider:
                 "parent_model": details.get("parent_model"),
                 "parameter_size": details.get("parameter_size"),
                 "quantization": details.get("quantization_level"),
+                "digest": tag.get("digest"),
+                "modified_at": tag.get("modified_at"),
+                "context_length": context_length,
                 "capabilities": list(show.get("capabilities") or []),
             },
+            "runtime": {"ollama_version": version.get("version")},
             "live_call_performed": False,
         }
 

@@ -72,6 +72,44 @@ class ProviderContractTests(unittest.TestCase):
         self.assertEqual("0", payload["keep_alive"])
         self.assertEqual("local", response.content)
 
+    def test_ollama_status_reports_version_bound_model_identity(self):
+        payloads = {
+            "/_gpu_broker/status": {"ok": True, "lease": None, "active_ollama_requests": 0},
+            "/api/show": {
+                "capabilities": ["completion", "vision"],
+                "details": {
+                    "parent_model": "qwen3.6:35b",
+                    "parameter_size": "36.0B",
+                    "quantization_level": "Q4_K_M",
+                },
+                "model_info": {"qwen35moe.context_length": 262144},
+            },
+            "/api/tags": {
+                "models": [
+                    {
+                        "name": "qwen-main-v1:latest",
+                        "digest": "a" * 64,
+                        "modified_at": "2026-07-03T08:14:44-07:00",
+                    }
+                ]
+            },
+            "/api/version": {"version": "0.32.1"},
+        }
+
+        def fake_urlopen(request, timeout):
+            del timeout
+            path = request.full_url.removeprefix("http://127.0.0.1:32100")
+            return FakeHttpResponse(payloads[path])
+
+        provider = OllamaProvider(base_url="http://127.0.0.1:32100")
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            status = provider.status()
+
+        self.assertEqual("a" * 64, status["model"]["digest"])
+        self.assertEqual("Q4_K_M", status["model"]["quantization"])
+        self.assertEqual(262144, status["model"]["context_length"])
+        self.assertEqual("0.32.1", status["runtime"]["ollama_version"])
+
 
 if __name__ == "__main__":
     unittest.main()

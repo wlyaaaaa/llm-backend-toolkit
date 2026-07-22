@@ -1,13 +1,17 @@
-# 本地 35B 数据工厂智能体验收报告
+# PersonalOS 风格小型数据清洗专项验收报告
 
 状态：**PASS**
 
 验收日期：2026-07-22（UTC）
 默认路由：`data_factory` → `codex-cli` → aicli `codex-ollama-main` → LocalGpuBroker `127.0.0.1:32100` → `qwen-main-v1`（Qwen3.6 35B）
 
+适用范围：仅覆盖本报告中的 9 行合成 JSONL、任务合同、verifier、模型身份和 CLI/沙箱版本；不等于 PersonalOS 完整数据工厂验收，也不外推到其他场景。
+
+版本锚点：`qwen-main-v1:latest` digest `46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a`，父模型 `qwen3.6:35b`，`Q4_K_M`，262144 context；Toolkit `628e25c`，aicli `9674a94`。模型 alias/digest、CLI 版本、沙箱合同或任务提交发生实质变化后，本报告只能作为历史基线。
+
 ## 结论
 
-默认只选 Codex CLI。它是四个 harness 中唯一同时满足“进程正常退出”和“确定性验收 21/21”的候选，并且比同样生成 21/21 产物但最终 exit 1 的 Claude Code 快约 53.4%。Qwen Code 与 OpenCode 保留为显式实验候选，不参与自动路由。
+在本专项任务内默认只选 Codex CLI。它是四个 harness 中唯一同时满足“进程正常退出”和“确定性验收 21/21”的候选，并且比同样生成 21/21 产物但最终 exit 1 的 Claude Code 快约 53.4%。这证明当前 Codex CLI harness 最适合承载该任务，不证明 Codex、Claude、Qwen Code 或 OpenCode 的通用智能高低。
 
 顶级模型不需要在日常调用前重复本报告。只有模型 alias/digest、CLI 主版本、沙箱协议、任务契约发生变化，或正式结果出现异常时，才建议做一个小样本复核。
 
@@ -26,7 +30,9 @@
 
 这是 harness + 本机模型 + 当前任务的结果，不是四个上游项目的通用质量排名。时间已进入决策：Claude 虽生成正确文件，但比 Codex 慢约 2.15 倍且退出失败；因此没有理由把它设为默认。
 
-## 能力边界
+## 本专项能够证明的能力边界
+
+直接证据只证明：当前模型经 Codex CLI 能在明确合同和独立 verifier 下编写并运行这个小型确定性清洗器。下列“适合交给”是工具的保守委派候选范围；分类、抽取、多模态和长批次仍应按新场景做小型校准，不能冒充已由本题全部证明。
 
 适合交给本地 35B：
 
