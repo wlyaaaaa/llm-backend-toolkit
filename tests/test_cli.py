@@ -24,6 +24,14 @@ class CliContractTests(unittest.TestCase):
         self.assertTrue(args.force)
         self.assertTrue(args.cloud_allowed)
 
+    def test_status_accepts_an_arbitrary_backend_id(self):
+        args = build_parser().parse_args(["status", "--backend", "future-platform-v2"])
+        self.assertEqual("future-platform-v2", args.backend)
+
+    def test_backend_catalog_is_a_first_class_metadata_command(self):
+        args = build_parser().parse_args(["backends"])
+        self.assertEqual("backends", args.command)
+
 
 if __name__ == "__main__":
     unittest.main()

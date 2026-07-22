@@ -301,7 +301,7 @@ class AgentExecutionTests(unittest.TestCase):
 
             self.assertEqual("billing_unavailable", raised.exception.error.category)
             self.assertEqual("top_model", raised.exception.error.decision_owner)
-            self.assertIn("invoke:qwen-main-v1", raised.exception.error.options)
+            self.assertIn("invoke:local-default", raised.exception.error.options)
 
 
 if __name__ == "__main__":

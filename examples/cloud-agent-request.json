@@ -1,5 +1,5 @@
 {
-  "provider": "qwen3.7-plus",
+  "backend": "cloud-qwen-plus",
   "task": {
     "goal": "Clean the staged records and write derived output only",
     "instructions": [

@@ -11,7 +11,7 @@ class ErrorClassificationTests(unittest.TestCase):
                 self.assertEqual("billing_unavailable", error.category)
                 self.assertFalse(error.retryable)
                 self.assertEqual("top_model", error.decision_owner)
-                self.assertIn("invoke:qwen-main-v1", error.options)
+                self.assertIn("invoke:local-default", error.options)
 
     def test_auth_and_content_errors_do_not_masquerade_as_billing(self):
         auth = classify_provider_error(401, {"error": {"code": "invalid_api_key"}})

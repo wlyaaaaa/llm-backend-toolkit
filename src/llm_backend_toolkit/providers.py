@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .backends import BackendRegistry
 from .errors import ProviderCallError, ToolError, classify_provider_error
 
 
@@ -52,22 +53,34 @@ def _image_data_url(path_value: str) -> str:
     return f"data:{mime};base64,{encoded}"
 
 
-class Qwen37PlusProvider:
-    cloud = True
-    supports_vision = True
-
-    def __init__(self, *, base_url: str | None = None, api_key: str | None = None, timeout: int = 120) -> None:
-        self.model = "qwen3.7-plus"
-        self.base_url = (base_url or os.environ.get("LLM_TOOLKIT_QWEN_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
-        self.api_key = api_key if api_key is not None else os.environ.get("DASHSCOPE_API_KEY", "")
+class OpenAIChatProvider:
+    def __init__(
+        self,
+        *,
+        model: str,
+        base_url: str,
+        api_key: str | None = None,
+        api_key_env: str = "",
+        timeout: int = 120,
+        cloud: bool = True,
+        supports_vision: bool = False,
+        thinking_field: str = "",
+    ) -> None:
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.api_key_env = api_key_env
+        self.api_key = api_key if api_key is not None else os.environ.get(api_key_env, "")
         self.timeout = timeout
+        self.cloud = cloud
+        self.supports_vision = supports_vision
+        self.thinking_field = thinking_field
 
     def invoke(self, prompt: str, native_images: list[str], reasoning_mode: str) -> ProviderResponse:
         if not self.api_key:
             raise ProviderCallError(
                 ToolError(
                     category="authentication_failed",
-                    summary="DASHSCOPE_API_KEY is not configured.",
+                    summary=f"{self.api_key_env or 'Provider API key'} is not configured.",
                     retryable=False,
                     options=("repair-credential", "handle-in-codex"),
                 )
@@ -83,8 +96,9 @@ class Qwen37PlusProvider:
             "model": self.model,
             "messages": [{"role": "user", "content": content}],
             "stream": False,
-            "enable_thinking": reasoning_mode != "off",
         }
+        if self.thinking_field:
+            payload[self.thinking_field] = reasoning_mode != "off"
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             f"{self.base_url}/chat/completions",
@@ -110,10 +124,26 @@ class Qwen37PlusProvider:
     def status(self) -> dict[str, Any]:
         return {
             "provider": self.model,
-            "cloud": True,
+            "cloud": self.cloud,
             "configured": bool(self.api_key),
             "live_call_performed": False,
         }
+
+
+class Qwen37PlusProvider(OpenAIChatProvider):
+    def __init__(self, *, base_url: str | None = None, api_key: str | None = None, timeout: int = 120) -> None:
+        super().__init__(
+            model="qwen3.7-plus",
+            base_url=base_url
+            or os.environ.get("LLM_TOOLKIT_QWEN_BASE_URL")
+            or "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            api_key=api_key,
+            api_key_env="DASHSCOPE_API_KEY",
+            timeout=timeout,
+            cloud=True,
+            supports_vision=True,
+            thinking_field="enable_thinking",
+        )
 
 
 class OllamaProvider:
@@ -217,8 +247,63 @@ class OllamaProvider:
         }
 
 
-def default_providers() -> dict[str, Any]:
-    return {
-        "qwen3.7-plus": Qwen37PlusProvider(),
-        "qwen-main-v1": OllamaProvider(),
-    }
+class AgentOnlyProvider:
+    def __init__(self, *, model: str, cloud: bool, supports_vision: bool) -> None:
+        self.model = model
+        self.cloud = cloud
+        self.supports_vision = supports_vision
+
+    def invoke(self, prompt: str, native_images: list[str], reasoning_mode: str) -> ProviderResponse:
+        raise ProviderCallError(
+            ToolError(
+                category="direct_mode_unavailable",
+                summary="This backend is configured for agent execution only.",
+                retryable=False,
+                options=("use-agent-mode", "handle-in-codex"),
+            )
+        )
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "provider": self.model,
+            "cloud": self.cloud,
+            "configured": True,
+            "direct_mode": False,
+            "live_call_performed": False,
+        }
+
+
+def provider_from_config(config: dict[str, Any]) -> Any:
+    adapter = str(config.get("adapter") or "")
+    model = str(config.get("model") or "")
+    cloud = bool(config.get("cloud"))
+    supports_vision = bool(config.get("supports_vision"))
+    if adapter == "ollama":
+        base_url = os.environ.get(str(config.get("base_url_env") or "")) or str(
+            config.get("base_url_default") or "http://127.0.0.1:32100"
+        )
+        return OllamaProvider(base_url=base_url, model=model, timeout=int(config.get("timeout_seconds") or 900))
+    if adapter == "openai-chat":
+        base_url = os.environ.get(str(config.get("base_url_env") or "")) or str(config.get("base_url_default") or "")
+        if not base_url:
+            raise ValueError("openai-chat backend requires a base URL")
+        parsed = urllib.parse.urlparse(base_url)
+        if cloud and parsed.scheme.lower() != "https":
+            raise ValueError("Cloud openai-chat backend requires an HTTPS base URL")
+        return OpenAIChatProvider(
+            model=model,
+            base_url=base_url,
+            api_key_env=str(config.get("api_key_env") or ""),
+            timeout=int(config.get("timeout_seconds") or 120),
+            cloud=cloud,
+            supports_vision=supports_vision,
+            thinking_field=str(config.get("thinking_field") or ""),
+        )
+    if adapter == "agent-only":
+        return AgentOnlyProvider(model=model, cloud=cloud, supports_vision=supports_vision)
+    raise ValueError(f"Unsupported provider adapter: {adapter}")
+
+
+def default_providers(registry: BackendRegistry | None = None) -> dict[str, Any]:
+    active = registry or BackendRegistry.load()
+    return {backend_id: provider_from_config(config) for backend_id, config in active.backends.items()}

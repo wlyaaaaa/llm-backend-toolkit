@@ -6,7 +6,7 @@
 
 ## 核心能力
 
-- 仅支持两个显式后端：`qwen3.7-plus` 与本地 `qwen-main-v1`。
+- 通过版本化 backend registry 接入可替换的本地模型和 API 平台；稳定角色 `local-default` 默认只解析到本地后端。
 - 默认确定性上下文压缩，返回压缩前后估算和是否有损。
 - token 估算区分中日韩字符与 ASCII，压缩循环按 token 预算收敛。
 - 可直接引用 UTF-8 文本 source；工具在内部检索相关片段，Codex 无需先读取整份材料。
@@ -16,7 +16,7 @@
 - 异步 Smart Job：提交立即返回，顶级模型无需被长时间命令阻塞。
 - 欠费、权限、GPU 占用等错误只返回裁决选项，不自动调用另一个模型。
 - 任何云端调用都要求显式 `privacy.cloud_allowed=true`，包括 task 文本、source 片段与媒体。
-- agent mode 通过 aicli 的 Windows 外层沙箱调用原生 CLI；稳定别名 `data_factory` 固定指向 Codex CLI，再按调用者显式选择的 provider 锁定 Profile 与模型，不做运行时猜测或 fallback。
+- agent mode 通过 aicli 的 Windows 外层沙箱调用原生 CLI；`data_factory` 从 registry 解析精确 Profile 与模型，不做运行时猜测或 fallback。
 
 ## 安装
 
@@ -26,6 +26,19 @@ python -m venv .venv
 ```
 
 项目运行时无第三方 Python 依赖。
+
+## Backend registry 与主动发现
+
+查看当前安全元数据不会发模型请求：
+
+```powershell
+.\.venv\Scripts\llm-backend-toolkit.exe backends
+.\.venv\Scripts\llm-backend-toolkit.exe status
+```
+
+内置注册表位于包内 `default_backends.json`；设置 `LLM_TOOLKIT_BACKEND_REGISTRY` 可让机器自己的 JSON 注册表成为运行时事实源。请求省略 `backend` 时只使用注册表的本地 `default_backend`，不会自动选择云端。旧字段 `provider` 和旧 Qwen ID 仅作为兼容 alias。
+
+注册表把 backend ID、adapter、模型、端点环境变量、数据去向、AICLI Profile、route、runner 与版本绑定证据分离。替换 Ollama 模型、OpenAI Chat 兼容 API 或已有 AICLI Profile 只需改注册表；route 名称可以自定义并映射到已实现的 runner adapter，全新 wire protocol 或全新智能体 CLI 才需要增加代码 adapter。已验收模型的 digest/父模型一旦不匹配，`live_verified` 自动失效并阻止沿用旧验收。注册表禁止内嵌凭据；云端 `openai-chat` 地址必须使用 HTTPS。
 
 ## AI 默认入口：异步任务
 
@@ -50,14 +63,14 @@ python -m venv .venv
 `invoke` 是同步底层接口，不是 Codex 调用本地大模型的默认入口。
 
 不含外部文件引用的相同请求默认复用已完成结果；agent workspace、source 或 media 等可变引用默认不缓存。只有调用者提供绑定真实内容 hash 的 `cache_key` 才允许这类请求命中缓存。明确需要一次新尝试时使用 `submit --force`。
-回执同时给出 `monitor_until_utc`。任务超过硬期限会显示 `stale`、停止建议轮询，并把重试或接管交回顶级模型。
+回执同时给出 `recommended_check_utc` 与 `monitor_until_utc`。初次建议等待 30-60 秒，过早读取后指数退避；任务超过硬期限会显示 `stale`、停止建议轮询，并把重试或接管交回顶级模型。
 
 ## 数据工厂智能体
 
 默认请求见 [examples/local-agent-request.json](examples/local-agent-request.json)。关键字段：
 
 - `execution.mode=agent`
-- `execution.runner=data_factory`（可省略；固定为 Codex CLI，并按 provider 锁定精确 Profile/模型）
+- `execution.runner=data_factory`（可省略；从 backend registry 锁定精确 Profile/模型）
 - `execution.policy=workspace-write|read-only`
 - `execution.budget`（墙钟上限是所有 harness 的硬边界；step/tool-call 上限仅在上游 CLI 支持时强制）
 
@@ -65,8 +78,8 @@ python -m venv .venv
 
 显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或 chain-of-thought。
 
-本地 `qwen-main-v1` 的默认目标是 `codex-ollama-main + qwen-main-v1`，已经过本机版本绑定验收。云端 `qwen3.7-plus` 的默认目标是 `codex-qwen-paygo + qwen3.7-plus`；这是根据阿里云官方 Codex/Responses 兼容性和同系本地模型的 harness 结果形成的**未实测推荐**，不是云端四 harness 排名。云端 Agent 请求仍须显式设置 `privacy.cloud_allowed=true`。`claude-code` 可作为顶级模型显式选择的未验收云端覆盖；没有精确云端 Profile 的 Qwen Code/OpenCode 会失败关闭。
-`status` 会在不发模型请求的情况下返回 `agent_default`、支持的 runner、路由依据和 `live_verified`；实际任务回执同时记录精确 Profile、模型与是否采用默认。
+当前 `local-default` 解析到 `codex-ollama-main + qwen-main-v1`，已经过本机版本绑定验收。当前 `cloud-qwen-plus` 解析到 `codex-qwen-paygo + qwen3.7-plus`；这是**未实测推荐**。将来注册表可以替换两者，而历史报告不会自动继承到新指纹。
+`status` 会在不发模型生成请求的情况下返回当前 backend、模型指纹、agent 默认路由、证据状态和支持的 runner；实际任务回执同时记录精确 Profile、模型与是否采用默认。
 
 云端示例见 [examples/cloud-agent-request.json](examples/cloud-agent-request.json)。普通单次摘要、抽取和结构化生成继续使用 `execution.mode=direct`，避免为不需要文件/命令循环的任务增加 Agent 调用成本。
 
@@ -91,7 +104,7 @@ python scripts/run_general_agent_benchmark.py
 
 ```json
 {
-  "provider": "qwen-main-v1",
+  "backend": "local-default",
   "task": {
     "goal": "找出设计中与欠费裁决有关的边界",
     "instructions": ["只依据提供的 source"],
@@ -138,7 +151,7 @@ LLM_TOOLKIT_CHINESEASR_ENTRY
 专项媒体在后台 worker 内串行完成；OCR 使用 `-StopAfter` 释放 GPU 后才启动本地 Qwen，ASR 完成并释放 Broker 租约后才进入模型阶段。
 agent mode 的默认 Codex CLI 会用原生 `--image` 附加一般图片；OpenCode 使用文件附件。精确 OCR 仍走 LocalOCR，音频仍走 ChineseASR。Qwen Code/Claude Code 对本地图片的 CLI 传递能力标为有限制，不把“能看到路径”冒充原生多模态已验证。
 
-## 云端千问
+## 云端与其他 API 平台
 
 公开项目只读取：
 
@@ -147,8 +160,8 @@ DASHSCOPE_API_KEY
 LLM_TOOLKIT_QWEN_BASE_URL
 ```
 
-默认 model 固定为 `qwen3.7-plus`。测试套件不会发起真实云端调用；云端请求格式和错误分类使用 mock 验证。
-选择云端 provider 仍不等于授权传输；请求必须同时设置 `privacy.cloud_allowed=true`。云端 probe 还需显式传入 `--cloud-allowed`。
+当前公开示例是 `cloud-qwen-plus`，但 `openai-chat` adapter 可通过外部注册表接入其他兼容平台；只有全新协议才需要新增 adapter。API key 只写环境变量名，远程云端地址必须是 HTTPS。测试套件不会发起真实云端调用；云端请求格式和错误分类使用 mock 验证。
+选择任何云端 backend 仍不等于授权传输；请求必须同时设置 `privacy.cloud_allowed=true`。云端 probe 还需显式传入 `--cloud-allowed`。
 Agent 模式下 Toolkit 会把 Codex 原生参数显式锁定为 `--model qwen3.7-plus`，不会继承 AICLI 通用千问 Profile 的 Max 默认值。欠费会归一化为 `billing_unavailable` 并把本地调用、顶级模型接管或账务处理选项返回调用者，不会自动降级。
 
 百炼官方资料：
@@ -163,20 +176,30 @@ Agent 模式下 Toolkit 会把 Codex 原生参数显式锁定为 `--model qwen3.
 探测是顶级模型的候选工具，不是强制门禁：
 
 ```powershell
-.\.venv\Scripts\llm-backend-toolkit.exe probe --provider qwen-main-v1 --case instruction
-.\.venv\Scripts\llm-backend-toolkit.exe probe --provider qwen-main-v1 --case json
-.\.venv\Scripts\llm-backend-toolkit.exe probe --provider qwen-main-v1 --case context
-.\.venv\Scripts\llm-backend-toolkit.exe probe --provider qwen-main-v1 --case vision --attachment <image>
+.\.venv\Scripts\llm-backend-toolkit.exe probe --backend local-default --case instruction
+.\.venv\Scripts\llm-backend-toolkit.exe probe --backend local-default --case json
+.\.venv\Scripts\llm-backend-toolkit.exe probe --backend local-default --case context
+.\.venv\Scripts\llm-backend-toolkit.exe probe --backend local-default --case vision --attachment <image>
 ```
 
 建议只在首次重要使用、模型别名/digest 变化或结果异常时做小样本测试。
 探测命令同样只提交后台任务并立即返回 `job_id`，随后用 `job --id <job_id> --result` 读取结果。
 
+## 有界子对话
+
+默认只做一次任务。确需修正或追问时，在新请求中加入：
+
+```json
+"continuation": {"from_job_id": "<completed-job-id>", "max_turns": 3}
+```
+
+工具只携带上一轮紧凑结果预览与 receipt，默认最多 3 轮、硬上限 8 轮；它不依赖 Codex、Claude 或某家 API 的隐藏 session，因此更换模型和平台后仍可延续。`delegation_receipt` 记录后端压缩和按路径引用的数据规模，`delivery_receipt` 记录长结果预览避免回传的估算量；二者是成本判断证据，不冒充 Codex 计费 token。
+
 ## 不做什么
 
 - 不自动 fallback。
 - 不持续监控模型思考过程。
-- 不提供长期记忆或 Agent loop。
+- 不提供无限会话、长期隐式记忆或无界 Agent loop；只提供显式、有轮数上限的 portable continuation。
 - 不让低级模型决定云端授权、fallback、公开发布、不可逆操作或验收结论。
 - 不保存 API Key、原始媒体、OCR/ASR 私人结果或完整提示词日志。
 - 不建立新的 GPU 锁、常驻端口或 Windows 计划任务。

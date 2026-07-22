@@ -5,11 +5,11 @@ This is a public, secret-free tool project. Collaborate with the owner in Simpli
 ## Product boundary
 
 - Keep this a tool for a top-level model, not an autonomous agent.
-- The caller explicitly selects `qwen3.7-plus` or `qwen-main-v1`; never add automatic fallback.
+- Resolve backends from the versioned registry. Omitted selection means the registry's local-only `default_backend`; concrete model, endpoint, platform, and aicli Profile IDs must remain replaceable without changing core routing code. Never add automatic fallback.
 - Keep context compaction visible through receipts and keep reasoning output disabled by default.
 - Prefer result-side checks and compact artifacts over continuous process monitoring.
 - Use asynchronous `submit` plus `job` as the normal AI entry. Keep synchronous `invoke` as a low-level interface.
-- In agent mode, `data_factory` resolves to Codex CLI with an exact provider-bound profile and model. Cloud `qwen3.7-plus` is an explicitly unverified recommendation based on official Responses/Codex compatibility plus the version-bound local sibling bake-off; never describe it as a cloud bake-off result.
+- In agent mode, `data_factory` resolves through an exact backend-bound Profile and model from the registry. Accepted evidence is fingerprint-bound; a replaced model must invalidate old live verification. Cloud recommendations remain explicitly unverified unless their exact fingerprint was tested.
 - Keep native multimodal input, LocalOCR, and ChineseASR as distinct selectable routes.
 - Never bypass LocalGpuBroker or call an internal Ollama backend directly.
 - Require explicit `privacy.cloud_allowed=true` for all cloud-bound text, source excerpts, and media.

@@ -9,8 +9,12 @@
       "enum": ["ok", "partial", "blocked", "failed", "accepted", "running", "cache_hit"]
     },
     "output": {},
+    "backend": {"type": "object"},
+    "backend_catalog": {"type": "object"},
     "provider": {},
     "context_receipt": {"type": "object"},
+    "delegation_receipt": {"type": "object"},
+    "delivery_receipt": {"type": "object"},
     "source_receipt": {"type": "array"},
     "usage": {"type": "object"},
     "checks": {"type": "array"},
@@ -23,6 +27,8 @@
     "job_id": {"type": "string"},
     "job_status": {"type": "string"},
     "poll_after_ms": {"type": "integer"},
+    "recommended_check_utc": {"type": "string"},
+    "conversation": {"type": "object"},
     "monitor_until_utc": {"type": "string"}
   },
   "additionalProperties": true

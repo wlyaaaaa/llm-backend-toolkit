@@ -1,5 +1,5 @@
 {
-  "provider": "qwen-main-v1",
+  "backend": "local-default",
   "task": {
     "goal": "Calculate seven multiplied by eight.",
     "instructions": [

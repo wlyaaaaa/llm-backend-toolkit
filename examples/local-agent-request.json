@@ -1,5 +1,5 @@
 {
-  "provider": "qwen-main-v1",
+  "backend": "local-default",
   "task": {
     "goal": "Process the staged records and make the supplied verifier pass.",
     "instructions": [
@@ -31,7 +31,6 @@
     "workspace": "C:/staging/job-001",
     "policy": "workspace-write",
     "cache_key": "raw-sha256:<replace-with-real-input-hash>",
-    "model": "qwen-main-v1",
     "budget": {
       "timeout_seconds": 900,
       "max_steps": 30,

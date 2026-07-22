@@ -19,7 +19,7 @@ def _read_request(path_value: str) -> dict[str, Any]:
 
 
 def _probe_request(
-    provider: str,
+    backend: str | None,
     case: str,
     attachment: str | None,
     *,
@@ -68,7 +68,7 @@ def _probe_request(
     else:
         raise ValueError(f"Unsupported probe case: {case}")
     return {
-        "provider": provider,
+        **({"backend": backend} if backend else {}),
         "task": task,
         "context": {"mode": "compact", "target_tokens": 2048},
         "reasoning": {"mode": "off"},
@@ -96,9 +96,14 @@ def build_parser() -> argparse.ArgumentParser:
     job.add_argument("--result", action="store_true", help="Include the completed result")
     job.add_argument("--full-result", action="store_true", help="Return full output instead of an artifact preview")
     status = subparsers.add_parser("status", help="Read provider metadata without generation")
-    status.add_argument("--provider", required=True, choices=("qwen3.7-plus", "qwen-main-v1"))
+    status_target = status.add_mutually_exclusive_group()
+    status_target.add_argument("--backend", help="Backend registry ID; omitted means the local default")
+    status_target.add_argument("--provider", help="Deprecated backend alias")
+    subparsers.add_parser("backends", help="List safe backend registry metadata without generation")
     probe = subparsers.add_parser("probe", help="Run one bounded capability probe")
-    probe.add_argument("--provider", default="qwen-main-v1", choices=("qwen3.7-plus", "qwen-main-v1"))
+    probe_target = probe.add_mutually_exclusive_group()
+    probe_target.add_argument("--backend", help="Backend registry ID; omitted means the local default")
+    probe_target.add_argument("--provider", help="Deprecated backend alias")
     probe.add_argument("--case", required=True, choices=("instruction", "json", "context", "vision"))
     probe.add_argument("--attachment")
     probe.add_argument("--state-dir")
@@ -127,16 +132,19 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "status":
             toolkit = Toolkit()
-            result = toolkit.status(args.provider)
+            result = toolkit.status(args.backend or args.provider)
+        elif args.command == "backends":
+            result = Toolkit().catalog()
         elif args.command == "probe":
+            backend = args.backend or args.provider
             request = _probe_request(
-                args.provider,
+                backend,
                 args.case,
                 args.attachment,
                 cloud_allowed=args.cloud_allowed,
             )
             result = JobStore(args.state_dir).submit(request, force=args.force)
-            result["probe"] = {"provider": args.provider, "case": args.case, "scope": "bounded"}
+            result["probe"] = {"backend": backend or "local-default", "case": args.case, "scope": "bounded"}
         elif args.command == "_worker":
             store = JobStore(args.state_dir)
             try:

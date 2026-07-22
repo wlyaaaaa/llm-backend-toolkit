@@ -94,6 +94,7 @@ class JobStore:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def submit(self, request: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
+        request, conversation = self._prepare_continuation(request)
         digest = self.request_digest(request)
         execution = request.get("execution") or {}
         is_agent = str(execution.get("mode") or "direct") == "agent"
@@ -102,6 +103,7 @@ class JobStore:
         has_mutable_references = bool(task.get("sources") or media.get("attachments"))
         explicit_cache_key = str(execution.get("cache_key") or request.get("cache_key") or "").strip()
         cacheable = (not is_agent and not has_mutable_references) or bool(explicit_cache_key)
+        initial_poll_ms = self._initial_poll_ms(request)
         job_id = self._new_attempt_id(digest) if force or not cacheable else digest[:24]
         job_dir = self._job_dir(job_id)
         state_path = job_dir / "state.json"
@@ -127,7 +129,8 @@ class JobStore:
                 "status": "running" if state["job_status"] == "running" else "accepted",
                 "job_id": job_id,
                 "job_status": state["job_status"],
-                "poll_after_ms": 2000,
+                "poll_after_ms": initial_poll_ms,
+                "recommended_check_utc": _utc_after(initial_poll_ms // 1000),
                 "monitor_until_utc": state.get("monitor_until_utc"),
             }
 
@@ -140,11 +143,17 @@ class JobStore:
                 "job_id": job_id,
                 "request_digest": digest,
                 "job_status": "queued",
+                "backend": str(request.get("backend") or request.get("provider") or "local-default"),
                 "provider": str(request.get("provider") or ""),
                 "created_utc": _utc_now(),
                 "updated_utc": _utc_now(),
                 "monitor_until_utc": _utc_after(self._timeout_seconds(request)),
                 "cacheable": cacheable,
+                "poll_count": 0,
+                "initial_poll_ms": initial_poll_ms,
+                "conversation_root": (conversation or {}).get("root_job_id") or job_id,
+                "conversation_turn": (conversation or {}).get("turn") or 1,
+                "conversation_max_turns": (conversation or {}).get("max_turns"),
             },
         )
         try:
@@ -156,10 +165,12 @@ class JobStore:
             "status": "accepted",
             "job_id": job_id,
             "job_status": "queued",
-            "poll_after_ms": 2000,
+            "poll_after_ms": initial_poll_ms,
+            "recommended_check_utc": _utc_after(initial_poll_ms // 1000),
             "forced": force,
             "cacheable": cacheable,
             "monitor_until_utc": self._read_state(job_id).get("monitor_until_utc"),
+            **({"conversation": conversation} if conversation else {}),
         }
 
     def claim(self, job_id: str) -> dict[str, Any]:
@@ -213,17 +224,34 @@ class JobStore:
         state = self._read_state(job_id)
         stale = state.get("job_status") != "completed" and _is_expired(state.get("monitor_until_utc"))
         effective_status = "stale" if stale else state.get("job_status")
+        poll_after_ms = 0
+        if effective_status not in {"completed", "stale"}:
+            state["poll_count"] = int(state.get("poll_count") or 0) + 1
+            poll_after_ms = min(
+                self._initial_poll_ms_from_state(state) * (2 ** min(state["poll_count"], 3)),
+                300_000,
+            )
+            state["updated_utc"] = _utc_now()
+            _atomic_json(self._job_dir(job_id) / "state.json", state)
         output = {
             "status": "ok",
             "job_id": job_id,
             "job_status": effective_status,
+            "backend": state.get("backend") or state.get("provider"),
             "provider": state.get("provider"),
             "result_status": state.get("result_status"),
             "created_utc": state.get("created_utc"),
             "updated_utc": state.get("updated_utc"),
             "monitor_until_utc": state.get("monitor_until_utc"),
-            "poll_after_ms": 0 if effective_status in {"completed", "stale"} else 2000,
+            "poll_after_ms": poll_after_ms,
+            "conversation": {
+                "root_job_id": state.get("conversation_root") or job_id,
+                "turn": int(state.get("conversation_turn") or 1),
+                "max_turns": state.get("conversation_max_turns"),
+            },
         }
+        if poll_after_ms:
+            output["recommended_check_utc"] = _utc_after(poll_after_ms // 1000)
         if stale:
             output["error"] = {
                 "category": "job_stale",
@@ -266,8 +294,6 @@ class JobStore:
         )
         if specialist:
             return 5_400
-        if str(request.get("provider") or "") == "qwen3.7-plus":
-            return 300
         return 1_500
 
     def _write_output_artifact(self, job_dir: Path, value: Any) -> None:
@@ -296,7 +322,77 @@ class JobStore:
             "chars": len(text),
             "preview": text[: self.result_preview_chars],
         }
+        compact["delivery_receipt"] = {
+            "full_chars": len(text),
+            "preview_chars": min(len(text), self.result_preview_chars),
+            "estimated_top_model_tokens_avoided": max(
+                0, (len(text) - self.result_preview_chars + 3) // 4
+            ),
+            "full_result_returned": False,
+        }
         return compact
+
+    def _prepare_continuation(
+        self, request: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        prepared = json.loads(json.dumps(request, ensure_ascii=False))
+        continuation = prepared.get("continuation") or {}
+        parent_id = str(continuation.get("from_job_id") or "")
+        if not parent_id:
+            return prepared, None
+        parent_state = self._read_state(parent_id)
+        if parent_state.get("job_status") != "completed":
+            raise ValueError("Continuation requires a completed parent job")
+        requested_max = int(continuation.get("max_turns") or parent_state.get("conversation_max_turns") or 3)
+        inherited_max = parent_state.get("conversation_max_turns")
+        max_turns = min(requested_max, int(inherited_max)) if inherited_max else requested_max
+        if not 2 <= max_turns <= 8:
+            raise ValueError("Continuation max_turns must be between 2 and 8")
+        turn = int(parent_state.get("conversation_turn") or 1) + 1
+        if turn > max_turns:
+            raise ValueError("Continuation maximum turn limit reached")
+        parent = self.get(parent_id, include_result=True)
+        result = parent.get("result") or {}
+        output = result.get("output")
+        if isinstance(output, dict) and output.get("type") == "artifact":
+            preview = str(output.get("preview") or "")
+        elif isinstance(output, str):
+            preview = output[: self.result_preview_chars]
+        else:
+            preview = json.dumps(output, ensure_ascii=False, separators=(",", ":"))[: self.result_preview_chars]
+        task = prepared.setdefault("task", {})
+        inputs = list(task.get("inputs") or [])
+        inputs.append(
+            {
+                "type": "previous_result",
+                "job_id": parent_id,
+                "result_status": parent_state.get("result_status"),
+                "output_preview": preview,
+            }
+        )
+        task["inputs"] = inputs
+        conversation = {
+            "root_job_id": parent_state.get("conversation_root") or parent_id,
+            "from_job_id": parent_id,
+            "turn": turn,
+            "max_turns": max_turns,
+            "portable_compact_context": True,
+        }
+        return prepared, conversation
+
+    @staticmethod
+    def _initial_poll_ms(request: dict[str, Any]) -> int:
+        execution = request.get("execution") or {}
+        if str(execution.get("mode") or "direct") == "agent":
+            return 60_000
+        media = request.get("media") or {}
+        if media.get("attachments"):
+            return 60_000
+        return 30_000
+
+    @staticmethod
+    def _initial_poll_ms_from_state(state: dict[str, Any]) -> int:
+        return max(30_000, int(state.get("initial_poll_ms") or 30_000))
 
     @staticmethod
     def _artifact_payload(value: Any) -> tuple[str, str]:

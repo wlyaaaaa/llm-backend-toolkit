@@ -22,18 +22,18 @@ class ContractFileTests(unittest.TestCase):
         example = json.loads((ROOT / "examples" / "local-request.json").read_text(encoding="utf-8"))
         cloud_agent = json.loads((ROOT / "examples" / "cloud-agent-request.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(
-            ["qwen3.7-plus", "qwen-main-v1"],
-            request_schema["properties"]["provider"]["enum"],
-        )
+        self.assertEqual("string", request_schema["properties"]["backend"]["type"])
+        self.assertNotIn("enum", request_schema["properties"]["backend"])
+        self.assertNotIn("provider", request_schema["required"])
         execution = request_schema["properties"]["execution"]
         self.assertEqual(["direct", "agent"], execution["properties"]["mode"]["enum"])
-        self.assertIn("data_factory", execution["properties"]["runner"]["enum"])
+        self.assertNotIn("enum", execution["properties"]["runner"])
+        self.assertIn("pattern", execution["properties"]["runner"])
         self.assertIn("execution_receipt", response_schema["properties"])
         self.assertIn("accepted", response_schema["properties"]["status"]["enum"])
-        self.assertEqual("qwen-main-v1", example["provider"])
+        self.assertEqual("local-default", example["backend"])
         self.assertEqual("off", example["reasoning"]["mode"])
-        self.assertEqual("qwen3.7-plus", cloud_agent["provider"])
+        self.assertEqual("cloud-qwen-plus", cloud_agent["backend"])
         self.assertTrue(cloud_agent["privacy"]["cloud_allowed"])
         self.assertEqual("agent", cloud_agent["execution"]["mode"])
         self.assertNotIn("runner", cloud_agent["execution"])

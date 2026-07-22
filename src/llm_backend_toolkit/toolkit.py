@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 from .agent_runners import AgentRunnerError, default_runners
+from .backends import BackendRegistry, ResolvedBackend
 from .context import ContextOverflow, compact_task
 from .errors import MediaError, ProviderCallError, ToolError
 from .media import MediaProcessor
@@ -12,102 +13,46 @@ from .providers import default_providers
 from .sources import SourceLoader
 
 
-_AGENT_ROUTES: dict[str, dict[str, dict[str, Any]]] = {
-    "qwen-main-v1": {
-        "data_factory": {
-            "runner": "codex-cli",
-            "profile": "codex-ollama-main",
-            "model": "qwen-main-v1",
-            "basis": "accepted_local_bakeoff",
-            "live_verified": True,
-        },
-        "codex-cli": {
-            "runner": "codex-cli",
-            "profile": "codex-ollama-main",
-            "model": "qwen-main-v1",
-            "basis": "accepted_local_bakeoff",
-            "live_verified": True,
-        },
-        "claude-code": {
-            "runner": "claude-code",
-            "profile": "claude-ollama-main",
-            "model": "qwen-main-v1",
-            "basis": "version_bound_local_bakeoff",
-            "live_verified": True,
-        },
-        "qwen-code": {
-            "runner": "qwen-code",
-            "profile": "qwen-code-ollama-main",
-            "model": "qwen-main-v1",
-            "basis": "version_bound_local_bakeoff",
-            "live_verified": True,
-        },
-        "opencode": {
-            "runner": "opencode",
-            "profile": "opencode-ollama-main",
-            "model": "qwen-main-v1",
-            "basis": "version_bound_local_bakeoff",
-            "live_verified": True,
-        },
-    },
-    "qwen3.7-plus": {
-        "data_factory": {
-            "runner": "codex-cli",
-            "profile": "codex-qwen-paygo",
-            "model": "qwen3.7-plus",
-            "basis": "official_codex_responses_plus_local_sibling_bakeoff",
-            "live_verified": False,
-        },
-        "codex-cli": {
-            "runner": "codex-cli",
-            "profile": "codex-qwen-paygo",
-            "model": "qwen3.7-plus",
-            "basis": "official_codex_responses_plus_local_sibling_bakeoff",
-            "live_verified": False,
-        },
-        "claude-code": {
-            "runner": "claude-code",
-            "profile": "claude-qwen-paygo",
-            "model": "qwen3.7-plus",
-            "basis": "explicit_unverified_cloud_override",
-            "live_verified": False,
-        },
-    },
-}
-_KNOWN_AGENT_RUNNERS = frozenset(
-    {"data_factory", "codex-cli", "claude-code", "qwen-code", "opencode"}
-)
-
-
 class Toolkit:
     def __init__(
         self,
         *,
+        registry: BackendRegistry | None = None,
         providers: dict[str, Any] | None = None,
         media_processor: MediaProcessor | None = None,
         source_loader: SourceLoader | None = None,
         runners: dict[str, Any] | None = None,
     ) -> None:
-        self.providers = providers or default_providers()
+        self.registry = registry or BackendRegistry.load()
+        self.providers = default_providers(self.registry) if providers is None else providers
         self.media_processor = media_processor or MediaProcessor()
         self.source_loader = source_loader or SourceLoader()
         self.runners = default_runners() if runners is None else runners
 
+    def catalog(self) -> dict[str, Any]:
+        return {"status": "ok", "backend_catalog": self.registry.catalog()}
+
     def invoke(self, request: dict[str, Any]) -> dict[str, Any]:
-        provider_name = str(request.get("provider") or "")
-        provider = self.providers.get(provider_name)
-        if provider is None:
-            return self._blocked("invalid_request", f"Unsupported provider: {provider_name}")
+        try:
+            resolved, provider = self._resolve_provider(
+                str(request.get("backend") or request.get("provider") or "") or None
+            )
+        except ValueError as exc:
+            return self._blocked("invalid_request", str(exc))
 
         media_config = request.get("media") or {}
         attachments = list(media_config.get("attachments") or [])
         privacy = request.get("privacy") or {}
-        if bool(getattr(provider, "cloud", False)) and not bool(privacy.get("cloud_allowed")):
-            return self._blocked(
+        if bool(getattr(provider, "cloud", resolved.config.get("cloud", False))) and not bool(
+            privacy.get("cloud_allowed")
+        ):
+            result = self._blocked(
                 "privacy_block",
-                "Any cloud provider transfer requires privacy.cloud_allowed=true.",
-                options=("use-local-provider", "allow-cloud-explicitly", "handle-in-codex"),
+                "Any cloud backend transfer requires privacy.cloud_allowed=true.",
+                options=("use-local-backend", "allow-cloud-explicitly", "handle-in-codex"),
             )
+            result["backend"] = self._backend_receipt(resolved)
+            return result
 
         try:
             task = request.get("task") or {}
@@ -127,15 +72,21 @@ class Toolkit:
             supplemental.extend(sources.inputs)
             compacted = compact_task(request, supplemental)
         except MediaError as exc:
-            return self._from_error("blocked", exc.error)
+            result = self._from_error("blocked", exc.error)
+            result["backend"] = self._backend_receipt(resolved)
+            return result
         except ContextOverflow as exc:
-            return self._blocked(
+            result = self._blocked(
                 "context_overflow",
                 str(exc),
                 options=("increase-context-budget", "repack-in-codex"),
             )
+            result["backend"] = self._backend_receipt(resolved)
+            return result
         except (TypeError, ValueError) as exc:
-            return self._blocked("invalid_request", str(exc))
+            result = self._blocked("invalid_request", str(exc))
+            result["backend"] = self._backend_receipt(resolved)
+            return result
 
         reasoning_mode = str((request.get("reasoning") or {}).get("mode") or "off")
         if reasoning_mode not in {"off", "on"}:
@@ -147,7 +98,7 @@ class Toolkit:
         if execution_mode == "agent":
             return self._invoke_agent(
                 request=request,
-                provider_name=provider_name,
+                resolved=resolved,
                 provider=provider,
                 execution=execution,
                 compacted=compacted,
@@ -158,10 +109,12 @@ class Toolkit:
             response = provider.invoke(compacted.prompt, media.native_images, reasoning_mode)
         except ProviderCallError as exc:
             result = self._from_error("failed", exc.error)
-            result["provider"] = {"requested": provider_name, "actual": provider_name}
+            result["backend"] = self._backend_receipt(resolved)
+            result["provider"] = {"requested": resolved.requested, "actual": resolved.backend_id}
             result["context_receipt"] = compacted.receipt
             result["media_routes"] = media.routes
             result["source_receipt"] = sources.receipt
+            result["delegation_receipt"] = self._delegation_receipt(compacted.receipt, sources.receipt)
             return result
 
         output, checks = self._check_output(response.content, (request.get("task") or {}).get("expected_output") or {})
@@ -169,8 +122,10 @@ class Toolkit:
         return {
             "status": status,
             "output": output,
-            "provider": {"requested": provider_name, "actual": response.model or provider_name},
+            "backend": self._backend_receipt(resolved),
+            "provider": {"requested": resolved.requested, "actual": response.model or resolved.backend_id},
             "context_receipt": compacted.receipt,
+            "delegation_receipt": self._delegation_receipt(compacted.receipt, sources.receipt),
             "usage": response.usage,
             "checks": checks,
             "uncertainties": [] if status == "ok" else ["One or more deterministic result checks failed."],
@@ -184,7 +139,7 @@ class Toolkit:
         self,
         *,
         request: dict[str, Any],
-        provider_name: str,
+        resolved: ResolvedBackend,
         provider: Any,
         execution: dict[str, Any],
         compacted: Any,
@@ -199,26 +154,37 @@ class Toolkit:
             return self._blocked("invalid_request", f"Unsupported agent policy: {policy}")
         requested_runner = str(execution.get("runner") or "").strip()
         runner_name = requested_runner or "data_factory"
-        if runner_name not in _KNOWN_AGENT_RUNNERS:
-            return self._blocked(
-                "agent_runner_unavailable",
-                f"Requested agent runner is unavailable: {runner_name}",
-                options=("inspect-runner", "handle-in-codex"),
-            )
-        route = (_AGENT_ROUTES.get(provider_name) or {}).get(runner_name)
+        routes = resolved.config.get("agent_routes") or {}
+        route = routes.get(runner_name)
         if route is None:
+            category = (
+                "agent_runner_incompatible" if runner_name in self.runners else "agent_runner_unavailable"
+            )
             return self._blocked(
-                "agent_runner_incompatible",
-                f"Runner {runner_name} has no exact profile for provider {provider_name}.",
+                category,
+                f"Runner {runner_name} has no exact profile for backend {resolved.backend_id}.",
                 options=("select-compatible-runner", "handle-in-codex"),
             )
-        runner = self.runners.get(runner_name)
+        runner_adapter = str(route.get("runner") or "")
+        runner = self.runners.get(runner_adapter) or self.runners.get(runner_name)
         if runner is None:
             return self._blocked(
                 "agent_runner_unavailable",
-                f"Requested agent runner is unavailable: {runner_name}",
+                f"Configured agent runner adapter is unavailable: {runner_adapter}",
                 options=("inspect-runner", "handle-in-codex"),
             )
+        evidence = self._route_evidence(route, provider)
+        if evidence["evidence_state"] == "stale":
+            result = self._blocked(
+                "route_evidence_stale",
+                "The selected backend no longer matches its accepted model evidence.",
+                options=("probe-backend", "update-backend-registry", "handle-in-codex"),
+            )
+            result["backend"] = self._backend_receipt(resolved)
+            result["execution_receipt"] = self._route_receipt(
+                route, evidence, requested_runner=requested_runner
+            )
+            return result
         budget_input = execution.get("budget") or {}
         try:
             budget = {
@@ -245,13 +211,7 @@ class Toolkit:
                 "model": route["model"],
             }
         )
-        route_receipt = {
-            "resolved_runner": route["runner"],
-            "profile": route["profile"],
-            "route_basis": route["basis"],
-            "route_live_verified": bool(route["live_verified"]),
-            "default_applied": not bool(requested_runner),
-        }
+        route_receipt = self._route_receipt(route, evidence, requested_runner=requested_runner)
         prompt = compacted.prompt
         if media.native_images:
             prompt += "\n\nApproved native image paths:\n" + "\n".join(media.native_images)
@@ -259,8 +219,10 @@ class Toolkit:
             response = runner.invoke(prompt, resolved_execution)
         except AgentRunnerError as exc:
             result = self._from_error("failed", exc.error)
-            result["provider"] = {"requested": provider_name, "actual": provider_name}
+            result["backend"] = self._backend_receipt(resolved)
+            result["provider"] = {"requested": resolved.requested, "actual": resolved.backend_id}
             result["context_receipt"] = compacted.receipt
+            result["delegation_receipt"] = self._delegation_receipt(compacted.receipt, sources.receipt)
             result["media_routes"] = media.routes
             result["source_receipt"] = sources.receipt
             result["execution_receipt"] = {
@@ -269,17 +231,19 @@ class Toolkit:
                 "fallback_used": False,
                 "policy": policy,
                 "budget": budget,
+                **route_receipt,
+                **exc.receipt,
             }
-            result["execution_receipt"].update(route_receipt)
-            result["execution_receipt"].update(exc.receipt)
             return result
         output, checks = self._check_output(response.content, (request.get("task") or {}).get("expected_output") or {})
         status = "ok" if all(check["passed"] for check in checks) else "partial"
         return {
             "status": status,
             "output": output,
-            "provider": {"requested": provider_name, "actual": response.model or provider_name},
+            "backend": self._backend_receipt(resolved),
+            "provider": {"requested": resolved.requested, "actual": response.model or resolved.backend_id},
             "context_receipt": compacted.receipt,
+            "delegation_receipt": self._delegation_receipt(compacted.receipt, sources.receipt),
             "usage": {},
             "checks": checks,
             "uncertainties": [] if status == "ok" else ["One or more deterministic result checks failed."],
@@ -305,27 +269,90 @@ class Toolkit:
             "decision": None,
         }
 
-    def status(self, provider_name: str) -> dict[str, Any]:
-        provider = self.providers.get(provider_name)
-        if provider is None:
-            return self._blocked("invalid_request", f"Unsupported provider: {provider_name}")
+    def status(self, backend_name: str | None) -> dict[str, Any]:
         try:
+            resolved, provider = self._resolve_provider(backend_name)
             provider_status = provider.status()
-            routes = _AGENT_ROUTES.get(provider_name) or {}
+            routes = resolved.config.get("agent_routes") or {}
             default_route = routes.get("data_factory")
             if default_route:
+                evidence = self.registry.evaluate_route_evidence(default_route, provider_status)
                 provider_status["agent_default"] = {
                     "runner_alias": "data_factory",
                     "runner": default_route["runner"],
                     "profile": default_route["profile"],
                     "model": default_route["model"],
-                    "basis": default_route["basis"],
-                    "live_verified": bool(default_route["live_verified"]),
+                    **evidence,
                 }
                 provider_status["agent_supported_runners"] = sorted(routes)
-            return {"status": "ok", "provider_status": provider_status}
+            return {
+                "status": "ok",
+                "backend": self._backend_receipt(resolved),
+                "provider_status": provider_status,
+            }
+        except ValueError as exc:
+            return self._blocked("invalid_request", str(exc))
         except ProviderCallError as exc:
             return self._from_error("failed", exc.error)
+
+    def _resolve_provider(self, name: str | None) -> tuple[ResolvedBackend, Any]:
+        resolved = self.registry.resolve(name)
+        provider = self.providers.get(resolved.backend_id) or self.providers.get(resolved.requested)
+        if provider is None:
+            raise ValueError(f"Backend has no provider adapter: {resolved.backend_id}")
+        return resolved, provider
+
+    def _route_evidence(self, route: dict[str, Any], provider: Any) -> dict[str, Any]:
+        evidence = route.get("evidence") or {}
+        needs_observation = bool(evidence.get("live_verified")) and any(
+            evidence.get(key) for key in ("model_digest", "parent_model")
+        )
+        provider_status: dict[str, Any] | None = None
+        if needs_observation and hasattr(provider, "status"):
+            try:
+                provider_status = provider.status()
+            except (ProviderCallError, OSError, ValueError):
+                provider_status = None
+        return self.registry.evaluate_route_evidence(route, provider_status)
+
+    @staticmethod
+    def _route_receipt(
+        route: dict[str, Any], evidence: dict[str, Any], *, requested_runner: str
+    ) -> dict[str, Any]:
+        return {
+            "resolved_runner": route["runner"],
+            "profile": route["profile"],
+            "route_basis": evidence["basis"],
+            "route_live_verified": evidence["live_verified"],
+            "route_evidence_state": evidence["evidence_state"],
+            "route_evidence_mismatches": evidence["evidence_mismatches"],
+            "default_applied": not bool(requested_runner),
+        }
+
+    @staticmethod
+    def _backend_receipt(resolved: ResolvedBackend) -> dict[str, Any]:
+        return {
+            "requested": resolved.requested,
+            "resolved": resolved.backend_id,
+            "model": resolved.config.get("model"),
+            "cloud": bool(resolved.config.get("cloud")),
+            "default_applied": resolved.default_applied,
+            "alias_applied": resolved.alias_applied,
+        }
+
+    @staticmethod
+    def _delegation_receipt(context: dict[str, Any], sources: list[dict[str, Any]]) -> dict[str, Any]:
+        before = int(context.get("estimated_tokens_before") or 0)
+        after = int(context.get("estimated_tokens_after") or 0)
+        source_chars = sum(int(item.get("source_chars") or 0) for item in sources)
+        selected_chars = sum(int(item.get("selected_chars") or 0) for item in sources)
+        return {
+            "backend_context_tokens_avoided_estimate": max(0, before - after),
+            "referenced_source_chars": source_chars,
+            "selected_source_chars": selected_chars,
+            "referenced_source_tokens_kept_out_of_top_context_estimate": (source_chars + 3) // 4,
+            "reasoning_returned": False,
+        }
 
     @staticmethod
     def _check_output(content: str, expected: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]]:
@@ -356,7 +383,13 @@ class Toolkit:
         return {"status": status, "error": error.to_dict(), "decision": error.decision()}
 
     @classmethod
-    def _blocked(cls, category: str, summary: str, *, options: tuple[str, ...] = ("inspect-request", "handle-in-codex")) -> dict[str, Any]:
+    def _blocked(
+        cls,
+        category: str,
+        summary: str,
+        *,
+        options: tuple[str, ...] = ("inspect-request", "handle-in-codex"),
+    ) -> dict[str, Any]:
         return cls._from_error(
             "blocked",
             ToolError(category=category, summary=summary, retryable=False, options=options),

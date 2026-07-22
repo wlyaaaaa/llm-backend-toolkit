@@ -23,8 +23,58 @@ class JobStoreTests(unittest.TestCase):
             self.assertTrue(receipt["monitor_until_utc"].endswith("Z"))
             self.assertEqual(1, len(spawned))
             self.assertEqual(receipt["job_id"], spawned[0][0])
+            self.assertGreaterEqual(receipt["poll_after_ms"], 30_000)
             state = store.get(receipt["job_id"])
             self.assertEqual("queued", state["job_status"])
+
+    def test_agent_polling_uses_slow_initial_advice_and_exponential_backoff(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            request = {
+                "backend": "local-default",
+                "task": {"goal": "g"},
+                "execution": {"mode": "agent", "workspace": "C:/staging"},
+            }
+
+            receipt = store.submit(request)
+            first = store.get(receipt["job_id"])
+            second = store.get(receipt["job_id"])
+
+            self.assertGreaterEqual(receipt["poll_after_ms"], 60_000)
+            self.assertGreater(first["poll_after_ms"], receipt["poll_after_ms"])
+            self.assertGreater(second["poll_after_ms"], first["poll_after_ms"])
+            self.assertIn("recommended_check_utc", receipt)
+
+    def test_compact_continuation_carries_only_previous_result_and_is_turn_bounded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None, result_preview_chars=80)
+            first = store.submit({"backend": "local-default", "task": {"goal": "first"}})
+            store.complete(first["job_id"], {"status": "ok", "output": "A" * 500})
+
+            second = store.submit(
+                {
+                    "backend": "local-default",
+                    "task": {"goal": "follow up", "inputs": []},
+                    "continuation": {"from_job_id": first["job_id"], "max_turns": 2},
+                }
+            )
+            claimed = store.claim(second["job_id"])
+
+            self.assertEqual(2, second["conversation"]["turn"])
+            carried = claimed["task"]["inputs"][-1]
+            self.assertEqual("previous_result", carried["type"])
+            self.assertEqual(first["job_id"], carried["job_id"])
+            self.assertLessEqual(len(carried["output_preview"]), 80)
+
+            store.complete(second["job_id"], {"status": "ok", "output": "done"})
+            with self.assertRaisesRegex(ValueError, "maximum turn"):
+                store.submit(
+                    {
+                        "backend": "local-default",
+                        "task": {"goal": "too far"},
+                        "continuation": {"from_job_id": second["job_id"], "max_turns": 2},
+                    }
+                )
 
     def test_completed_identical_request_is_a_cache_hit(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -81,6 +131,7 @@ class JobStoreTests(unittest.TestCase):
             self.assertEqual(1000, output["chars"])
             self.assertLessEqual(len(output["preview"]), 80)
             self.assertTrue(Path(output["path"]).is_file())
+            self.assertGreater(compact["result"]["delivery_receipt"]["estimated_top_model_tokens_avoided"], 0)
             self.assertEqual("Z" * 1000, full["result"]["output"])
 
     def test_force_submit_creates_a_new_attempt_after_a_failed_completion(self):

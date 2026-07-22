@@ -1,8 +1,9 @@
 import json
+import os
 import unittest
 from unittest.mock import patch
 
-from llm_backend_toolkit.providers import OllamaProvider, Qwen37PlusProvider
+from llm_backend_toolkit.providers import OllamaProvider, OpenAIChatProvider, Qwen37PlusProvider, provider_from_config
 
 
 class FakeHttpResponse:
@@ -20,6 +21,36 @@ class FakeHttpResponse:
 
 
 class ProviderContractTests(unittest.TestCase):
+    def test_cloud_openai_compatible_backend_rejects_plain_http(self):
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            provider_from_config(
+                {
+                    "adapter": "openai-chat",
+                    "model": "remote-model",
+                    "cloud": True,
+                    "base_url_default": "http://remote.example/v1",
+                    "api_key_env": "REMOTE_API_KEY",
+                }
+            )
+
+    def test_generic_openai_chat_platform_is_created_from_registry_config(self):
+        config = {
+            "adapter": "openai-chat",
+            "model": "future-model-v2",
+            "cloud": True,
+            "supports_vision": False,
+            "base_url_default": "https://api.future.example/v1",
+            "api_key_env": "FUTURE_PLATFORM_KEY",
+        }
+
+        with patch.dict(os.environ, {"FUTURE_PLATFORM_KEY": "fixture-key"}):
+            provider = provider_from_config(config)
+
+        self.assertIsInstance(provider, OpenAIChatProvider)
+        self.assertEqual("future-model-v2", provider.model)
+        self.assertEqual("https://api.future.example/v1", provider.base_url)
+        self.assertTrue(provider.api_key)
+
     def test_ollama_adapter_rejects_known_internal_broker_backend(self):
         with self.assertRaisesRegex(ValueError, "managed public endpoint"):
             OllamaProvider(base_url="http://127.0.0.1:32101")

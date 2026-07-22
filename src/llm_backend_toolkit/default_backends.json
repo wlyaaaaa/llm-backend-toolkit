@@ -1,0 +1,92 @@
+{
+  "schema": "llm-backend-toolkit.backends.v1",
+  "default_backend": "local-default",
+  "aliases": {
+    "qwen-main-v1": "local-default",
+    "qwen3.7-plus": "cloud-qwen-plus"
+  },
+  "backends": {
+    "local-default": {
+      "adapter": "ollama",
+      "model": "qwen-main-v1",
+      "cloud": false,
+      "supports_vision": true,
+      "base_url_env": "LLM_TOOLKIT_OLLAMA_BASE_URL",
+      "base_url_default": "http://127.0.0.1:32100",
+      "data_destination": "LocalGpuBroker Ollama endpoint",
+      "agent_routes": {
+        "data_factory": {
+          "runner": "codex-cli",
+          "profile": "codex-ollama-main",
+          "model": "qwen-main-v1",
+          "evidence": {
+            "basis": "accepted_local_bakeoff",
+            "live_verified": true,
+            "model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a",
+            "parent_model": "qwen3.6:35b"
+          }
+        },
+        "codex-cli": {
+          "runner": "codex-cli",
+          "profile": "codex-ollama-main",
+          "model": "qwen-main-v1",
+          "evidence": {
+            "basis": "accepted_local_bakeoff",
+            "live_verified": true,
+            "model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a",
+            "parent_model": "qwen3.6:35b"
+          }
+        },
+        "claude-code": {
+          "runner": "claude-code",
+          "profile": "claude-ollama-main",
+          "model": "qwen-main-v1",
+          "evidence": {"basis": "version_bound_local_bakeoff", "live_verified": true, "model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a", "parent_model": "qwen3.6:35b"}
+        },
+        "qwen-code": {
+          "runner": "qwen-code",
+          "profile": "qwen-code-ollama-main",
+          "model": "qwen-main-v1",
+          "evidence": {"basis": "version_bound_local_bakeoff", "live_verified": true, "model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a", "parent_model": "qwen3.6:35b"}
+        },
+        "opencode": {
+          "runner": "opencode",
+          "profile": "opencode-ollama-main",
+          "model": "qwen-main-v1",
+          "evidence": {"basis": "version_bound_local_bakeoff", "live_verified": true, "model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a", "parent_model": "qwen3.6:35b"}
+        }
+      }
+    },
+    "cloud-qwen-plus": {
+      "adapter": "openai-chat",
+      "model": "qwen3.7-plus",
+      "cloud": true,
+      "supports_vision": true,
+      "base_url_env": "LLM_TOOLKIT_QWEN_BASE_URL",
+      "base_url_default": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "thinking_field": "enable_thinking",
+      "data_destination": "Alibaba Cloud Model Studio",
+      "agent_routes": {
+        "data_factory": {
+          "runner": "codex-cli",
+          "profile": "codex-qwen-paygo",
+          "model": "qwen3.7-plus",
+          "evidence": {"basis": "official_codex_responses_plus_local_sibling_bakeoff", "live_verified": false}
+        },
+        "codex-cli": {
+          "runner": "codex-cli",
+          "profile": "codex-qwen-paygo",
+          "model": "qwen3.7-plus",
+          "evidence": {"basis": "official_codex_responses_plus_local_sibling_bakeoff", "live_verified": false}
+        },
+        "claude-code": {
+          "runner": "claude-code",
+          "profile": "claude-qwen-paygo",
+          "model": "qwen3.7-plus",
+          "evidence": {"basis": "explicit_unverified_cloud_override", "live_verified": false}
+        }
+      }
+    }
+  }
+}

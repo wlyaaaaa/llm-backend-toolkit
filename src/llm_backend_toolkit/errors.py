@@ -57,7 +57,7 @@ def classify_provider_error(status: int | None, payload: Any) -> ToolError:
             provider_code=code,
             summary="The requested cloud provider is unavailable because of its billing state.",
             retryable=False,
-            options=("invoke:qwen-main-v1", "handle-in-codex", "report-billing-action"),
+            options=("invoke:local-default", "handle-in-codex", "report-billing-action"),
         )
     if status == 401 or any(token in combined for token in ("invalid_api_key", "invalid access token")):
         return ToolError(
@@ -135,7 +135,7 @@ def classify_agent_process_error(detail: str) -> ToolError:
             category="billing_unavailable",
             summary="The requested cloud provider is unavailable because of its billing state.",
             retryable=False,
-            options=("invoke:qwen-main-v1", "handle-in-codex", "report-billing-action"),
+            options=("invoke:local-default", "handle-in-codex", "report-billing-action"),
         )
     if any(token in combined for token in ("invalid_api_key", "invalid api key", "http 401", "status 401")):
         return ToolError(
