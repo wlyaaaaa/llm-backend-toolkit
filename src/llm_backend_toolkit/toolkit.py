@@ -234,10 +234,13 @@ class Toolkit:
             return result
         budget_input = execution.get("budget") or {}
         try:
+            timeout_value = budget_input.get("timeout_seconds", 900)
+            max_steps_value = budget_input.get("max_steps", 20)
+            max_tool_calls_value = budget_input.get("max_tool_calls", 80)
             budget = {
-                "timeout_seconds": int(budget_input.get("timeout_seconds") or 900),
-                "max_steps": int(budget_input.get("max_steps") or 20),
-                "max_tool_calls": int(budget_input.get("max_tool_calls") or 80),
+                "timeout_seconds": int(900 if timeout_value is None else timeout_value),
+                "max_steps": int(20 if max_steps_value is None else max_steps_value),
+                "max_tool_calls": int(80 if max_tool_calls_value is None else max_tool_calls_value),
             }
         except (TypeError, ValueError):
             return self._blocked("invalid_request", "Agent budget values must be integers.")
@@ -265,7 +268,12 @@ class Toolkit:
         try:
             response = runner.invoke(prompt, resolved_execution)
         except AgentRunnerError as exc:
-            result = self._from_error("failed", exc.error)
+            error_status = (
+                "blocked"
+                if exc.error.category in {"agent_budget_exceeded", "agent_budget_unenforced"}
+                else "failed"
+            )
+            result = self._from_error(error_status, exc.error)
             result["backend"] = self._backend_receipt(resolved)
             result["provider"] = {"requested": resolved.requested, "actual": resolved.backend_id}
             result["context_receipt"] = compacted.receipt
@@ -304,10 +312,14 @@ class Toolkit:
                 "model": response.model,
                 "exit_code": response.exit_code,
                 "duration_ms": response.duration_ms,
+                "steps": int(getattr(response, "steps", 0) or 0),
                 "tool_calls": response.tool_calls,
                 "session_id": response.session_id,
                 "stop_reason": response.stop_reason,
                 "limit_enforcement": response.limit_enforcement,
+                "limit_usage": dict(getattr(response, "limit_usage", {}) or {}),
+                "limit_hit": str(getattr(response, "limit_hit", "") or "") or None,
+                "event_projection": str(getattr(response, "event_projection", "") or ""),
                 "policy": policy,
                 "budget": budget,
                 "fallback_used": False,

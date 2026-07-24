@@ -1,7 +1,8 @@
 import tempfile
 import unittest
+import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from llm_backend_toolkit.agent_runners import (
     AgentResponse,
@@ -9,6 +10,7 @@ from llm_backend_toolkit.agent_runners import (
     AiCliProfileRunner,
     OpenCodeRunner,
     QwenCodeRunner,
+    _bounded_process,
     _json_values,
     default_runners,
 )
@@ -137,8 +139,28 @@ class AgentExecutionTests(unittest.TestCase):
                 "run": {
                     "exitCode": 0,
                     "durationMs": 12,
-                    "stdout": '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}',
-                    "limitEnforcement": {"timeout": "hard", "maxSteps": "not-enforced"},
+                    "stdout": "\n".join(
+                        [
+                            '{"type":"thread.started","thread_id":"thread-1"}',
+                            '{"type":"turn.started","turn_id":"turn-1"}',
+                            '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}',
+                        ]
+                    ),
+                    "limitEnforcement": {
+                        "timeout": "hard",
+                        "maxSteps": "hard",
+                        "maxToolCalls": "hard",
+                    },
+                    "limitUsage": {
+                        "steps": 1,
+                        "toolCalls": 0,
+                        "eventsSeen": 3,
+                        "protocol": "codex-jsonl",
+                        "stepDefinition": "distinct-thread-item-v1",
+                        "cleanupConfirmed": True,
+                        "cleanupMethod": "none",
+                    },
+                    "eventProjection": "codex-public-v1",
                 }
             }
             with patch("llm_backend_toolkit.agent_runners.shutil.which", return_value="pwsh"), patch(
@@ -154,6 +176,284 @@ class AgentExecutionTests(unittest.TestCase):
             self.assertIn("--model", command)
             self.assertEqual("qwen-main-v1", command[command.index("--model") + 1])
             self.assertEqual("hard", response.limit_enforcement["timeout"])
+            self.assertEqual("hard", response.limit_enforcement["maxSteps"])
+            self.assertEqual("hard", response.limit_enforcement["maxToolCalls"])
+            self.assertEqual(1, response.steps)
+            self.assertEqual(0, response.tool_calls)
+            self.assertEqual("codex-jsonl", response.limit_usage["protocol"])
+            self.assertEqual("distinct-thread-item-v1", response.limit_usage["step_definition"])
+            self.assertTrue(response.limit_usage["cleanup_confirmed"])
+            self.assertEqual("", response.limit_hit)
+            self.assertEqual("codex-public-v1", response.event_projection)
+
+    def test_codex_agent_rejects_a_success_envelope_without_hard_event_limits(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = root / "aicli.ps1"
+            entry.write_text("# stub\n", encoding="utf-8")
+            runner = AiCliProfileRunner(
+                name="codex-cli", engine="codex", default_profile="codex-ollama-main", entry=str(entry)
+            )
+            envelope = {
+                "run": {
+                    "exitCode": 0,
+                    "durationMs": 12,
+                    "stdout": '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}',
+                    "limitEnforcement": {
+                        "timeout": "hard",
+                        "maxSteps": "not-enforced",
+                        "maxToolCalls": "not-enforced",
+                    },
+                }
+            }
+            with patch("llm_backend_toolkit.agent_runners.shutil.which", return_value="pwsh"), patch(
+                "llm_backend_toolkit.agent_runners._bounded_process",
+                return_value=(0, __import__("json").dumps(envelope), "", 12),
+            ):
+                with self.assertRaises(AgentRunnerError) as raised:
+                    runner.invoke(
+                        "task",
+                        {
+                            "workspace": str(root),
+                            "model": "qwen-main-v1",
+                            "policy": "workspace-write",
+                            "native_images": [],
+                            "budget": {"timeout_seconds": 30, "max_steps": 4, "max_tool_calls": 4},
+                        },
+                    )
+
+            self.assertEqual("agent_budget_unenforced", raised.exception.error.category)
+            self.assertEqual("not-enforced", raised.exception.receipt["limit_enforcement"]["maxSteps"])
+
+    def test_codex_agent_returns_a_bounded_limit_receipt_without_hidden_reasoning(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = root / "aicli.ps1"
+            entry.write_text("# stub\n", encoding="utf-8")
+            runner = AiCliProfileRunner(
+                name="codex-cli", engine="codex", default_profile="codex-ollama-main", entry=str(entry)
+            )
+            envelope = {
+                "run": {
+                    "exitCode": 75,
+                    "durationMs": 22,
+                    "stdout": "\n".join(
+                        [
+                            '{"type":"thread.started","thread_id":"thread-1"}',
+                            '{"type":"item.completed","item":{"type":"agent_message","text":"safe public progress"}}',
+                        ]
+                    ),
+                    "stderr": "Agent exceeded max_tool_calls=1.",
+                    "limitEnforcement": {
+                        "timeout": "hard",
+                        "maxSteps": "hard",
+                        "maxToolCalls": "hard",
+                    },
+                    "limitUsage": {
+                        "steps": 1,
+                        "toolCalls": 2,
+                        "eventsSeen": 5,
+                        "protocol": "codex-jsonl",
+                    },
+                    "limitHit": "maxToolCalls",
+                }
+            }
+            with patch("llm_backend_toolkit.agent_runners.shutil.which", return_value="pwsh"), patch(
+                "llm_backend_toolkit.agent_runners._bounded_process",
+                return_value=(1, __import__("json").dumps(envelope), "", 22),
+            ):
+                with self.assertRaises(AgentRunnerError) as raised:
+                    runner.invoke(
+                        "task",
+                        {
+                            "workspace": str(root),
+                            "model": "qwen-main-v1",
+                            "policy": "workspace-write",
+                            "native_images": [],
+                            "budget": {"timeout_seconds": 30, "max_steps": 4, "max_tool_calls": 1},
+                        },
+                    )
+
+            self.assertEqual("agent_budget_exceeded", raised.exception.error.category)
+            self.assertEqual("maxToolCalls", raised.exception.receipt["limit_hit"])
+            self.assertEqual(2, raised.exception.receipt["tool_calls"])
+            self.assertNotIn("reasoning", __import__("json").dumps(raised.exception.receipt).lower())
+
+    def test_codex_event_protocol_failure_is_reported_as_budget_unenforced(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = root / "aicli.ps1"
+            entry.write_text("# stub\n", encoding="utf-8")
+            runner = AiCliProfileRunner(
+                name="codex-cli", engine="codex", default_profile="codex-ollama-main", entry=str(entry)
+            )
+            envelope = {
+                "run": {
+                    "exitCode": 74,
+                    "durationMs": 8,
+                    "stdout": "",
+                    "stderr": "Codex emitted a non-JSON event line.",
+                    "limitEnforcement": {
+                        "timeout": "hard",
+                        "maxSteps": "failed-closed",
+                        "maxToolCalls": "failed-closed",
+                    },
+                    "limitHit": "maxToolCalls",
+                }
+            }
+            with patch("llm_backend_toolkit.agent_runners.shutil.which", return_value="pwsh"), patch(
+                "llm_backend_toolkit.agent_runners._bounded_process",
+                return_value=(1, __import__("json").dumps(envelope), "", 8),
+            ):
+                with self.assertRaises(AgentRunnerError) as raised:
+                    runner.invoke(
+                        "task",
+                        {
+                            "workspace": str(root),
+                            "model": "qwen-main-v1",
+                            "policy": "workspace-write",
+                            "native_images": [],
+                            "budget": {"timeout_seconds": 30, "max_steps": 4, "max_tool_calls": 4},
+                        },
+                    )
+
+            self.assertEqual("agent_budget_unenforced", raised.exception.error.category)
+            self.assertEqual("budget_unenforced", raised.exception.receipt["stop_reason"])
+
+    def test_aicli_wall_timeout_is_normalized_as_a_hard_timeout_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = root / "aicli.ps1"
+            entry.write_text("# stub\n", encoding="utf-8")
+            runner = AiCliProfileRunner(
+                name="codex-cli", engine="codex", default_profile="codex-ollama-main", entry=str(entry)
+            )
+            envelope = {
+                "run": {
+                    "exitCode": 3,
+                    "durationMs": 30000,
+                    "stdout": "",
+                    "stderr": "Child process exceeded the configured wall timeout.",
+                    "timedOut": True,
+                    "limitEnforcement": {
+                        "timeout": "hard",
+                        "maxSteps": "hard",
+                        "maxToolCalls": "hard",
+                    },
+                    "limitHit": "timeout",
+                }
+            }
+            with patch("llm_backend_toolkit.agent_runners.shutil.which", return_value="pwsh"), patch(
+                "llm_backend_toolkit.agent_runners._bounded_process",
+                return_value=(1, __import__("json").dumps(envelope), "", 30000),
+            ):
+                with self.assertRaises(AgentRunnerError) as raised:
+                    runner.invoke(
+                        "task",
+                        {
+                            "workspace": str(root),
+                            "model": "qwen-main-v1",
+                            "policy": "workspace-write",
+                            "native_images": [],
+                            "budget": {"timeout_seconds": 30, "max_steps": 4, "max_tool_calls": 4},
+                        },
+                    )
+
+            self.assertEqual("agent_timeout", raised.exception.error.category)
+            self.assertEqual("timeout", raised.exception.receipt["limit_hit"])
+            self.assertEqual("hard", raised.exception.receipt["limit_enforcement"]["timeout"])
+
+    def test_toolkit_maps_a_hard_agent_budget_hit_to_blocked(self):
+        class BudgetRunner:
+            def invoke(self, prompt, execution):
+                raise AgentRunnerError(
+                    ToolError(
+                        category="agent_budget_exceeded",
+                        summary="hard limit reached",
+                        retryable=False,
+                        options=("increase-budget", "handle-in-codex"),
+                    ),
+                    {
+                        "runner": "codex-cli",
+                        "exit_code": 75,
+                        "duration_ms": 22,
+                        "steps": 1,
+                        "tool_calls": 2,
+                        "stop_reason": "maxToolCalls",
+                        "limit_hit": "maxToolCalls",
+                        "limit_enforcement": {
+                            "timeout": "hard",
+                            "maxSteps": "hard",
+                            "maxToolCalls": "hard",
+                        },
+                    },
+                )
+
+        with tempfile.TemporaryDirectory() as temp:
+            toolkit = Toolkit(
+                providers={"qwen-main-v1": FakeProvider()},
+                runners={"data_factory": BudgetRunner()},
+            )
+            result = toolkit.invoke(agent_request(Path(temp)))
+
+        self.assertEqual("blocked", result["status"])
+        self.assertEqual("agent_budget_exceeded", result["error"]["category"])
+        self.assertEqual("maxToolCalls", result["execution_receipt"]["limit_hit"])
+
+    @patch("llm_backend_toolkit.agent_runners.os.name", "nt")
+    @patch("llm_backend_toolkit.agent_runners.subprocess.run")
+    @patch("llm_backend_toolkit.agent_runners.subprocess.Popen")
+    def test_outer_timeout_kills_the_complete_windows_process_tree(self, popen, native_run):
+        process = MagicMock()
+        process.pid = 24680
+        process.wait.return_value = 0
+        process.poll.return_value = 1
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd=["agent"], timeout=1),
+            ("", ""),
+        ]
+        native_run.return_value.returncode = 0
+        popen.return_value = process
+
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaises(AgentRunnerError) as raised:
+                _bounded_process(
+                    ["agent"],
+                    cwd=Path(temp),
+                    stdin_text="task",
+                    timeout_seconds=1,
+                )
+
+        self.assertEqual("agent_timeout", raised.exception.error.category)
+        native_run.assert_called_once()
+        self.assertEqual(
+            ["taskkill", "/PID", "24680", "/T", "/F"],
+            native_run.call_args.args[0],
+        )
+
+    @patch("llm_backend_toolkit.agent_runners.os.name", "nt")
+    @patch("llm_backend_toolkit.agent_runners.subprocess.run")
+    @patch("llm_backend_toolkit.agent_runners.subprocess.Popen")
+    def test_outer_timeout_fails_closed_when_windows_tree_cleanup_is_unconfirmed(self, popen, native_run):
+        process = MagicMock()
+        process.pid = 13579
+        process.wait.side_effect = subprocess.TimeoutExpired(cmd=["agent"], timeout=5)
+        process.poll.return_value = None
+        process.communicate.side_effect = subprocess.TimeoutExpired(cmd=["agent"], timeout=1)
+        native_run.return_value.returncode = 1
+        popen.return_value = process
+
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaises(AgentRunnerError) as raised:
+                _bounded_process(
+                    ["agent"],
+                    cwd=Path(temp),
+                    stdin_text="task",
+                    timeout_seconds=1,
+                )
+
+        self.assertEqual("agent_budget_unenforced", raised.exception.error.category)
+        self.assertFalse(raised.exception.receipt["cleanup_confirmed"])
 
     def test_cloud_agent_defaults_to_codex_and_pins_exact_plus_model(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -227,6 +527,22 @@ class AgentExecutionTests(unittest.TestCase):
             self.assertEqual("qwen-code", result["execution_receipt"]["runner"])
             self.assertEqual(4, result["execution_receipt"]["tool_calls"])
             self.assertNotIn("reasoning", result)
+
+    def test_zero_tool_call_budget_is_preserved_instead_of_replaced_by_the_default(self):
+        with tempfile.TemporaryDirectory() as temp:
+            runner = FakeRunner()
+            toolkit = Toolkit(
+                providers={"qwen-main-v1": FakeProvider()},
+                runners={"data_factory": runner},
+            )
+            request = agent_request(Path(temp))
+            request["execution"]["budget"]["max_tool_calls"] = 0
+
+            result = toolkit.invoke(request)
+
+            self.assertEqual("ok", result["status"])
+            self.assertEqual(0, runner.calls[0]["execution"]["budget"]["max_tool_calls"])
+            self.assertEqual(0, result["execution_receipt"]["budget"]["max_tool_calls"])
 
     def test_agent_mode_never_falls_back_to_an_unrequested_runner(self):
         with tempfile.TemporaryDirectory() as temp:

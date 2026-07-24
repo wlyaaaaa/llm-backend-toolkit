@@ -88,11 +88,11 @@ pwsh -NoProfile -File .\scripts\Show-LlmBackendDashboard.ps1
 - `execution.mode=agent`
 - `execution.runner=data_factory`（可省略；从 backend registry 锁定精确 Profile/模型）
 - `execution.policy=workspace-write|read-only`
-- `execution.budget`（墙钟上限是所有 harness 的硬边界；step/tool-call 上限仅在上游 CLI 支持时强制）
+- `execution.budget`（当前 `data_factory`/Codex 关闭 multi-agent，并通过版本化公开 JSON 事件投影硬执行预算：step 是不同的 ThreadItem 工作单元，tool-call 包括命令、文件、MCP 与 web 等工具项；意外 collab 会被计数并失败关闭，无法证明同等边界的 runner 也会失败关闭）
 
 `workspace-write` 必须指向隔离 worktree 或暂存任务目录。canonical raw、唯一事实源和不可恢复数据应留在可写根之外；智能体只产生 derived、checkpoint 和 receipt。可变工作区默认不复用已完成 job；只有调用者提供绑定输入内容 hash 的 `execution.cache_key` 才允许 cache hit。
 
-显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或 chain-of-thought。
+显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或 chain-of-thought。有限预算任务只有在回执同时证明 `timeout/maxSteps/maxToolCalls=hard` 时才会被接受；未知事件、持续流墙钟或无法确认完整进程树清理均返回失败关闭，越限返回 `blocked` 与 `limit_hit`，不会把未执行的约束写成成功。
 
 当前 `local-default` 解析到 `codex-ollama-main + qwen-main-v1`，已经过本机版本绑定验收。当前 `cloud-qwen-plus` 解析到 `codex-qwen-paygo + qwen3.7-plus`；这是**未实测推荐**。将来注册表可以替换两者，而历史报告不会自动继承到新指纹。
 `status` 会在不发模型生成请求的情况下返回当前 backend、模型指纹、agent 默认路由、证据状态和支持的 runner；实际任务回执同时记录精确 Profile、模型与是否采用默认。

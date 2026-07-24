@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -24,6 +25,10 @@ class AgentResponse:
     session_id: str = ""
     stop_reason: str = ""
     limit_enforcement: dict[str, str] = field(default_factory=dict)
+    steps: int = 0
+    limit_usage: dict[str, Any] = field(default_factory=dict)
+    limit_hit: str = ""
+    event_projection: str = ""
 
 
 class AgentRunnerError(Exception):
@@ -62,31 +67,86 @@ def _bounded_process(
 ) -> tuple[int, str, str, int]:
     started = time.monotonic()
     try:
-        completed = subprocess.run(
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+        process = subprocess.Popen(
             command,
             cwd=str(cwd),
-            input=stdin_text,
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout_seconds,
             env=env,
             shell=False,
-            check=False,
+            creationflags=creationflags,
+            start_new_session=os.name != "nt",
         )
+        stdout, stderr = process.communicate(stdin_text, timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
+        cleanup_confirmed = False
+        if "process" in locals():
+            if os.name == "nt":
+                try:
+                    killed = subprocess.run(
+                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=10,
+                        shell=False,
+                        check=False,
+                    )
+                    if killed.returncode == 0:
+                        process.wait(timeout=5)
+                        cleanup_confirmed = process.poll() is not None
+                except (OSError, subprocess.SubprocessError):
+                    cleanup_confirmed = False
+            else:
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    process.wait(timeout=5)
+                    cleanup_confirmed = process.poll() is not None
+                except (OSError, subprocess.SubprocessError):
+                    cleanup_confirmed = False
+            if not cleanup_confirmed:
+                try:
+                    process.kill()
+                    process.wait(timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            elif cleanup_confirmed:
+                try:
+                    process.communicate(timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+        if not cleanup_confirmed:
+            raise _runner_error(
+                "agent_budget_unenforced",
+                "Agent wall budget expired, but complete process-tree cleanup could not be confirmed.",
+                receipt={
+                    "stop_reason": "cleanup_unconfirmed",
+                    "limit_hit": "timeout",
+                    "cleanup_confirmed": False,
+                    "limit_enforcement": {"timeout": "failed-closed"},
+                },
+            ) from exc
         raise _runner_error(
             "agent_timeout",
             f"Agent exceeded its {timeout_seconds}-second wall budget.",
             retryable=True,
+            receipt={
+                "stop_reason": "timeout",
+                "limit_hit": "timeout",
+                "cleanup_confirmed": True,
+                "limit_enforcement": {"timeout": "hard"},
+            },
         ) from exc
     except OSError as exc:
         raise _runner_error("agent_runner_unavailable", f"Agent process could not start: {type(exc).__name__}") from exc
     duration_ms = int((time.monotonic() - started) * 1000)
-    stdout = completed.stdout[:max_output_chars]
-    stderr = completed.stderr[:max_output_chars]
-    return completed.returncode, stdout, stderr, duration_ms
+    return process.returncode, stdout[:max_output_chars], stderr[:max_output_chars], duration_ms
 
 
 def _qwen_command_prefix(executable: str) -> list[str]:
@@ -293,7 +353,16 @@ class OpenCodeRunner:
             raise _runner_error("agent_failed", f"OpenCode exited with code {code}: {stderr.strip()[:500]}", retryable=True)
         if not final:
             raise _runner_error("agent_failed", "OpenCode returned no final answer.", retryable=True)
-        return AgentResponse(final, self.name, model_ref, code, duration_ms, tool_calls, session_id, "completed")
+        return AgentResponse(
+            content=final,
+            runner=self.name,
+            model=model_ref,
+            exit_code=code,
+            duration_ms=duration_ms,
+            tool_calls=tool_calls,
+            session_id=session_id,
+            stop_reason="completed",
+        )
 
 
 class AiCliProfileRunner:
@@ -369,6 +438,11 @@ class AiCliProfileRunner:
         run = envelope.get("run") or {}
         child_stdout = str(run.get("stdout") or "")
         child_values = _json_values(child_stdout)
+        limit_enforcement = dict(run.get("limitEnforcement") or {})
+        limit_usage = dict(run.get("limitUsage") or {})
+        limit_hit = str(run.get("limitHit") or "")
+        steps = int(limit_usage.get("steps") or 0)
+        reported_tool_calls = int(limit_usage.get("toolCalls") or 0)
         if self.engine == "codex":
             messages: list[str] = []
             tool_calls = 0
@@ -415,35 +489,85 @@ class AiCliProfileRunner:
                 or 0
             )
             session_id = str(last.get("session_id") or "") if isinstance(last, dict) else ""
+        if reported_tool_calls or "toolCalls" in limit_usage:
+            tool_calls = reported_tool_calls
         child_code = int(run.get("exitCode") if run.get("exitCode") is not None else code)
+        receipt = {
+            "runner": self.name,
+            "model": model,
+            "exit_code": child_code,
+            "duration_ms": int(run.get("durationMs") or duration_ms),
+            "steps": steps,
+            "tool_calls": tool_calls,
+            "session_id": session_id,
+            "stop_reason": limit_hit or ("failed" if code != 0 or child_code != 0 else "completed"),
+            "limit_hit": limit_hit or None,
+            "limit_enforcement": limit_enforcement,
+            "limit_usage": {
+                "steps": steps,
+                "tool_calls": tool_calls,
+                "events_seen": int(limit_usage.get("eventsSeen") or 0),
+                "protocol": str(limit_usage.get("protocol") or ""),
+                "step_definition": str(limit_usage.get("stepDefinition") or ""),
+                "cleanup_confirmed": bool(limit_usage.get("cleanupConfirmed", True)),
+                "cleanup_method": str(limit_usage.get("cleanupMethod") or ""),
+            },
+            "event_projection": str(run.get("eventProjection") or ""),
+        }
+        if any(
+            limit_enforcement.get(name) == "failed-closed"
+            for name in ("timeout", "maxSteps", "maxToolCalls")
+        ):
+            receipt["stop_reason"] = "budget_unenforced"
+            raise _runner_error(
+                "agent_budget_unenforced",
+                "The agent boundary failed closed before proving every declared hard limit.",
+                receipt=receipt,
+            )
+        if bool(run.get("timedOut")) or limit_hit == "timeout":
+            receipt["stop_reason"] = "timeout"
+            receipt["limit_hit"] = "timeout"
+            raise _runner_error(
+                "agent_timeout",
+                "Agent exceeded its hard wall-clock budget.",
+                retryable=True,
+                receipt=receipt,
+            )
+        if limit_hit:
+            raise _runner_error(
+                "agent_budget_exceeded",
+                f"Agent stopped after exceeding its hard {limit_hit} budget.",
+                receipt=receipt,
+            )
         if code != 0 or child_code != 0:
             detail = "\n".join(
                 part for part in (str(run.get("stderr") or ""), stderr, child_stdout) if part
             ).strip()[-2000:]
             error = classify_agent_process_error(detail)
-            receipt = {
-                "runner": self.name,
-                "model": model,
-                "exit_code": child_code,
-                "duration_ms": int(run.get("durationMs") or duration_ms),
-                "tool_calls": tool_calls,
-                "session_id": session_id,
-                "stop_reason": "failed",
-                "limit_enforcement": dict(run.get("limitEnforcement") or {}),
-            }
             raise AgentRunnerError(error, receipt)
+        if any(limit_enforcement.get(name) != "hard" for name in ("timeout", "maxSteps", "maxToolCalls")):
+            receipt["stop_reason"] = "budget_unenforced"
+            raise _runner_error(
+                "agent_budget_unenforced",
+                "The selected agent runner did not prove every declared budget as a hard limit.",
+                receipt=receipt,
+            )
         if not final:
             raise _runner_error("agent_failed", f"{self.name} returned no final answer.", retryable=True)
         return AgentResponse(
-            final,
-            self.name,
-            model,
-            child_code,
-            int(run.get("durationMs") or duration_ms),
-            tool_calls,
-            session_id,
-            "completed",
-            dict(run.get("limitEnforcement") or {}),
+            content=final,
+            runner=self.name,
+            model=model,
+            exit_code=child_code,
+            duration_ms=int(run.get("durationMs") or duration_ms),
+            tool_calls=tool_calls,
+            session_id=session_id,
+            stop_reason="completed",
+            limit_enforcement=limit_enforcement,
+            steps=steps,
+            limit_usage=receipt["limit_usage"],
+            limit_hit="",
+            event_projection=receipt["event_projection"],
         )
 
 
