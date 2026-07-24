@@ -488,6 +488,38 @@ class AgentExecutionTests(unittest.TestCase):
             self.assertFalse(receipt["route_live_verified"])
             self.assertEqual("official_codex_responses_plus_local_sibling_bakeoff", receipt["route_basis"])
 
+    def test_fast_middle_spark_pins_its_exact_profile_model_and_xhigh_receipt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            runner = FakeRunner(
+                AgentResponse(
+                    content='{"answer": 56}',
+                    runner="codex-cli",
+                    model="gpt-5.3-codex-spark",
+                    exit_code=0,
+                    duration_ms=321,
+                )
+            )
+            toolkit = Toolkit(runners={"codex-cli": runner, "data_factory": runner})
+            request = agent_request(Path(temp))
+            request["backend"] = "fast-middle-agent"
+            request["privacy"] = {"cloud_allowed": True}
+
+            result = toolkit.invoke(request)
+
+            self.assertEqual("ok", result["status"])
+            execution = runner.calls[0]["execution"]
+            self.assertEqual("codex-spark-xhigh", execution["profile"])
+            self.assertEqual("gpt-5.3-codex-spark", execution["model"])
+            receipt = result["execution_receipt"]
+            self.assertEqual("xhigh", receipt["reasoning_effort"])
+            self.assertTrue(receipt["route_live_verified"])
+            self.assertEqual(
+                "aicli_0.3.1_toolkit_live_and_synthetic_acceptance_2026-07-24",
+                receipt["route_basis"],
+            )
+            self.assertFalse(receipt["fallback_used"])
+            self.assertFalse(result["backend"]["default_applied"])
+
     def test_cloud_agent_rejects_a_runner_without_an_exact_cloud_profile(self):
         with tempfile.TemporaryDirectory() as temp:
             runner = FakeRunner()

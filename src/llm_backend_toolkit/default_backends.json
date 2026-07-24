@@ -3,7 +3,8 @@
   "default_backend": "local-default",
   "aliases": {
     "qwen-main-v1": "local-default",
-    "qwen3.7-plus": "cloud-qwen-plus"
+    "qwen3.7-plus": "cloud-qwen-plus",
+    "gpt-5.3-codex-spark": "fast-middle-agent"
   },
   "backends": {
     "local-default": {
@@ -77,6 +78,35 @@
         "num_predict": 32768
       },
       "agent_routes": {}
+    },
+    "fast-middle-agent": {
+      "adapter": "agent-only",
+      "model": "gpt-5.3-codex-spark",
+      "cloud": true,
+      "supports_vision": false,
+      "data_destination": "OpenAI/ChatGPT official Codex CLI path",
+      "agent_routes": {
+        "data_factory": {
+          "runner": "codex-cli",
+          "profile": "codex-spark-xhigh",
+          "model": "gpt-5.3-codex-spark",
+          "reasoning_effort": "xhigh",
+          "evidence": {
+            "basis": "aicli_0.3.1_toolkit_live_and_synthetic_acceptance_2026-07-24",
+            "live_verified": true
+          }
+        },
+        "codex-cli": {
+          "runner": "codex-cli",
+          "profile": "codex-spark-xhigh",
+          "model": "gpt-5.3-codex-spark",
+          "reasoning_effort": "xhigh",
+          "evidence": {
+            "basis": "aicli_0.3.1_toolkit_live_and_synthetic_acceptance_2026-07-24",
+            "live_verified": true
+          }
+        }
+      }
     },
     "cloud-qwen-plus": {
       "adapter": "openai-chat",

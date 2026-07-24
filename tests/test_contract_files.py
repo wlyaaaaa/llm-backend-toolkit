@@ -21,6 +21,9 @@ class ContractFileTests(unittest.TestCase):
         response_schema = json.loads((ROOT / "schemas" / "response.schema.json").read_text(encoding="utf-8"))
         example = json.loads((ROOT / "examples" / "local-request.json").read_text(encoding="utf-8"))
         cloud_agent = json.loads((ROOT / "examples" / "cloud-agent-request.json").read_text(encoding="utf-8"))
+        fast_middle = json.loads(
+            (ROOT / "examples" / "fast-middle-agent-request.json").read_text(encoding="utf-8")
+        )
 
         self.assertEqual("string", request_schema["properties"]["backend"]["type"])
         self.assertNotIn("enum", request_schema["properties"]["backend"])
@@ -37,6 +40,10 @@ class ContractFileTests(unittest.TestCase):
         self.assertTrue(cloud_agent["privacy"]["cloud_allowed"])
         self.assertEqual("agent", cloud_agent["execution"]["mode"])
         self.assertNotIn("runner", cloud_agent["execution"])
+        self.assertEqual("fast-middle-agent", fast_middle["backend"])
+        self.assertTrue(fast_middle["privacy"]["cloud_allowed"])
+        self.assertEqual("read-only", fast_middle["execution"]["policy"])
+        self.assertEqual("data_factory", fast_middle["execution"]["runner"])
 
     def test_public_files_do_not_contain_secret_like_values(self):
         forbidden = (

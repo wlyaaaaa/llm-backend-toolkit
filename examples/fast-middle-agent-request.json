@@ -1,0 +1,42 @@
+{
+  "backend": "fast-middle-agent",
+  "task": {
+    "goal": "Inspect the bounded synthetic workspace and return a strict JSON report",
+    "instructions": [
+      "Read only the explicitly allowed synthetic files",
+      "Do not modify files",
+      "Return JSON without Markdown fences"
+    ],
+    "inputs": [],
+    "expected_output": {
+      "format": "json",
+      "required_keys": [
+        "answer"
+      ]
+    }
+  },
+  "context": {
+    "mode": "compact",
+    "target_tokens": 4096,
+    "pinned": [
+      "Keep canonical raw data outside the writable workspace"
+    ]
+  },
+  "reasoning": {
+    "mode": "off"
+  },
+  "privacy": {
+    "cloud_allowed": true
+  },
+  "execution": {
+    "mode": "agent",
+    "runner": "data_factory",
+    "workspace": "C:/staging/synthetic-read-only-job",
+    "policy": "read-only",
+    "budget": {
+      "timeout_seconds": 300,
+      "max_steps": 24,
+      "max_tool_calls": 80
+    }
+  }
+}

@@ -14,9 +14,9 @@
 - 默认关闭 thinking，不向顶级模型返回长推理过程。
 - 支持本地模型原生图片、LocalOCR 和 ChineseASR 三种媒体路线。
 - 异步 Smart Job：提交立即返回，顶级模型无需被长时间命令阻塞。
-- 欠费、权限、GPU 占用等错误只返回裁决选项，不自动调用另一个模型。
+- 欠费、额度、限流、权限、GPU 占用等错误只返回裁决选项，不自动调用另一个模型。
 - 任何云端调用都要求显式 `privacy.cloud_allowed=true`，包括 task 文本、source 片段与媒体。
-- agent mode 通过 aicli 的 Windows 外层沙箱调用原生 CLI；`data_factory` 从 registry 解析精确 Profile 与模型，不做运行时猜测或 fallback。
+- agent mode 通过 aicli 调用原生 CLI：本地/第三方 Profile 使用网络关闭的 Windows 外层沙箱，官方 Codex Profile 使用原生 Codex 沙箱和一次性认证目录。`data_factory` 从 registry 解析精确 Profile 与模型，不做运行时猜测或 fallback。
 
 ## 安装
 
@@ -97,9 +97,13 @@ pwsh -NoProfile -File .\scripts\Show-LlmBackendDashboard.ps1
 当前 `local-default` 解析到 `codex-ollama-main + qwen-main-v1`，已经过本机版本绑定验收。当前 `cloud-qwen-plus` 解析到 `codex-qwen-paygo + qwen3.7-plus`；这是**未实测推荐**。将来注册表可以替换两者，而历史报告不会自动继承到新指纹。
 `status` 会在不发模型生成请求的情况下返回当前 backend、模型指纹、agent 默认路由、证据状态和支持的 runner；实际任务回执同时记录精确 Profile、模型与是否采用默认。
 
+`fast-middle-agent` 是显式 opt-in 的文本型 Agent 角色：`codex-spark-xhigh + gpt-5.3-codex-spark + xhigh`。它只通过官方 Codex CLI/ChatGPT 登录链调用，不伪装成 OpenAI API，也不支持原生图片输入。选择它必须显式写 `backend=fast-middle-agent` 和 `privacy.cloud_allowed=true`；省略 backend 仍只走本地 Qwen。额度、限流或资格失败会返回 `rate_limited` 等规范错误和 `invoke:local-default` 裁决选项，但不会自动重提；调用方如选择本地回退，必须保留两次独立回执和实际模型身份。
+
 云端示例见 [examples/cloud-agent-request.json](examples/cloud-agent-request.json)。普通单次摘要、抽取和结构化生成继续使用 `execution.mode=direct`，避免为不需要文件/命令循环的任务增加 Agent 调用成本。
 
 本机 35B 的 PersonalOS 风格小型清洗专项、选择理由和严格适用范围见 [数据工厂智能体验收报告](docs/agent-data-factory.md)。该报告不代表通用智能排名。
+
+Spark 与本地 Qwen 的合成数据清洗、跨文件工程、非代码路由和现实因果对照见 [高速中档智能体验收报告](docs/fast-middle-agent.md)。结论是互补分层，不是替代本地默认。
 
 ## 四 harness 通用代理基准
 

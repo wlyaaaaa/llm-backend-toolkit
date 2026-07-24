@@ -381,6 +381,7 @@ class Toolkit:
         return {
             "resolved_runner": route["runner"],
             "profile": route["profile"],
+            "reasoning_effort": route.get("reasoning_effort"),
             "route_basis": evidence["basis"],
             "route_live_verified": evidence["live_verified"],
             "route_evidence_state": evidence["evidence_state"],

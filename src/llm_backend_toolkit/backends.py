@@ -135,6 +135,18 @@ class BackendRegistry:
                 for required in ("runner", "profile", "model"):
                     if not str(route.get(required) or ""):
                         raise ValueError(f"Backend {backend_id} route {route_id} requires {required}")
+                reasoning_effort = route.get("reasoning_effort")
+                if reasoning_effort is not None and reasoning_effort not in {
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "ultra",
+                    "max",
+                }:
+                    raise ValueError(
+                        f"Backend {backend_id} route {route_id} has invalid reasoning_effort"
+                    )
             backends[backend_id] = normalized
         if default_backend not in backends:
             raise ValueError("Backend registry default_backend does not exist")

@@ -75,13 +75,22 @@ def classify_provider_error(status: int | None, payload: Any) -> ToolError:
             retryable=False,
             options=("inspect-provider-access", "handle-in-codex"),
         )
-    if status == 429 or "rate limit" in combined:
+    if status == 429 or any(
+        token in combined
+        for token in (
+            "rate limit",
+            "rate_limit_exceeded",
+            "usage limit",
+            "insufficient_quota",
+            "quota exhausted",
+        )
+    ):
         return ToolError(
             category="rate_limited",
             provider_code=code,
             summary="The requested provider is rate limited.",
             retryable=True,
-            options=("retry-later", "handle-in-codex"),
+            options=("invoke:local-default", "retry-later", "handle-in-codex"),
         )
     if code in {"DataInspectionFailed", "data_inspection_failed"} or "content" in combined and "reject" in combined:
         return ToolError(
@@ -144,12 +153,23 @@ def classify_agent_process_error(detail: str) -> ToolError:
             retryable=False,
             options=("repair-credential", "handle-in-codex"),
         )
-    if any(token in combined for token in ("rate limit", "http 429", "status 429")):
+    if any(
+        token in combined
+        for token in (
+            "rate limit",
+            "rate_limit_exceeded",
+            "http 429",
+            "status 429",
+            "usage limit",
+            "insufficient_quota",
+            "quota exhausted",
+        )
+    ):
         return ToolError(
             category="rate_limited",
             summary="The requested provider is rate limited.",
             retryable=True,
-            options=("retry-later", "handle-in-codex"),
+            options=("invoke:local-default", "retry-later", "handle-in-codex"),
         )
     return ToolError(
         category="agent_failed",

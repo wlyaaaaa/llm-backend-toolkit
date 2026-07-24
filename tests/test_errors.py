@@ -1,6 +1,6 @@
 import unittest
 
-from llm_backend_toolkit.errors import classify_provider_error
+from llm_backend_toolkit.errors import classify_agent_process_error, classify_provider_error
 
 
 class ErrorClassificationTests(unittest.TestCase):
@@ -25,6 +25,20 @@ class ErrorClassificationTests(unittest.TestCase):
 
         self.assertEqual("gpu_busy", error.category)
         self.assertTrue(error.retryable)
+
+    def test_spark_quota_errors_offer_a_visible_local_handoff_without_auto_fallback(self):
+        for detail in (
+            "HTTP 429 rate limit exceeded",
+            "usage limit reached for gpt-5.3-codex-spark",
+            "insufficient_quota",
+            "RATE_LIMIT_EXCEEDED",
+        ):
+            with self.subTest(detail=detail):
+                error = classify_agent_process_error(detail)
+                self.assertEqual("rate_limited", error.category)
+                self.assertEqual("top_model", error.decision_owner)
+                self.assertIn("invoke:local-default", error.options)
+                self.assertIn("retry-later", error.options)
 
 
 if __name__ == "__main__":

@@ -81,6 +81,25 @@ class ReplacementRunner:
 
 
 class BackendRegistryTests(unittest.TestCase):
+    def test_fast_middle_spark_is_opt_in_agent_only_and_does_not_change_the_local_default(self):
+        registry = BackendRegistry.load()
+
+        default = registry.resolve(None)
+        spark = registry.resolve("fast-middle-agent")
+
+        self.assertEqual("local-default", default.backend_id)
+        self.assertFalse(default.config["cloud"])
+        self.assertEqual("fast-middle-agent", spark.backend_id)
+        self.assertEqual("agent-only", spark.config["adapter"])
+        self.assertTrue(spark.config["cloud"])
+        self.assertFalse(spark.config["supports_vision"])
+        self.assertEqual("gpt-5.3-codex-spark", spark.config["model"])
+        route = spark.config["agent_routes"]["data_factory"]
+        self.assertEqual("codex-cli", route["runner"])
+        self.assertEqual("codex-spark-xhigh", route["profile"])
+        self.assertEqual("gpt-5.3-codex-spark", route["model"])
+        self.assertEqual("xhigh", route["reasoning_effort"])
+
     def test_default_registry_adds_explicit_hard_reasoning_role_without_changing_default(self):
         registry = BackendRegistry.load()
 
