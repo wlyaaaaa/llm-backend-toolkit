@@ -57,6 +57,7 @@
     },
     "reasoning": {
       "type": "object",
+      "description": "Thinking is opt-in. Hidden reasoning is never returned or persisted; only public output and safe progress metadata are exposed.",
       "properties": {
         "mode": {"enum": ["off", "on"], "default": "off"}
       },

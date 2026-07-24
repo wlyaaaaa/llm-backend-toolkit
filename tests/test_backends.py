@@ -81,6 +81,35 @@ class ReplacementRunner:
 
 
 class BackendRegistryTests(unittest.TestCase):
+    def test_default_registry_adds_explicit_hard_reasoning_role_without_changing_default(self):
+        registry = BackendRegistry.load()
+
+        default = registry.resolve(None)
+        hard = registry.resolve("local-hard-reasoning")
+
+        self.assertEqual("local-default", default.backend_id)
+        self.assertNotIn("ollama_options", default.config)
+        self.assertEqual("qwen-main-v1", hard.config["model"])
+        self.assertFalse(hard.config["cloud"])
+        self.assertEqual("on", hard.config["required_reasoning_mode"])
+        self.assertEqual(
+            {
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "top_k": 20,
+                "min_p": 0.0,
+                "presence_penalty": 1.5,
+                "repeat_penalty": 1.0,
+                "num_ctx": 262144,
+                "num_predict": 32768,
+            },
+            hard.config["ollama_options"],
+        )
+        catalog_entry = next(
+            item for item in registry.catalog()["backends"] if item["id"] == "local-hard-reasoning"
+        )
+        self.assertEqual("on", catalog_entry["required_reasoning_mode"])
+
     def test_default_backend_and_legacy_alias_resolve_without_code_changes(self):
         registry = BackendRegistry.from_dict(registry_data())
 
@@ -106,6 +135,88 @@ class BackendRegistryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "environment variable"):
             BackendRegistry.from_dict(data)
+
+    def test_registry_rejects_ollama_options_for_cloud_or_non_ollama_backends(self):
+        data = registry_data()
+        data["backends"]["cloud"] = {
+            "adapter": "openai-chat",
+            "model": "remote",
+            "cloud": True,
+            "ollama_options": {"temperature": 1.0},
+        }
+
+        with self.assertRaisesRegex(ValueError, "local ollama"):
+            BackendRegistry.from_dict(data)
+
+    def test_registry_rejects_unknown_or_out_of_range_ollama_options(self):
+        for invalid_options in (
+            {"seed": 7},
+            {"temperature": 3.0},
+            {"top_p": "0.95"},
+            {"top_k": True},
+            {"num_ctx": 0},
+            {"num_predict": 0},
+        ):
+            with self.subTest(invalid_options=invalid_options):
+                data = registry_data()
+                data["backends"]["local-default"]["ollama_options"] = invalid_options
+                with self.assertRaisesRegex(ValueError, "ollama_options"):
+                    BackendRegistry.from_dict(data)
+
+    def test_registry_rejects_invalid_required_reasoning_mode(self):
+        for invalid_mode in ("auto", True, 1, {}):
+            with self.subTest(invalid_mode=invalid_mode):
+                data = registry_data()
+                data["backends"]["local-default"]["required_reasoning_mode"] = invalid_mode
+                with self.assertRaisesRegex(ValueError, "required_reasoning_mode"):
+                    BackendRegistry.from_dict(data)
+
+    def test_backend_required_reasoning_mode_fails_before_provider_invocation(self):
+        data = registry_data()
+        hard_config = json.loads(json.dumps(data["backends"]["local-default"]))
+        hard_config["required_reasoning_mode"] = "on"
+        data["backends"]["local-hard-reasoning"] = hard_config
+        default_provider = ReplacementProvider()
+        hard_provider = ReplacementProvider()
+        toolkit = Toolkit(
+            registry=BackendRegistry.from_dict(data),
+            providers={
+                "local-default": default_provider,
+                "local-hard-reasoning": hard_provider,
+            },
+            runners={},
+        )
+
+        blocked = toolkit.invoke(
+            {
+                "backend": "local-hard-reasoning",
+                "task": {
+                    "goal": "return json",
+                    "sources": [
+                        {
+                            "id": "must-not-be-read",
+                            "path": "C:/definitely-not-present/toolkit-required-reasoning.txt",
+                        }
+                    ],
+                    "expected_output": {"format": "json"},
+                },
+                "reasoning": {"mode": "off"},
+            }
+        )
+        accepted = toolkit.invoke(
+            {
+                "backend": "local-hard-reasoning",
+                "task": {"goal": "return json", "expected_output": {"format": "json"}},
+                "reasoning": {"mode": "on"},
+            }
+        )
+
+        self.assertEqual("blocked", blocked["status"])
+        self.assertEqual("invalid_request", blocked["error"]["category"])
+        self.assertIn("requires reasoning.mode=on", blocked["error"]["summary"])
+        self.assertEqual("local-hard-reasoning", blocked["backend"]["resolved"])
+        self.assertEqual("ok", accepted["status"])
+        self.assertEqual(1, len(hard_provider.calls))
 
     def test_replaced_model_digest_invalidates_old_live_evidence(self):
         registry = BackendRegistry.from_dict(registry_data(expected_digest="old-digest"))

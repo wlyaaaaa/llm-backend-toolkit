@@ -40,6 +40,10 @@ python -m venv .venv
 
 注册表把 backend ID、adapter、模型、端点环境变量、数据去向、AICLI Profile、route、runner 与版本绑定证据分离。替换 Ollama 模型、OpenAI Chat 兼容 API 或已有 AICLI Profile 只需改注册表；route 名称可以自定义并映射到已实现的 runner adapter，全新 wire protocol 或全新智能体 CLI 才需要增加代码 adapter。已验收模型的 digest/父模型一旦不匹配，`live_verified` 自动失效并阻止沿用旧验收。注册表禁止内嵌凭据；云端 `openai-chat` 地址必须使用 HTTPS。
 
+`local-hard-reasoning` 是显式的本地 direct 角色，仍通过 `127.0.0.1:32100` 的 LocalGpuBroker 使用同一个 `qwen-main-v1`，不会创建或加载第二个模型别名。它把经校准的 Qwen thinking-general 采样参数作为受限 `ollama_options` 写入 `/api/chat`，并在 registry 中声明 `required_reasoning_mode=on`；漏写或关闭 thinking 会在读取 source、处理媒体或调用 provider 前失败关闭。省略 backend 仍解析到参数不变的 `local-default`，工具也不会因失败自动切换到此角色。隐藏 thinking 在 provider 边界即丢弃，只保留公开回答和非正文计数。
+
+`ollama_options` 只允许出现在本地 Ollama backend 配置中，并且只接受 `temperature`、`top_p`、`top_k`、`min_p`、`presence_penalty`、`repeat_penalty`、`num_ctx` 与 `num_predict` 的有界数值。请求本身不能任意注入这些参数，云端 adapter 也会拒绝该字段。
+
 ## AI 默认入口：异步任务
 
 提交请求会立即返回 `job_id`：

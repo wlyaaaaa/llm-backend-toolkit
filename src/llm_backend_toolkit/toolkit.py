@@ -58,6 +58,20 @@ class Toolkit:
         except ValueError as exc:
             return self._blocked("invalid_request", str(exc))
 
+        reasoning_mode = str((request.get("reasoning") or {}).get("mode") or "off")
+        if reasoning_mode not in {"off", "on"}:
+            result = self._blocked("invalid_request", f"Unsupported reasoning mode: {reasoning_mode}")
+            result["backend"] = self._backend_receipt(resolved)
+            return result
+        required_reasoning_mode = resolved.config.get("required_reasoning_mode")
+        if required_reasoning_mode and reasoning_mode != required_reasoning_mode:
+            result = self._blocked(
+                "invalid_request",
+                f"Backend {resolved.backend_id} requires reasoning.mode={required_reasoning_mode}.",
+            )
+            result["backend"] = self._backend_receipt(resolved)
+            return result
+
         media_config = request.get("media") or {}
         attachments = list(media_config.get("attachments") or [])
         privacy = request.get("privacy") or {}
@@ -106,9 +120,6 @@ class Toolkit:
             result["backend"] = self._backend_receipt(resolved)
             return result
 
-        reasoning_mode = str((request.get("reasoning") or {}).get("mode") or "off")
-        if reasoning_mode not in {"off", "on"}:
-            return self._blocked("invalid_request", f"Unsupported reasoning mode: {reasoning_mode}")
         execution = request.get("execution") or {}
         execution_mode = str(execution.get("mode") or "direct")
         if execution_mode not in {"direct", "agent"}:

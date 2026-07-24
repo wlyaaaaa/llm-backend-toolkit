@@ -10,6 +10,40 @@ from typing import Any
 
 REGISTRY_SCHEMA = "llm-backend-toolkit.backends.v1"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+OLLAMA_OPTION_RULES: dict[str, tuple[str, float, float]] = {
+    "temperature": ("number", 0.0, 2.0),
+    "top_p": ("number", 0.0, 1.0),
+    "top_k": ("integer", 1.0, 1000.0),
+    "min_p": ("number", 0.0, 1.0),
+    "presence_penalty": ("number", -2.0, 2.0),
+    "repeat_penalty": ("number", 0.0, 2.0),
+    "num_ctx": ("integer", 1024.0, 1_048_576.0),
+    "num_predict": ("integer", 1.0, 131_072.0),
+}
+
+
+def validate_ollama_options(value: Any) -> dict[str, int | float]:
+    if not isinstance(value, dict):
+        raise ValueError("Backend ollama_options must be an object")
+    unknown = sorted(set(value) - set(OLLAMA_OPTION_RULES))
+    if unknown:
+        raise ValueError(f"Backend ollama_options contains unsupported keys: {', '.join(unknown)}")
+    output: dict[str, int | float] = {}
+    for key, raw_value in value.items():
+        kind, minimum, maximum = OLLAMA_OPTION_RULES[key]
+        if kind == "integer":
+            valid_type = type(raw_value) is int
+        else:
+            valid_type = type(raw_value) in {int, float}
+        if not valid_type:
+            raise ValueError(f"Backend ollama_options.{key} must be a {kind}")
+        numeric = float(raw_value)
+        if not minimum <= numeric <= maximum:
+            raise ValueError(
+                f"Backend ollama_options.{key} must be between {minimum:g} and {maximum:g}"
+            )
+        output[key] = raw_value
+    return output
 
 
 @dataclass(frozen=True)
@@ -76,6 +110,22 @@ class BackendRegistry:
                 raise ValueError(f"Backend {backend_id} has unsupported adapter: {adapter}")
             if not model:
                 raise ValueError(f"Backend {backend_id} requires a model")
+            normalized = dict(raw)
+            if "required_reasoning_mode" in raw:
+                required_reasoning_mode = raw["required_reasoning_mode"]
+                if type(required_reasoning_mode) is not str or required_reasoning_mode not in {
+                    "off",
+                    "on",
+                }:
+                    raise ValueError(
+                        f"Backend {backend_id} required_reasoning_mode must be off or on"
+                    )
+            if "ollama_options" in raw:
+                if adapter != "ollama" or bool(raw.get("cloud")):
+                    raise ValueError(
+                        f"Backend {backend_id} ollama_options are allowed only for a local ollama backend"
+                    )
+                normalized["ollama_options"] = validate_ollama_options(raw["ollama_options"])
             routes = raw.get("agent_routes") or {}
             if not isinstance(routes, dict):
                 raise ValueError(f"Backend {backend_id} agent_routes must be an object")
@@ -85,7 +135,7 @@ class BackendRegistry:
                 for required in ("runner", "profile", "model"):
                     if not str(route.get(required) or ""):
                         raise ValueError(f"Backend {backend_id} route {route_id} requires {required}")
-            backends[backend_id] = dict(raw)
+            backends[backend_id] = normalized
         if default_backend not in backends:
             raise ValueError("Backend registry default_backend does not exist")
         if bool(backends[default_backend].get("cloud")):
@@ -132,6 +182,7 @@ class BackendRegistry:
                     "model": config.get("model"),
                     "supports_vision": bool(config.get("supports_vision")),
                     "data_destination": config.get("data_destination"),
+                    "required_reasoning_mode": config.get("required_reasoning_mode"),
                     "agent_routes": sorted((config.get("agent_routes") or {}).keys()),
                 }
             )

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .backends import BackendRegistry
+from .backends import BackendRegistry, validate_ollama_options
 from .errors import ProviderCallError, ToolError, classify_provider_error
 
 
@@ -125,7 +125,7 @@ class OpenAIChatProvider:
             model=str(response.get("model") or self.model),
             finish_reason=str(choice.get("finish_reason") or ""),
             usage=dict(response.get("usage") or {}),
-            reasoning=str(message.get("reasoning_content") or ""),
+            reasoning="",
             tool_calls=list(message.get("tool_calls") or []),
         )
 
@@ -158,7 +158,14 @@ class OllamaProvider:
     cloud = False
     supports_vision = True
 
-    def __init__(self, *, base_url: str | None = None, model: str = "qwen-main-v1", timeout: int = 900) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str | None = None,
+        model: str = "qwen-main-v1",
+        timeout: int = 900,
+        ollama_options: dict[str, Any] | None = None,
+    ) -> None:
         self.model = model
         self.base_url = (base_url or os.environ.get("LLM_TOOLKIT_OLLAMA_BASE_URL") or "http://127.0.0.1:32100").rstrip("/")
         parsed = urllib.parse.urlparse(self.base_url)
@@ -166,6 +173,9 @@ class OllamaProvider:
             raise ValueError("Internal Ollama backend 32101 is forbidden; use the managed public endpoint.")
         self.timeout = timeout
         self.keep_alive: int | str = os.environ.get("LLM_TOOLKIT_OLLAMA_KEEP_ALIVE", "0")
+        self.ollama_options = (
+            validate_ollama_options(ollama_options) if ollama_options is not None else {}
+        )
 
     @staticmethod
     def _emit_progress(
@@ -305,6 +315,8 @@ class OllamaProvider:
             "think": reasoning_mode != "off",
             "keep_alive": self.keep_alive,
         }
+        if self.ollama_options:
+            payload["options"] = dict(self.ollama_options)
         request = urllib.request.Request(
             f"{self.base_url}/api/chat",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -326,7 +338,7 @@ class OllamaProvider:
                 "eval_duration_ns": response.get("eval_duration"),
                 "total_duration_ns": response.get("total_duration"),
             },
-            reasoning=str(response_message.get("thinking") or ""),
+            reasoning="",
             tool_calls=list(response_message.get("tool_calls") or []),
         )
 
@@ -422,11 +434,18 @@ def provider_from_config(config: dict[str, Any]) -> Any:
     model = str(config.get("model") or "")
     cloud = bool(config.get("cloud"))
     supports_vision = bool(config.get("supports_vision"))
+    if "ollama_options" in config and (adapter != "ollama" or cloud):
+        raise ValueError("ollama_options are allowed only for a local ollama backend")
     if adapter == "ollama":
         base_url = os.environ.get(str(config.get("base_url_env") or "")) or str(
             config.get("base_url_default") or "http://127.0.0.1:32100"
         )
-        return OllamaProvider(base_url=base_url, model=model, timeout=int(config.get("timeout_seconds") or 900))
+        return OllamaProvider(
+            base_url=base_url,
+            model=model,
+            timeout=int(config.get("timeout_seconds") or 900),
+            ollama_options=config.get("ollama_options"),
+        )
     if adapter == "openai-chat":
         base_url = os.environ.get(str(config.get("base_url_env") or "")) or str(config.get("base_url_default") or "")
         if not base_url:

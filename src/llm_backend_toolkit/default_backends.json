@@ -57,6 +57,27 @@
         }
       }
     },
+    "local-hard-reasoning": {
+      "adapter": "ollama",
+      "model": "qwen-main-v1",
+      "cloud": false,
+      "supports_vision": true,
+      "base_url_env": "LLM_TOOLKIT_OLLAMA_BASE_URL",
+      "base_url_default": "http://127.0.0.1:32100",
+      "data_destination": "LocalGpuBroker Ollama endpoint",
+      "required_reasoning_mode": "on",
+      "ollama_options": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 1.5,
+        "repeat_penalty": 1.0,
+        "num_ctx": 262144,
+        "num_predict": 32768
+      },
+      "agent_routes": {}
+    },
     "cloud-qwen-plus": {
       "adapter": "openai-chat",
       "model": "qwen3.7-plus",
