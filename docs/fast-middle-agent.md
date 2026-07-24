@@ -8,17 +8,17 @@
 
 对照链路：`local-default → data_factory → codex-cli → aicli codex-ollama-main → LocalGpuBroker:32100 → qwen-main-v1 → Qwen3.6 35B Q4_K_M`
 
-默认保持：`local-default`。Spark 只显式启用，不自动替换本地模型。
+协议失效安全默认保持：省略 backend 时解析到 `local-default`。任务质量采用相对默认：跨文件、工具循环、长对话降噪和严格结构任务优先显式选择 Spark；隐含现实目标/常识因果与额度回退优先本地。
 
 ## 裁决
 
 Spark 值得作为 PersonalOS 与 `.agents` 的高速中档候选，但不是 Qwen 的全面替代：
 
-- Spark 适合文本型、云端已获准、边界清晰、低延迟、有独立 verifier 的跨文件读取、工具任务和严格结构输出。
-- 本地 Qwen 保留隐私材料、高吞吐批处理、成本敏感任务、Spark 额度回退，以及部分现实目标/常识因果复核。
+- Spark 适合文本型、边界清晰、低延迟、有独立 verifier 的跨文件读取、工具任务、长对话降噪和严格结构输出。
+- 本地 Qwen 保留 Spark 额度回退，以及隐含现实目标/常识因果任务。
 - 顶级模型继续负责歧义、真实意图、授权、公共发布、不可逆操作、高风险判断和无 verifier 的最终裁决。
 
-不改变默认路由，不自动 fallback，不把本地回退结果记作 Spark。
+当前设备与云链视为可信，隐私不参与 Spark/Qwen 能力排序；`privacy.cloud_allowed=true` 继续作为云路由的显式协议回执。注册表默认仍不改变，不自动 fallback，不把本地回退结果记作 Spark。
 
 ## “桌面能选”与“工具包能调用”是两条证据
 
@@ -79,19 +79,18 @@ Spark 额度剩余是外部动态状态，不能推断。quota、rate-limit 或 
 ### 顶级模型
 
 - 真实目标不清、权威事实冲突、无可靠 verifier；
-- 授权、隐私、公共发布、法律/医疗/财务、安全、不可逆变更；
+- 授权、公共发布、法律/医疗/财务、安全、不可逆变更；
 - 中档/本地结果的最终验收和跨 owner 裁决。
 
 ### Spark 高速中档
 
-- 文本型、云端明确允许、文件 allowlist 明确；
+- 文本型、`privacy.cloud_allowed=true` 协议回执和文件 allowlist 明确；
 - 有界跨文件读取、证据归并、定位、草拟、严格 JSON；
 - 低延迟有价值，且产物有 schema、脚本或语义 verifier；
 - 不承担图像输入、隐含现实目标的最终判断、高风险或 canonical raw 无验证写入。
 
 ### 本地 Qwen
 
-- 禁止上云、隐私本地、大批量重复、成本敏感；
 - Spark 额度/资格/限流后的显式回退；
 - 某些隐含目标和现实因果的独立复核；
 - 严格 JSON 需外部校验/救援解析，工具任务应给更宽步骤预算。
