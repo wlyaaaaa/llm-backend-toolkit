@@ -4,12 +4,13 @@ import base64
 import json
 import mimetypes
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .backends import BackendRegistry
 from .errors import ProviderCallError, ToolError, classify_provider_error
@@ -75,7 +76,14 @@ class OpenAIChatProvider:
         self.supports_vision = supports_vision
         self.thinking_field = thinking_field
 
-    def invoke(self, prompt: str, native_images: list[str], reasoning_mode: str) -> ProviderResponse:
+    def invoke(
+        self,
+        prompt: str,
+        native_images: list[str],
+        reasoning_mode: str,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> ProviderResponse:
+        del progress_callback
         if not self.api_key:
             raise ProviderCallError(
                 ToolError(
@@ -159,7 +167,132 @@ class OllamaProvider:
         self.timeout = timeout
         self.keep_alive: int | str = os.environ.get("LLM_TOOLKIT_OLLAMA_KEEP_ALIVE", "0")
 
-    def invoke(self, prompt: str, native_images: list[str], reasoning_mode: str) -> ProviderResponse:
+    @staticmethod
+    def _emit_progress(
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+        event: dict[str, Any],
+    ) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(event)
+        except Exception:
+            # Progress display is best-effort observability and must never
+            # interrupt or alter the provider result.
+            return
+
+    def _invoke_streaming(
+        self,
+        request: urllib.request.Request,
+        progress_callback: Callable[[dict[str, Any]], None],
+    ) -> ProviderResponse:
+        started = time.monotonic()
+        public_chunks: list[str] = []
+        public_chars = 0
+        tool_calls: list[dict[str, Any]] = []
+        thinking_chars = 0
+        token_events = 0
+        final_chunk: dict[str, Any] = {}
+        self._emit_progress(
+            progress_callback,
+            {
+                "phase": "connecting",
+                "elapsed_seconds": 0.0,
+                "content_chars": 0,
+                "thinking_active": False,
+                "thinking_chars": 0,
+                "token_events": 0,
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8").strip()
+                    if not line:
+                        continue
+                    chunk = json.loads(line)
+                    final_chunk = chunk
+                    message = chunk.get("message") or {}
+                    thinking_delta = str(message.get("thinking") or "")
+                    content_delta = str(message.get("content") or "")
+                    if thinking_delta:
+                        # Hidden reasoning is counted for activity only and is
+                        # intentionally discarded immediately.
+                        thinking_chars += len(thinking_delta)
+                    if content_delta:
+                        public_chunks.append(content_delta)
+                        public_chars += len(content_delta)
+                    if thinking_delta or content_delta:
+                        token_events += 1
+                    if message.get("tool_calls"):
+                        tool_calls.extend(list(message.get("tool_calls") or []))
+                    phase = "generating" if content_delta else "thinking" if thinking_delta else "waiting"
+                    event: dict[str, Any] = {
+                        "phase": phase,
+                        "elapsed_seconds": round(time.monotonic() - started, 3),
+                        "content_chars": public_chars,
+                        "thinking_active": bool(thinking_delta),
+                        "thinking_chars": thinking_chars,
+                        "token_events": token_events,
+                    }
+                    if content_delta:
+                        event["content_delta"] = content_delta
+                    self._emit_progress(progress_callback, event)
+        except urllib.error.HTTPError as exc:
+            try:
+                payload = json.loads(exc.read().decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload = {}
+            raise ProviderCallError(classify_provider_error(exc.code, payload)) from exc
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+        ) as exc:
+            raise ProviderCallError(
+                ToolError(
+                    category="provider_unavailable",
+                    summary=f"Provider transport failed: {type(exc).__name__}",
+                    retryable=True,
+                    options=("retry-later", "handle-in-codex"),
+                )
+            ) from exc
+
+        self._emit_progress(
+            progress_callback,
+            {
+                "phase": "completed",
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "content_chars": public_chars,
+                "thinking_active": False,
+                "thinking_chars": thinking_chars,
+                "token_events": token_events,
+            },
+        )
+        return ProviderResponse(
+            content="".join(public_chunks),
+            model=str(final_chunk.get("model") or self.model),
+            finish_reason=str(final_chunk.get("done_reason") or ""),
+            usage={
+                "prompt_tokens": final_chunk.get("prompt_eval_count"),
+                "completion_tokens": final_chunk.get("eval_count"),
+                "prompt_eval_duration_ns": final_chunk.get("prompt_eval_duration"),
+                "eval_duration_ns": final_chunk.get("eval_duration"),
+                "total_duration_ns": final_chunk.get("total_duration"),
+            },
+            reasoning="",
+            tool_calls=tool_calls,
+        )
+
+    def invoke(
+        self,
+        prompt: str,
+        native_images: list[str],
+        reasoning_mode: str,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> ProviderResponse:
         message: dict[str, Any] = {"role": "user", "content": prompt}
         if native_images:
             message["images"] = [
@@ -168,7 +301,7 @@ class OllamaProvider:
         payload = {
             "model": self.model,
             "messages": [message],
-            "stream": False,
+            "stream": progress_callback is not None,
             "think": reasoning_mode != "off",
             "keep_alive": self.keep_alive,
         }
@@ -178,6 +311,8 @@ class OllamaProvider:
             headers={"Content-Type": "application/json; charset=utf-8"},
             method="POST",
         )
+        if progress_callback is not None:
+            return self._invoke_streaming(request, progress_callback)
         response = _read_json_response(request, self.timeout)
         response_message = response.get("message") or {}
         return ProviderResponse(
@@ -187,6 +322,8 @@ class OllamaProvider:
             usage={
                 "prompt_tokens": response.get("prompt_eval_count"),
                 "completion_tokens": response.get("eval_count"),
+                "prompt_eval_duration_ns": response.get("prompt_eval_duration"),
+                "eval_duration_ns": response.get("eval_duration"),
                 "total_duration_ns": response.get("total_duration"),
             },
             reasoning=str(response_message.get("thinking") or ""),
@@ -253,7 +390,14 @@ class AgentOnlyProvider:
         self.cloud = cloud
         self.supports_vision = supports_vision
 
-    def invoke(self, prompt: str, native_images: list[str], reasoning_mode: str) -> ProviderResponse:
+    def invoke(
+        self,
+        prompt: str,
+        native_images: list[str],
+        reasoning_mode: str,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> ProviderResponse:
+        del progress_callback
         raise ProviderCallError(
             ToolError(
                 category="direct_mode_unavailable",

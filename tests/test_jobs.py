@@ -26,6 +26,14 @@ class JobStoreTests(unittest.TestCase):
             self.assertGreaterEqual(receipt["poll_after_ms"], 30_000)
             state = store.get(receipt["job_id"])
             self.assertEqual("queued", state["job_status"])
+            self.assertEqual(
+                {
+                    "task_goal": "g",
+                    "execution_mode": "direct",
+                    "reasoning_mode": "off",
+                },
+                state["display"],
+            )
 
     def test_agent_polling_uses_slow_initial_advice_and_exponential_backoff(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -104,6 +112,63 @@ class JobStoreTests(unittest.TestCase):
             result = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
             self.assertEqual("done", result["output"])
 
+    def test_progress_recorder_is_human_readable_and_never_persists_hidden_reasoning(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(
+                receipt["job_id"],
+                allow_public_preview=False,
+                write_interval_seconds=0.05,
+            )
+
+            recorder({"phase": "accepted"})
+            recorder(
+                {
+                    "phase": "thinking",
+                    "elapsed_seconds": 1.5,
+                    "thinking_active": True,
+                    "thinking_chars": 42,
+                    "token_events": 7,
+                    "content_delta": '{"partial":"do not show"}',
+                    "reasoning": "PRIVATE_HIDDEN_TRACE",
+                }
+            )
+
+            progress_path = Path(temp) / receipt["job_id"] / "progress.json"
+            raw = progress_path.read_text(encoding="utf-8")
+            progress = json.loads(raw)
+
+            self.assertEqual("thinking", progress["phase"])
+            self.assertIn("内部分析", progress["summary"])
+            self.assertEqual(42, progress["metrics"]["thinking_chars"])
+            self.assertEqual(7, progress["metrics"]["token_events"])
+            self.assertNotIn("public_preview", progress)
+            self.assertNotIn("PRIVATE_HIDDEN_TRACE", raw)
+            self.assertNotIn('"partial"', raw)
+
+    def test_progress_recorder_accumulates_only_bounded_public_reply_preview(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(
+                receipt["job_id"],
+                allow_public_preview=True,
+                preview_chars=200,
+                write_interval_seconds=0.05,
+            )
+
+            recorder({"phase": "generating", "content_delta": "你好，"})
+            recorder({"phase": "completed", "content_delta": "这是公开回复。"})
+
+            progress = json.loads(
+                (Path(temp) / receipt["job_id"] / "progress.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual("你好，这是公开回复。", progress["public_preview"])
+            self.assertEqual("completed", progress["phase"])
+
     def test_get_returns_compact_state_and_result_only_after_completion(self):
         with tempfile.TemporaryDirectory() as temp:
             store = JobStore(Path(temp), spawner=lambda *_: None)
@@ -116,6 +181,7 @@ class JobStoreTests(unittest.TestCase):
             self.assertNotIn("request", queued)
             self.assertEqual("completed", completed["job_status"])
             self.assertEqual({"answer": 56}, completed["result"]["output"])
+            self.assertEqual("g", completed["display"]["task_goal"])
 
     def test_long_output_is_externalized_from_the_default_result_view(self):
         with tempfile.TemporaryDirectory() as temp:

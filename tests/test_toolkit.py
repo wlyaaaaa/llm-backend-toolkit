@@ -14,12 +14,33 @@ class FakeProvider:
         self.cloud = cloud
         self.calls = []
 
-    def invoke(self, prompt, native_images, reasoning_mode):
+    def invoke(self, prompt, native_images, reasoning_mode, progress_callback=None):
         self.calls.append(
             {"prompt": prompt, "native_images": list(native_images), "reasoning_mode": reasoning_mode}
         )
         if self.error:
             raise self.error
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "phase": "thinking",
+                    "elapsed_seconds": 1.0,
+                    "thinking_active": True,
+                    "thinking_chars": 20,
+                    "token_events": 3,
+                }
+            )
+            progress_callback(
+                {
+                    "phase": "generating",
+                    "elapsed_seconds": 2.0,
+                    "thinking_active": False,
+                    "content_delta": "公开回复",
+                    "content_chars": 4,
+                    "thinking_chars": 20,
+                    "token_events": 6,
+                }
+            )
         return self.response
 
 
@@ -37,6 +58,22 @@ def base_request(provider="qwen-main-v1"):
 
 
 class ToolkitTests(unittest.TestCase):
+    def test_progress_callback_reports_safe_generation_and_validation_phases(self):
+        provider = FakeProvider(
+            ProviderResponse(content='{"answer": 56}', model="qwen-main-v1")
+        )
+        toolkit = Toolkit(providers={"qwen-main-v1": provider})
+        events = []
+
+        result = toolkit.invoke(base_request(), progress_callback=events.append)
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(
+            ["preparing", "thinking", "generating", "validating", "completed"],
+            [event["phase"] for event in events],
+        )
+        self.assertEqual("公开回复", events[2]["content_delta"])
+
     def test_success_returns_result_side_checks_and_no_reasoning(self):
         provider = FakeProvider(
             ProviderResponse(

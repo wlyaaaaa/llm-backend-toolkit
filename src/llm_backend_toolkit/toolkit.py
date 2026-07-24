@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .agent_runners import AgentRunnerError, default_runners
 from .backends import BackendRegistry, ResolvedBackend
@@ -32,7 +32,25 @@ class Toolkit:
     def catalog(self) -> dict[str, Any]:
         return {"status": "ok", "backend_catalog": self.registry.catalog()}
 
-    def invoke(self, request: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _emit_progress(
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+        event: dict[str, Any],
+    ) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(event)
+        except Exception:
+            return
+
+    def invoke(
+        self,
+        request: dict[str, Any],
+        *,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        self._emit_progress(progress_callback, {"phase": "preparing"})
         try:
             resolved, provider = self._resolve_provider(
                 str(request.get("backend") or request.get("provider") or "") or None
@@ -96,7 +114,8 @@ class Toolkit:
         if execution_mode not in {"direct", "agent"}:
             return self._blocked("invalid_request", f"Unsupported execution mode: {execution_mode}")
         if execution_mode == "agent":
-            return self._invoke_agent(
+            self._emit_progress(progress_callback, {"phase": "waiting"})
+            result = self._invoke_agent(
                 request=request,
                 resolved=resolved,
                 provider=provider,
@@ -105,9 +124,23 @@ class Toolkit:
                 media=media,
                 sources=sources,
             )
+            self._emit_progress(
+                progress_callback,
+                {"phase": "completed" if result.get("status") in {"ok", "partial"} else "failed"},
+            )
+            return result
         try:
-            response = provider.invoke(compacted.prompt, media.native_images, reasoning_mode)
+            if progress_callback is None:
+                response = provider.invoke(compacted.prompt, media.native_images, reasoning_mode)
+            else:
+                response = provider.invoke(
+                    compacted.prompt,
+                    media.native_images,
+                    reasoning_mode,
+                    progress_callback=progress_callback,
+                )
         except ProviderCallError as exc:
+            self._emit_progress(progress_callback, {"phase": "failed"})
             result = self._from_error("failed", exc.error)
             result["backend"] = self._backend_receipt(resolved)
             result["provider"] = {"requested": resolved.requested, "actual": resolved.backend_id}
@@ -117,9 +150,10 @@ class Toolkit:
             result["delegation_receipt"] = self._delegation_receipt(compacted.receipt, sources.receipt)
             return result
 
+        self._emit_progress(progress_callback, {"phase": "validating"})
         output, checks = self._check_output(response.content, (request.get("task") or {}).get("expected_output") or {})
         status = "ok" if all(check["passed"] for check in checks) else "partial"
-        return {
+        result = {
             "status": status,
             "output": output,
             "backend": self._backend_receipt(resolved),
@@ -134,6 +168,8 @@ class Toolkit:
             "source_receipt": sources.receipt,
             "decision": None,
         }
+        self._emit_progress(progress_callback, {"phase": "completed"})
+        return result
 
     def _invoke_agent(
         self,

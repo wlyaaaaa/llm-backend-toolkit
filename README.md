@@ -65,6 +65,18 @@ python -m venv .venv
 不含外部文件引用的相同请求默认复用已完成结果；agent workspace、source 或 media 等可变引用默认不缓存。只有调用者提供绑定真实内容 hash 的 `cache_key` 才允许这类请求命中缓存。明确需要一次新尝试时使用 `submit --force`。
 回执同时给出 `recommended_check_utc` 与 `monitor_until_utc`。初次建议等待 30-60 秒，过早读取后指数退避；任务超过硬期限会显示 `stale`、停止建议轮询，并把重试或接管交回顶级模型。
 
+## 人类只读仪表盘
+
+Windows 上可用一个常驻 PowerShell 窗口观察最新任务：
+
+```powershell
+pwsh -NoProfile -File .\scripts\Show-LlmBackendDashboard.ps1
+```
+
+仪表盘使用增量行刷新，不会每两秒清屏；`R` 在人类视图与原始结果间展开/收起，`Q` 退出。direct Ollama 任务会显示中文阶段、公开回复片段、流式估算 TPS，最终块到达后改用 `eval_count / eval_duration` 的准确 TPS。结构化 JSON 在生成过程中不展示残缺正文。
+
+`progress.json` 只保留阶段、计数、公开回复短预览和少量最近事件；prompt、隐藏 thinking 原文、原始子进程事件、命令正文与命令输出不会写入进度文件。仪表盘中的“思考与工作进展”是可验证的工作摘要，不是 chain-of-thought。
+
 ## 数据工厂智能体
 
 默认请求见 [examples/local-agent-request.json](examples/local-agent-request.json)。关键字段：

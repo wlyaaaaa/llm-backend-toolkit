@@ -147,10 +147,21 @@ def main(argv: list[str] | None = None) -> int:
             result["probe"] = {"backend": backend or "local-default", "case": args.case, "scope": "bounded"}
         elif args.command == "_worker":
             store = JobStore(args.state_dir)
+            progress = None
             try:
                 request = store.claim(args.job_id)
-                store.complete(args.job_id, Toolkit().invoke(request))
+                expected = ((request.get("task") or {}).get("expected_output") or {})
+                output_format = str(expected.get("format") or "text").lower()
+                progress = store.progress_recorder(
+                    args.job_id,
+                    allow_public_preview=output_format in {"", "text", "plain", "markdown", "md"},
+                )
+                progress({"phase": "accepted"})
+                result = Toolkit().invoke(request, progress_callback=progress)
+                store.complete(args.job_id, result)
             except Exception as exc:
+                if progress is not None:
+                    progress({"phase": "failed"})
                 store.fail(args.job_id, f"Worker failed: {type(exc).__name__}")
             return 0
         else:

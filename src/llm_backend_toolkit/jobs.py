@@ -6,6 +6,7 @@ import os
 import secrets
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -40,6 +41,11 @@ def _is_expired(value: Any) -> bool:
     except ValueError:
         return False
     return datetime.now(timezone.utc) >= deadline
+
+
+def _display_text(value: Any, *, max_chars: int = 1_000) -> str:
+    text = " ".join(str(value or "").split())
+    return text[:max_chars]
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -154,6 +160,13 @@ class JobStore:
                 "conversation_root": (conversation or {}).get("root_job_id") or job_id,
                 "conversation_turn": (conversation or {}).get("turn") or 1,
                 "conversation_max_turns": (conversation or {}).get("max_turns"),
+                "display": {
+                    "task_goal": _display_text(task.get("goal")),
+                    "execution_mode": "agent" if is_agent else "direct",
+                    "reasoning_mode": str(
+                        (request.get("reasoning") or {}).get("mode") or "off"
+                    ),
+                },
             },
         )
         try:
@@ -186,6 +199,101 @@ class JobStore:
         if not isinstance(value, dict):
             raise ValueError("Stored job request is not an object")
         return value
+
+    def progress_recorder(
+        self,
+        job_id: str,
+        *,
+        allow_public_preview: bool,
+        preview_chars: int = 1_500,
+        write_interval_seconds: float = 0.25,
+    ) -> Callable[[dict[str, Any]], None]:
+        job_dir = self._job_dir(job_id)
+        if not (job_dir / "state.json").is_file():
+            raise FileNotFoundError(f"Unknown job: {job_id}")
+        preview_limit = max(200, preview_chars)
+        interval = max(0.05, write_interval_seconds)
+        public_preview = ""
+        events: list[dict[str, Any]] = []
+        last_phase = ""
+        last_write = 0.0
+        metrics: dict[str, Any] = {
+            "elapsed_seconds": 0.0,
+            "content_chars": 0,
+            "thinking_active": False,
+            "thinking_chars": 0,
+            "token_events": 0,
+        }
+
+        summaries = {
+            "accepted": "我已接到任务，正在准备执行。",
+            "queued": "任务正在等待本地 GPU。",
+            "preparing": "我正在整理输入、来源和输出约束。",
+            "connecting": "我正在连接本地模型并取得 GPU 运行通道。",
+            "waiting": "模型已经开始工作，正在等待下一段可公开输出。",
+            "thinking": "模型仍在内部分析，暂时没有可公开的结论。",
+            "generating": "模型已经开始形成公开回复。",
+            "validating": "生成结束，正在检查结构、必填字段和结果完整性。",
+            "completed": "结果已经写入耐久任务目录，可以继续验收或接管。",
+            "failed": "执行遇到问题，已保留可接管状态。",
+        }
+        allowed_phases = set(summaries)
+
+        def record(event: dict[str, Any]) -> None:
+            nonlocal public_preview, last_phase, last_write
+            phase = str(event.get("phase") or "waiting")
+            if phase not in allowed_phases:
+                phase = "waiting"
+            delta = str(event.get("content_delta") or "")
+            if allow_public_preview and delta and len(public_preview) < preview_limit:
+                public_preview = (public_preview + delta)[:preview_limit]
+            if "elapsed_seconds" in event:
+                metrics["elapsed_seconds"] = round(float(event.get("elapsed_seconds") or 0.0), 3)
+            if "content_chars" in event:
+                metrics["content_chars"] = max(0, int(event.get("content_chars") or 0))
+            if "thinking_active" in event:
+                metrics["thinking_active"] = bool(event.get("thinking_active"))
+            if "thinking_chars" in event:
+                metrics["thinking_chars"] = max(0, int(event.get("thinking_chars") or 0))
+            if "token_events" in event:
+                metrics["token_events"] = max(0, int(event.get("token_events") or 0))
+
+            now = time.monotonic()
+            updated_utc = _utc_now()
+            phase_changed = phase != last_phase
+            if phase_changed:
+                events.append(
+                    {
+                        "phase": phase,
+                        "summary": summaries[phase],
+                        "updated_utc": updated_utc,
+                    }
+                )
+                events[:] = events[-8:]
+                last_phase = phase
+
+            payload: dict[str, Any] = {
+                "schema": "llm-backend-toolkit.progress.v1",
+                "job_id": job_id,
+                "phase": phase,
+                "summary": summaries[phase],
+                "updated_utc": updated_utc,
+                "events": events,
+                "metrics": dict(metrics),
+            }
+            if public_preview:
+                payload["public_preview"] = public_preview
+
+            should_write = (
+                phase_changed
+                or phase in {"completed", "failed"}
+                or (now - last_write) >= interval
+            )
+            if should_write:
+                _atomic_json(job_dir / "progress.json", payload)
+                last_write = now
+
+        return record
 
     def complete(self, job_id: str, result: dict[str, Any]) -> None:
         job_dir = self._job_dir(job_id)
@@ -249,6 +357,7 @@ class JobStore:
                 "turn": int(state.get("conversation_turn") or 1),
                 "max_turns": state.get("conversation_max_turns"),
             },
+            "display": dict(state.get("display") or {}),
         }
         if poll_after_ms:
             output["recommended_check_utc"] = _utc_after(poll_after_ms // 1000)

@@ -20,6 +20,22 @@ class FakeHttpResponse:
         return json.dumps(self.payload).encode("utf-8")
 
 
+class FakeStreamingHttpResponse:
+    def __init__(self, payloads):
+        self.payloads = payloads
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def __iter__(self):
+        return iter(
+            [json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n" for payload in self.payloads]
+        )
+
+
 class ProviderContractTests(unittest.TestCase):
     def test_cloud_openai_compatible_backend_rejects_plain_http(self):
         with self.assertRaisesRegex(ValueError, "HTTPS"):
@@ -89,6 +105,9 @@ class ProviderContractTests(unittest.TestCase):
                     "done_reason": "stop",
                     "prompt_eval_count": 8,
                     "eval_count": 2,
+                    "prompt_eval_duration": 300,
+                    "eval_duration": 400,
+                    "total_duration": 900,
                 }
             )
 
@@ -100,8 +119,120 @@ class ProviderContractTests(unittest.TestCase):
         payload = json.loads(request.data.decode("utf-8"))
         self.assertEqual("http://127.0.0.1:32100/api/chat", request.full_url)
         self.assertFalse(payload["think"])
+        self.assertFalse(payload["stream"])
         self.assertEqual("0", payload["keep_alive"])
         self.assertEqual("local", response.content)
+        self.assertEqual("not returned by toolkit", response.reasoning)
+        self.assertEqual(
+            {
+                "prompt_tokens": 8,
+                "completion_tokens": 2,
+                "prompt_eval_duration_ns": 300,
+                "eval_duration_ns": 400,
+                "total_duration_ns": 900,
+            },
+            response.usage,
+        )
+
+    def test_ollama_streams_public_content_and_discards_hidden_thinking(self):
+        seen = []
+        events = []
+        hidden_secret = "PRIVATE_HIDDEN_REASONING_MUST_NOT_LEAK"
+        chunks = [
+            {
+                "model": "qwen-main-v1:latest",
+                "message": {"thinking": hidden_secret, "content": ""},
+                "done": False,
+            },
+            {
+                "model": "qwen-main-v1:latest",
+                "message": {"thinking": "more hidden", "content": ""},
+                "done": False,
+            },
+            {
+                "model": "qwen-main-v1:latest",
+                "message": {"content": "公开"},
+                "done": False,
+            },
+            {
+                "model": "qwen-main-v1:latest",
+                "message": {"content": "回复"},
+                "done": False,
+            },
+            {
+                "model": "qwen-main-v1:latest",
+                "message": {"content": ""},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 11,
+                "eval_count": 7,
+                "prompt_eval_duration": 101,
+                "eval_duration": 202,
+                "total_duration": 404,
+            },
+        ]
+
+        def fake_urlopen(request, timeout):
+            seen.append((request, timeout))
+            return FakeStreamingHttpResponse(chunks)
+
+        provider = OllamaProvider(base_url="http://127.0.0.1:32100")
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            response = provider.invoke("task", [], "on", events.append)
+
+        payload = json.loads(seen[0][0].data.decode("utf-8"))
+        self.assertTrue(payload["stream"])
+        self.assertTrue(payload["think"])
+        self.assertEqual("公开回复", response.content)
+        self.assertEqual("", response.reasoning)
+        self.assertEqual("stop", response.finish_reason)
+        self.assertEqual(
+            {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "prompt_eval_duration_ns": 101,
+                "eval_duration_ns": 202,
+                "total_duration_ns": 404,
+            },
+            response.usage,
+        )
+        self.assertEqual(
+            ["公开", "回复"],
+            [event["content_delta"] for event in events if "content_delta" in event],
+        )
+        self.assertEqual("completed", events[-1]["phase"])
+        self.assertFalse(events[-1]["thinking_active"])
+        self.assertEqual(len(hidden_secret) + len("more hidden"), events[-1]["thinking_chars"])
+        serialized_events = json.dumps(events, ensure_ascii=False)
+        self.assertNotIn(hidden_secret, serialized_events)
+        self.assertNotIn("more hidden", serialized_events)
+        self.assertNotIn(hidden_secret, json.dumps(response.__dict__, ensure_ascii=False))
+
+    def test_ollama_progress_callback_failure_does_not_interrupt_result(self):
+        chunks = [
+            {
+                "model": "qwen-main-v1:latest",
+                "message": {"content": "safe"},
+                "done": False,
+            },
+            {
+                "model": "qwen-main-v1:latest",
+                "message": {},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 1,
+                "eval_count": 1,
+            },
+        ]
+
+        def fail_progress(_event):
+            raise RuntimeError("display unavailable")
+
+        provider = OllamaProvider(base_url="http://127.0.0.1:32100")
+        with patch("urllib.request.urlopen", return_value=FakeStreamingHttpResponse(chunks)):
+            response = provider.invoke("task", [], "off", fail_progress)
+
+        self.assertEqual("safe", response.content)
 
     def test_ollama_status_reports_version_bound_model_identity(self):
         payloads = {
