@@ -133,6 +133,29 @@
           "minLength": 1,
           "maxLength": 80,
           "description": "Short non-sensitive title that is safe to display in persistent local history."
+        },
+        "file_changes": {
+          "type": "object",
+          "description": "Explicit opt-in for persistent relative paths and bounded text diffs. Every listed file must be caller-declared public-safe; omitted or unlisted files remain count-only.",
+          "required": ["mode", "include"],
+          "properties": {
+            "mode": {
+              "const": "diff"
+            },
+            "include": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240,
+                "pattern": "^(?![A-Za-z]:)(?![\\\\/])(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)[^\\u0000-\\u001F\\u007F:]+$"
+              }
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

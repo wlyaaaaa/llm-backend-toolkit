@@ -166,7 +166,7 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("performance.tokens_per_second", self.js)
         self.assertIn("estimated_output_tokens", self.js)
         self.assertIn("≈", self.js)
-        self.assertIn("（估算）", self.js)
+        self.assertIn("（公开内容估算）", self.js)
         self.assertIn("token_events", self.js)
         self.assertIn("片段", self.js)
         self.assertNotIn('title: "调用已提交"', self.js)
@@ -174,6 +174,15 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("summary_zh", self.js)
         self.assertIn("occurred_utc", self.js)
         self.assertIn("编辑文件", self.js)
+        self.assertIn('"workspace.change.observed": "检测到工作区变化"', self.js)
+        self.assertIn("workspace-change-detail", self.js)
+        self.assertIn("未验证由单一进程造成", self.js)
+        self.assertIn("总计 ${formatNumber(totalTokens)}", self.js)
+        self.assertIn("输入 ${formatNumber(promptTokens)}", self.js)
+        self.assertIn("输出 ${formatNumber(completionTokens)}", self.js)
+        self.assertIn("缓存 ${formatNumber(cachedTokens)}", self.js)
+        self.assertIn("输出 token/秒（整段墙钟估算）", self.js)
+        self.assertIn("输出 token/秒（模型评估时段精确）", self.js)
         timeline_body = self.js.split("function timelineEvents(detail)", 1)[1].split(
             "function renderTimeline", 1
         )[0]

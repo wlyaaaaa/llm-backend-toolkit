@@ -704,6 +704,20 @@ summary:focus-visible,
   line-height: 1.55;
 }
 
+.timeline-copy .workspace-change-detail {
+  max-height: 320px;
+  padding: 9px 10px;
+  overflow: auto;
+  border: 1px solid rgb(23 224 75 / 18%);
+  border-radius: 8px;
+  background: var(--mint-50);
+  color: var(--ink);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
 .timeline-copy time {
   display: block;
   margin-top: 4px;

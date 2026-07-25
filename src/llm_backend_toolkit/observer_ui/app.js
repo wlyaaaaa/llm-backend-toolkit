@@ -251,7 +251,7 @@ function calculateTps(detail) {
     evalDurationNs > 0
   ) {
     const exact = completionTokens / (evalDurationNs / 1_000_000_000);
-    return `${exact.toFixed(exact < 10 ? 1 : 0)}（精确）`;
+    return `${exact.toFixed(exact < 10 ? 1 : 0)} 输出 token/秒（模型评估时段精确）`;
   }
   const source = String(
     firstDefined(
@@ -264,16 +264,90 @@ function calculateTps(detail) {
   ).toLowerCase();
   if (Number.isFinite(Number(explicit)) && source) {
     const value = Number(explicit).toFixed(Number(explicit) < 10 ? 1 : 0);
-    return ["exact", "eval_duration"].includes(source)
-      ? `${value}（精确）`
-      : `≈ ${value}（估算）`;
+    if (["exact", "eval_duration"].includes(source)) {
+      return `${value} 输出 token/秒（模型评估时段精确）`;
+    }
+    if (source === "wall_clock_estimate") {
+      return `≈ ${value} 输出 token/秒（整段墙钟估算）`;
+    }
+    if (source === "public_content_estimate") {
+      return `≈ ${value} 输出 token/秒（公开内容估算）`;
+    }
+    return `≈ ${value} 输出 token/秒（来源：${source}）`;
   }
   const durationNs = Number(pick(detail, "result.usage.total_duration_ns", "usage.total_duration_ns"));
   if (Number.isFinite(completionTokens) && Number.isFinite(durationNs) && durationNs > 0) {
     const estimate = completionTokens / (durationNs / 1_000_000_000);
-    return `≈ ${estimate.toFixed(estimate < 10 ? 1 : 0)}（估算）`;
+    return `≈ ${estimate.toFixed(estimate < 10 ? 1 : 0)} 输出 token/秒（总耗时估算）`;
   }
   return "—";
+}
+
+function tokenSummary(detail) {
+  const suppliedTotal = firstDefined(
+    pick(detail, "result.usage.total_tokens"),
+    pick(detail, "usage.total_tokens"),
+  );
+  const promptTokens = pick(detail, "result.usage.prompt_tokens", "usage.prompt_tokens");
+  const completionTokens = pick(
+    detail,
+    "result.usage.completion_tokens",
+    "result.usage.output_tokens",
+    "usage.completion_tokens",
+    "usage.output_tokens",
+  );
+  const cachedTokens = pick(
+    detail,
+    "result.usage.cached_tokens",
+    "result.usage.cached_input_tokens",
+    "usage.cached_tokens",
+    "usage.cached_input_tokens",
+  );
+  const numericPrompt = Number(promptTokens);
+  const numericCompletion = Number(completionTokens);
+  const calculatedTotal =
+    Number.isFinite(numericPrompt) && Number.isFinite(numericCompletion)
+      ? numericPrompt + numericCompletion
+      : undefined;
+  const totalTokens = suppliedTotal ?? calculatedTotal;
+  if (totalTokens !== undefined) {
+    const parts = [`总计 ${formatNumber(totalTokens)}`];
+    if (promptTokens !== undefined) {
+      parts.push(`输入 ${formatNumber(promptTokens)}`);
+    }
+    if (completionTokens !== undefined) {
+      parts.push(`输出 ${formatNumber(completionTokens)}`);
+    }
+    if (cachedTokens !== undefined) {
+      parts.push(`缓存 ${formatNumber(cachedTokens)}`);
+    }
+    return {
+      label: `总计 ${formatNumber(totalTokens)}`,
+      detail: parts.join(" · "),
+    };
+  }
+  const estimatedOutputTokens = pick(
+    detail,
+    "progress.metrics.estimated_output_tokens",
+    "metrics.estimated_output_tokens",
+  );
+  if (estimatedOutputTokens !== undefined && Number(estimatedOutputTokens) > 0) {
+    const label = `≈ ${formatNumber(estimatedOutputTokens)} 输出`;
+    return { label, detail: `${label} token（公开内容估算）` };
+  }
+  const tokenEvents = pick(
+    detail,
+    "progress.metrics.token_events",
+    "metrics.token_events",
+    "progress.token_events",
+  );
+  if (tokenEvents !== undefined) {
+    return {
+      label: "暂无 Token",
+      detail: `尚无 Token usage；已观察 ${formatNumber(tokenEvents)} 个公开片段`,
+    };
+  }
+  return { label: "—", detail: "Token usage 不可用" };
 }
 
 function formatDateTime(value, style = "time") {
@@ -578,6 +652,7 @@ function timelineEvents(detail) {
     "agent.reasoning.activity": "智能体分析活动",
     "agent.tool.activity": "智能体工具活动",
     "agent.output.completed": "智能体公开输出",
+    "workspace.change.observed": "检测到工作区变化",
     "media.ocr.started": "LocalOCR 开始",
     "media.ocr.completed": "LocalOCR 完成",
     "media.asr.started": "ChineseASR 开始",
@@ -591,11 +666,36 @@ function timelineEvents(detail) {
     if (kind === "agent.tool.activity" && payload?.item_type === "file_change") {
       title = payload.status === "completed" ? "完成编辑文件" : "正在编辑文件";
     }
+    let detailText = formatStructured(
+      firstDefined(item.summary_zh, item.public_summary, item.summary, metrics, ""),
+    );
+    if (kind === "workspace.change.observed") {
+      const lines = [detailText];
+      const changeLabels = {
+        added: "新增",
+        deleted: "删除",
+        modified: "修改",
+        metadata: "仅元数据变化",
+      };
+      for (const change of Array.isArray(payload?.changes) ? payload.changes : []) {
+        lines.push(
+          `${change.relative_path} · ${changeLabels[change.change_kind] || "变化"} · ` +
+            `+${change.lines_added ?? 0} -${change.lines_deleted ?? 0}`,
+        );
+        if (change.unified_diff) {
+          lines.push(String(change.unified_diff));
+        }
+      }
+      if (Number(payload?.details_omitted) > 0) {
+        lines.push(`另有 ${payload.details_omitted} 个文件详情因安全或大小上限未展示。`);
+      }
+      lines.push("来源：工作区前后快照；归因：运行时窗观察，未验证由单一进程造成。");
+      detailText = lines.filter(Boolean).join("\n");
+    }
     return {
+      kind,
       title,
-      detail: formatStructured(
-        firstDefined(item.summary_zh, item.public_summary, item.summary, metrics, ""),
-      ),
+      detail: detailText,
       time: firstDefined(
         item.occurred_utc,
         item.timestamp_utc,
@@ -665,7 +765,13 @@ function renderTimeline(detail) {
     const copy = createElement("div", "timeline-copy");
     copy.append(createElement("h3", "", event.title));
     if (event.detail) {
-      copy.append(createElement("p", "", event.detail));
+      copy.append(
+        createElement(
+          "p",
+          event.kind === "workspace.change.observed" ? "workspace-change-detail" : "",
+          event.detail,
+        ),
+      );
     }
     copy.append(createElement("time", "", formatDateTime(event.time)));
     item.append(marker, copy);
@@ -783,51 +889,22 @@ function renderDetail(detail) {
   elements.runId.textContent = String(firstDefined(detail.job_id, detail.id, state.selectedJobId, ""));
   elements.runTitle.textContent = runTitle(detail);
 
-  const totalTokens = firstDefined(
-    pick(detail, "result.usage.total_tokens"),
-    pick(detail, "usage.total_tokens"),
-  );
-  const promptTokens = pick(detail, "result.usage.prompt_tokens", "usage.prompt_tokens");
-  const completionTokens = pick(
-    detail,
-    "result.usage.completion_tokens",
-    "result.usage.output_tokens",
-    "usage.completion_tokens",
-    "usage.output_tokens",
-  );
-  const tokenEvents = pick(
-    detail,
-    "progress.metrics.token_events",
-    "metrics.token_events",
-    "progress.token_events",
-  );
-  const estimatedOutputTokens = pick(
-    detail,
-    "progress.metrics.estimated_output_tokens",
-    "metrics.estimated_output_tokens",
-  );
-  const tokenLabel =
-    totalTokens !== undefined
-      ? formatNumber(totalTokens)
-      : promptTokens !== undefined || completionTokens !== undefined
-        ? `${formatNumber(promptTokens || 0)} + ${formatNumber(completionTokens || 0)}`
-        : estimatedOutputTokens !== undefined && Number(estimatedOutputTokens) > 0
-          ? `≈ ${formatNumber(estimatedOutputTokens)}`
-        : tokenEvents !== undefined
-          ? `暂无（${formatNumber(tokenEvents)} 片段）`
-          : "—";
+  const tokens = tokenSummary(detail);
+  const tps = calculateTps(detail);
 
   elements.metrics.model.textContent = modelName(detail);
   elements.metrics.execution.textContent = executionMode(detail);
   elements.metrics.reasoning.textContent = reasoningLevel(detail);
-  elements.metrics.tokens.textContent = tokenLabel;
-  elements.metrics.tps.textContent = calculateTps(detail);
+  elements.metrics.tokens.textContent = tokens.label;
+  elements.metrics.tps.textContent = tps;
   elements.metrics.duration.textContent = calculateDuration(detail);
   elements.metrics.gpu.textContent = gpuLabel(detail);
   elements.metrics.delivery.textContent = deliveryLabel(detail);
   for (const metric of Object.values(elements.metrics)) {
     metric.title = metric.textContent;
   }
+  elements.metrics.tokens.title = tokens.detail;
+  elements.metrics.tps.title = tps;
 
   const draft = extractDraft(detail);
   const result = extractResult(detail);

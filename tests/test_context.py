@@ -4,6 +4,39 @@ from llm_backend_toolkit.context import ContextOverflow, compact_task
 
 
 class ContextCompactorTests(unittest.TestCase):
+    def test_direct_mode_keeps_final_only_response_discipline(self):
+        request = {
+            "task": {
+                "goal": "Return a concise result",
+                "inputs": ["input"],
+            },
+            "execution": {"mode": "direct"},
+        }
+
+        compacted = compact_task(request)
+
+        self.assertIn("Return only the final result.", compacted.prompt)
+        self.assertNotIn("public progress update", compacted.prompt)
+        self.assertNotIn("Before and after each major action", compacted.prompt)
+
+    def test_agent_mode_requests_public_progress_without_hidden_reasoning(self):
+        request = {
+            "task": {
+                "goal": "修复并验证文件",
+                "inputs": ["workspace"],
+            },
+            "execution": {"mode": "agent"},
+        }
+
+        compacted = compact_task(request)
+
+        self.assertIn("Before and after each major action or tool call", compacted.prompt)
+        self.assertIn("the same language as the user", compacted.prompt)
+        self.assertIn("plan, action, or verified result", compacted.prompt)
+        self.assertIn("Never expose or guess hidden chain-of-thought", compacted.prompt)
+        self.assertIn("End with the complete final result", compacted.prompt)
+        self.assertNotIn("Return only the final result.", compacted.prompt)
+
     def test_cjk_estimate_is_conservative_and_compaction_honors_token_target(self):
         request = {
             "task": {"goal": "总结", "inputs": ["甲" * 1000]},

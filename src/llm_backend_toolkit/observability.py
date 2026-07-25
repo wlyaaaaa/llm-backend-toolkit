@@ -14,6 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from .workspace_observer import (
+    is_safe_public_text,
+    is_safe_workspace_relative_path,
+)
+
 
 EVENT_SCHEMA = "llm-backend-toolkit.run-event.v1"
 _EVENT_SEQUENCE_STATE = ".events-sequence.json"
@@ -50,6 +55,22 @@ _CACHE_IDENTITY_TEXT_FIELDS = frozenset(
 _EVENT_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "run.started": frozenset({"backend", "execution_mode"}),
 }
+_WORKSPACE_SCAN_STATUSES = frozenset(
+    {
+        "scoped_complete",
+        "partial_time_limit",
+        "partial_item_limit",
+        "partial_depth_limit",
+        "partial_error",
+        "unavailable",
+    }
+)
+_WORKSPACE_CHANGE_KINDS = frozenset(
+    {"added", "deleted", "modified", "metadata"}
+)
+_WORKSPACE_DIFF_STATUSES = frozenset(
+    {"available", "truncated", "metadata_only"}
+)
 
 
 def utc_now() -> str:
@@ -232,6 +253,83 @@ def _project_cache_identity(value: Any) -> dict[str, Any]:
     return _project_flat_payload(value, text_fields=_CACHE_IDENTITY_TEXT_FIELDS)
 
 
+def _project_workspace_change_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    changed_files = payload.get("changed_files")
+    scan_status = payload.get("scan_status")
+    detail_policy = payload.get("detail_policy")
+    if (
+        type(changed_files) is not int
+        or not 0 <= changed_files <= 40_000
+        or not isinstance(scan_status, str)
+        or scan_status not in _WORKSPACE_SCAN_STATUSES
+        or payload.get("provenance") != "workspace_before_after"
+        or payload.get("attribution") != "unverified_concurrent_window"
+        or not isinstance(detail_policy, str)
+        or detail_policy not in {
+            "count_only",
+            "caller_public_safe_include",
+        }
+    ):
+        return {}
+
+    changes: list[dict[str, Any]] = []
+    raw_changes = payload.get("changes")
+    if isinstance(raw_changes, (list, tuple)):
+        for raw in raw_changes[:6]:
+            if not isinstance(raw, dict):
+                continue
+            relative_path = raw.get("relative_path")
+            change_kind = raw.get("change_kind")
+            diff_status = raw.get("diff_status")
+            lines_added = raw.get("lines_added")
+            lines_deleted = raw.get("lines_deleted")
+            if (
+                not is_safe_workspace_relative_path(relative_path)
+                or not isinstance(change_kind, str)
+                or change_kind not in _WORKSPACE_CHANGE_KINDS
+                or not isinstance(diff_status, str)
+                or diff_status not in _WORKSPACE_DIFF_STATUSES
+                or type(lines_added) is not int
+                or type(lines_deleted) is not int
+                or not 0 <= lines_added <= 100_000
+                or not 0 <= lines_deleted <= 100_000
+            ):
+                continue
+            projected_change = {
+                "relative_path": relative_path,
+                "change_kind": change_kind,
+                "lines_added": lines_added,
+                "lines_deleted": lines_deleted,
+                "diff_status": diff_status,
+            }
+            unified_diff = raw.get("unified_diff")
+            if (
+                diff_status in {"available", "truncated"}
+                and is_safe_public_text(unified_diff, max_chars=8_000)
+                and str(unified_diff).startswith(f"--- a/{relative_path}\n")
+                and f"+++ b/{relative_path}\n" in str(unified_diff)[:600]
+            ):
+                projected_change["unified_diff"] = unified_diff
+            elif diff_status != "metadata_only":
+                continue
+            changes.append(projected_change)
+    if detail_policy == "count_only":
+        changes = []
+
+    return {
+        "changed_files": changed_files,
+        "scan_status": scan_status,
+        "provenance": "workspace_before_after",
+        "attribution": "unverified_concurrent_window",
+        "detail_policy": detail_policy,
+        "details_included": len(changes),
+        "details_omitted": max(0, changed_files - len(changes)),
+        "changes": changes,
+    }
+
+
 def _public_payload(kind: str, payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -282,6 +380,8 @@ def _public_payload(kind: str, payload: Any) -> dict[str, Any]:
             text_fields=frozenset({"kind", "mode", "route"}),
             id_fields=frozenset({"attachment_id"}),
         )
+    if kind == "workspace.change.observed":
+        return _project_workspace_change_payload(payload)
     if kind.startswith("agent."):
         return _project_flat_payload(
             payload,

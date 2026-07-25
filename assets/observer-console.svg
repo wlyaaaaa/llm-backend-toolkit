@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">模型调用观察台</title>
+  <desc id="desc">白色圆角底板上的绿色观察台显示器与观察镜头</desc>
+  <rect x="48" y="48" width="928" height="928" rx="224" fill="#FFFFFF" stroke="#16A34A" stroke-width="48"/>
+  <rect x="452" y="666" width="120" height="112" rx="20" fill="#16A34A"/>
+  <rect x="326" y="746" width="372" height="70" rx="35" fill="#16A34A"/>
+  <rect x="190" y="230" width="644" height="468" rx="76" fill="#FFFFFF" stroke="#16A34A" stroke-width="52"/>
+  <ellipse cx="512" cy="464" rx="202" ry="128" fill="#16A34A"/>
+  <ellipse cx="512" cy="464" rx="126" ry="78" fill="#FFFFFF"/>
+  <circle cx="512" cy="464" r="54" fill="#16A34A"/>
+</svg>

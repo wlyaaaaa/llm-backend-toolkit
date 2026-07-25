@@ -12,6 +12,16 @@ from .input_integrity import declaration_scope
 from .media import MediaProcessor
 from .providers import default_providers
 from .sources import SourceLoader
+from .workspace_observer import (
+    ValidatedWorkspaceRoot,
+    WorkspaceSnapshot,
+    WorkspaceRootError,
+    capture_workspace_snapshot,
+    compare_workspace_snapshots,
+    is_safe_workspace_relative_path,
+    revalidate_workspace_root,
+    validate_workspace_root,
+)
 
 
 class Toolkit:
@@ -44,6 +54,84 @@ class Toolkit:
             progress_callback(event)
         except Exception:
             return
+
+    @staticmethod
+    def _workspace_snapshot(
+        workspace: ValidatedWorkspaceRoot,
+        public_text_allowlist: frozenset[str],
+    ) -> WorkspaceSnapshot:
+        try:
+            return capture_workspace_snapshot(
+                workspace,
+                public_text_allowlist=public_text_allowlist,
+            )
+        except Exception:
+            return WorkspaceSnapshot(status="unavailable", _files={})
+
+    def _emit_workspace_change(
+        self,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+        before: WorkspaceSnapshot,
+        workspace: ValidatedWorkspaceRoot,
+        *,
+        phase: str,
+        public_text_allowlist: frozenset[str],
+    ) -> None:
+        after = self._workspace_snapshot(workspace, public_text_allowlist)
+        change = compare_workspace_snapshots(before, after)
+        if change.changed_files < 1:
+            return
+        status_labels = {
+            "scoped_complete": "限定扫描范围完整",
+            "partial_time_limit": "达到时间上限，结果为已观察下限",
+            "partial_item_limit": "达到项目上限，结果为已观察下限",
+            "partial_depth_limit": "达到深度上限，结果为已观察下限",
+            "partial_error": "部分路径不可读取，结果为已观察下限",
+            "unavailable": "不可用",
+        }
+        scan_label = status_labels.get(change.scan_status, "部分完成")
+        changes = [
+            {
+                "relative_path": item.relative_path,
+                "change_kind": item.change_kind,
+                "lines_added": item.lines_added,
+                "lines_deleted": item.lines_deleted,
+                "diff_status": item.diff_status,
+                **(
+                    {"unified_diff": item.unified_diff}
+                    if item.unified_diff is not None
+                    else {}
+                ),
+            }
+            for item in change.changes
+        ]
+        self._emit_progress(
+            progress_callback,
+            {
+                "phase": phase,
+                "public_event": {
+                    "kind": "workspace.change.observed",
+                    "summary_zh": (
+                        f"运行期间观察到 {change.changed_files} 个文件条目元数据发生变化；"
+                        f"扫描状态：{scan_label}。"
+                    ),
+                    "payload": {
+                        "changed_files": change.changed_files,
+                        "scan_status": change.scan_status,
+                        "provenance": "workspace_before_after",
+                        "attribution": "unverified_concurrent_window",
+                        "detail_policy": (
+                            "caller_public_safe_include"
+                            if public_text_allowlist
+                            else "count_only"
+                        ),
+                        "details_included": len(changes),
+                        "details_omitted": change.details_omitted,
+                        "changes": changes,
+                    },
+                },
+            },
+        )
 
     def invoke(
         self,
@@ -211,12 +299,50 @@ class Toolkit:
         sources: Any,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
-        workspace = Path(str(execution.get("workspace") or "")).expanduser()
-        if not workspace.is_absolute() or not workspace.resolve().is_dir():
-            return self._blocked("invalid_request", "execution.workspace must be an existing absolute directory.")
+        requested_workspace = Path(
+            str(execution.get("workspace") or "")
+        ).expanduser()
+        try:
+            validated_workspace = validate_workspace_root(requested_workspace)
+        except WorkspaceRootError:
+            return self._blocked(
+                "invalid_request",
+                "execution.workspace must be an existing absolute, "
+                "non-reparse directory with a stable identity.",
+            )
+        workspace = validated_workspace.canonical_path
         policy = str(execution.get("policy") or "read-only")
         if policy not in {"read-only", "workspace-write"}:
             return self._blocked("invalid_request", f"Unsupported agent policy: {policy}")
+        observability = request.get("observability") or {}
+        if not isinstance(observability, dict):
+            return self._blocked("invalid_request", "observability must be an object.")
+        file_changes = observability.get("file_changes")
+        public_text_allowlist: frozenset[str] = frozenset()
+        if file_changes is not None:
+            if policy != "workspace-write" or not isinstance(file_changes, dict):
+                return self._blocked(
+                    "invalid_request",
+                    "observability.file_changes requires workspace-write agent mode.",
+                )
+            declared_paths = file_changes.get("include")
+            if (
+                set(file_changes) != {"mode", "include"}
+                or file_changes.get("mode") != "diff"
+                or not isinstance(declared_paths, list)
+                or not 1 <= len(declared_paths) <= 12
+                or any(
+                    not is_safe_workspace_relative_path(path)
+                    for path in declared_paths
+                )
+                or len(set(declared_paths)) != len(declared_paths)
+            ):
+                return self._blocked(
+                    "invalid_request",
+                    "file_changes requires mode=diff and 1-12 unique safe "
+                    "relative paths in include.",
+                )
+            public_text_allowlist = frozenset(declared_paths)
         requested_runner = str(execution.get("runner") or "").strip()
         runner_name = requested_runner or "data_factory"
         routes = resolved.config.get("agent_routes") or {}
@@ -284,9 +410,24 @@ class Toolkit:
         prompt = compacted.prompt
         if media.native_images:
             prompt += "\n\nApproved native image paths:\n" + "\n".join(media.native_images)
+        workspace_before = (
+            self._workspace_snapshot(validated_workspace, public_text_allowlist)
+            if policy == "workspace-write" and callable(progress_callback)
+            else None
+        )
+        workspace_event_phase = "waiting"
+        try:
+            revalidate_workspace_root(validated_workspace)
+        except WorkspaceRootError:
+            return self._blocked(
+                "invalid_request",
+                "execution.workspace changed after validation; the runner was not started.",
+            )
         try:
             response = runner.invoke(prompt, resolved_execution)
+            workspace_event_phase = "validating"
         except AgentRunnerError as exc:
+            workspace_event_phase = "failed"
             error_status = (
                 "blocked"
                 if exc.error.category in {"agent_budget_exceeded", "agent_budget_unenforced"}
@@ -309,6 +450,18 @@ class Toolkit:
                 **exc.receipt,
             }
             return result
+        finally:
+            if workspace_before is not None:
+                try:
+                    self._emit_workspace_change(
+                        progress_callback,
+                        workspace_before,
+                        validated_workspace,
+                        phase=workspace_event_phase,
+                        public_text_allowlist=public_text_allowlist,
+                    )
+                except Exception:
+                    pass
         output, checks = self._check_output(response.content, (request.get("task") or {}).get("expected_output") or {})
         status = "ok" if all(check["passed"] for check in checks) else "partial"
         usage = self._agent_usage(response)

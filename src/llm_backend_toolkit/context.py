@@ -51,6 +51,7 @@ def _render(
     instructions: list[Any],
     inputs: list[Any],
     expected_output: Any,
+    execution_mode: str = "direct",
 ) -> str:
     sections = ["# Goal", goal.strip()]
     if pinned:
@@ -61,14 +62,20 @@ def _render(
         sections.extend(["", "# Inputs", *_lines(inputs)])
     if expected_output not in (None, {}, ""):
         sections.extend(["", "# Expected output", _canonical(expected_output)])
-    sections.extend(
-        [
-            "",
-            "# Response discipline",
+    if execution_mode == "agent":
+        response_discipline = (
+            "Before and after each major action or tool call, publish a brief public progress update "
+            "in the same language as the user. Each update may state only a plan, action, or verified "
+            "result. Never expose or guess hidden chain-of-thought or private reasoning, and do not "
+            "include secrets, raw tool input/output, or file contents. Keep updates concise and useful. "
+            "End with the complete final result."
+        )
+    else:
+        response_discipline = (
             "Return only the final result. Do not expose chain-of-thought. "
-            "Report only material uncertainty and evidence needed to judge the result.",
-        ]
-    )
+            "Report only material uncertainty and evidence needed to judge the result."
+        )
+    sections.extend(["", "# Response discipline", response_discipline])
     return "\n".join(sections).strip() + "\n"
 
 
@@ -93,6 +100,8 @@ def _clip(value: Any, budget: int) -> str:
 def compact_task(request: dict[str, Any], supplemental_inputs: list[Any] | None = None) -> CompactedContext:
     task = request.get("task") or {}
     context = request.get("context") or {}
+    execution = request.get("execution") or {}
+    execution_mode = str(execution.get("mode") or "direct")
     mode = str(context.get("mode") or "compact")
     if mode not in {"compact", "passthrough"}:
         raise ValueError(f"Unsupported context mode: {mode}")
@@ -105,7 +114,14 @@ def compact_task(request: dict[str, Any], supplemental_inputs: list[Any] | None 
     raw_inputs = list(task.get("inputs") or []) + list(supplemental_inputs or [])
     expected_output = task.get("expected_output") or {}
 
-    before_prompt = _render(goal, pinned, raw_instructions, raw_inputs, expected_output)
+    before_prompt = _render(
+        goal,
+        pinned,
+        raw_instructions,
+        raw_inputs,
+        expected_output,
+        execution_mode,
+    )
     if mode == "passthrough":
         receipt = {
             "mode": mode,
@@ -128,16 +144,37 @@ def compact_task(request: dict[str, Any], supplemental_inputs: list[Any] | None 
         raise ValueError("context.target_tokens must be at least 16")
     target_chars = target_tokens * CHARS_PER_TOKEN_ESTIMATE
 
-    prompt = _render(goal, pinned, instructions, inputs, expected_output)
+    prompt = _render(
+        goal,
+        pinned,
+        instructions,
+        inputs,
+        expected_output,
+        execution_mode,
+    )
     lossy = False
     if _estimate_tokens(prompt) > target_tokens:
-        baseline = _render(goal, pinned, instructions, [], expected_output)
+        baseline = _render(
+            goal,
+            pinned,
+            instructions,
+            [],
+            expected_output,
+            execution_mode,
+        )
         if _estimate_tokens(baseline) > target_tokens:
             raise ContextOverflow("Pinned context and task contract exceed the requested target")
         available = max(96, target_chars - len(baseline) - max(0, len(inputs) - 1) * 4)
         per_item = max(48, available // max(1, len(inputs)))
         inputs = [_clip(value, per_item) for value in inputs]
-        prompt = _render(goal, pinned, instructions, inputs, expected_output)
+        prompt = _render(
+            goal,
+            pinned,
+            instructions,
+            inputs,
+            expected_output,
+            execution_mode,
+        )
         while _estimate_tokens(prompt) > target_tokens and per_item > 48:
             excess_tokens = _estimate_tokens(prompt) - target_tokens
             per_item = max(
@@ -145,7 +182,14 @@ def compact_task(request: dict[str, Any], supplemental_inputs: list[Any] | None 
                 per_item - max(8, math.ceil(excess_tokens * CHARS_PER_TOKEN_ESTIMATE / max(1, len(inputs)))),
             )
             inputs = [_clip(value, per_item) for value in deduped_inputs]
-            prompt = _render(goal, pinned, instructions, inputs, expected_output)
+            prompt = _render(
+                goal,
+                pinned,
+                instructions,
+                inputs,
+                expected_output,
+                execution_mode,
+            )
         if _estimate_tokens(prompt) > target_tokens:
             raise ContextOverflow("Context cannot be compacted to the requested target without dropping inputs")
         lossy = True

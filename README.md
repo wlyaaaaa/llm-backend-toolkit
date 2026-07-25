@@ -107,11 +107,13 @@ pwsh -NoProfile -File .\scripts\Start-LlmBackendObserver.ps1
 pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 ```
 
-启动器只创建一个 loopback 服务和一个 Edge app 窗口。窗口打开后通过 SSE 自动接收后续调用，不需要手动刷新；重复调用不会抢焦点。`Show-LlmBackendDashboard.ps1` 继续作为 PowerShell 降级视图。
+启动器只创建一个 loopback 服务和一个 Edge app 窗口。窗口打开后通过 SSE 自动接收后续调用，不需要手动刷新；重复调用不会抢焦点。安装器会同时创建当前用户桌面和开始菜单中的“模型调用观察台”快捷方式，并使用项目自带的白绿图标；它只升级或删除能由启动目标、完整参数、工作目录和描述共同证明属于本工具的链接，同名第三方文件会冲突失败而不会被覆盖。首次全体预检会拦截开始时已经存在的冲突；每个目标在最终变更或状态确认前还会复验。桌面和开始菜单是两个独立 Known Folder，不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，已经完成的本工具链接操作可能保留，可在处理冲突后幂等重跑。需要移除这两个精确入口时使用 `-Remove`。`Show-LlmBackendDashboard.ps1` 继续作为 PowerShell 降级视图。
 
 观察台显示的是经过净化的可验证工作过程，不是隐藏 chain-of-thought。prompt、隐藏 thinking/reasoning 正文、原始命令和参数、工具输入输出、环境变量、OCR/ASR 正文及绝对私密路径都不会进入公开事件日志。AICLI `0.3.2+` 可实时提供仅含活动类型、状态和公开 agent message 的安全事件；旧版会诚实降级为生命周期可见性，不会重跑模型任务。
 
 请求可选填 `observability.public_label` 作为持久历史中的非敏感短标题；观察台不会从私密任务正文自动生成标题。技能调用会在有合适公开名称时填写此字段。
+
+`workspace-write` 默认只持久化运行时窗内观察到的变更文件数，不读取或展示文件正文。只有调用方通过 `observability.file_changes={mode:"diff",include:[...]}` 明确声明精确相对路径可在本机历史中公开时，观察台才保存这些普通小文本文件的有界 `+/-` 与 unified diff；任何二进制、疑似秘密、绝对路径、reparse、大小或总量门禁失败都会退回 count-only。
 
 完整产品与安全合同见 [模型调用观察台设计](docs/model-observer.md)。
 
