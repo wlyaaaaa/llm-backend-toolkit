@@ -879,11 +879,18 @@ class JobStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             spawned = []
             store = JobStore(Path(temp), spawner=lambda job_id, _root: spawned.append(job_id))
+            source = Path(temp) / "mutable-data.jsonl"
+            source.write_text('{"value":"synthetic"}\n', encoding="utf-8")
             request = {
                 "provider": "qwen-main-v1",
-                "task": {"goal": "g", "sources": [{"id": "data", "path": "C:/mutable/data.jsonl"}]},
+                "task": {
+                    "goal": "g",
+                    "sources": [{"id": "data", "path": str(source)}],
+                },
             }
             first = store.submit(request)
+            store.claim(first["job_id"])
+            self.assertTrue(store.begin_execution(first["job_id"]))
             store.complete(first["job_id"], {"status": "ok", "output": "done"})
 
             second = store.submit(request)

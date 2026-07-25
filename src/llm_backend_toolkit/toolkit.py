@@ -8,6 +8,7 @@ from .agent_runners import AgentRunnerError, default_runners
 from .backends import BackendRegistry, ResolvedBackend
 from .context import ContextOverflow, compact_task
 from .errors import MediaError, ProviderCallError, ToolError
+from .input_integrity import declaration_scope
 from .media import MediaProcessor
 from .providers import default_providers
 from .sources import SourceLoader
@@ -51,6 +52,20 @@ class Toolkit:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         self._emit_progress(progress_callback, {"phase": "preparing"})
+        try:
+            integrity_declarations = declaration_scope(request)
+        except ValueError as exc:
+            return self._blocked("invalid_request", str(exc))
+        if any(
+            declaration["expected_sha256"] is not None
+            for declaration in integrity_declarations
+        ):
+            return self._blocked(
+                "invalid_request",
+                "Expected input integrity declarations require async submit "
+                "and job-worker execution.",
+                options=("submit-async-job", "handle-in-codex"),
+            )
         try:
             resolved, provider = self._resolve_provider(
                 str(request.get("backend") or request.get("provider") or "") or None

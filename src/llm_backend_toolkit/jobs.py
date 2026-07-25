@@ -17,6 +17,14 @@ from typing import Any, Callable
 
 from .backends import BackendRegistry
 from .context import _estimate_tokens
+from .input_integrity import (
+    INPUT_INTEGRITY_SCHEMA,
+    INPUT_SPOOL_CLEANUP_SCHEMA,
+    assert_safe_job_path,
+    declaration_scope,
+    pending_receipt,
+)
+from .input_lifecycle import JobInputLifecycle, JobNotRunnableError
 from .observability import append_event, append_event_once, notify_observer
 
 
@@ -182,6 +190,7 @@ class JobStore:
         configured_preview = int(os.environ.get("LLM_TOOLKIT_RESULT_PREVIEW_CHARS", "2000"))
         self.result_preview_chars = max(32, result_preview_chars or configured_preview)
         self.registry = registry
+        self._input_lifecycle = JobInputLifecycle(self)
 
     @staticmethod
     def request_digest(request: dict[str, Any]) -> str:
@@ -190,6 +199,7 @@ class JobStore:
 
     def submit(self, request: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
         request, conversation = self._prepare_continuation(request)
+        input_integrity = pending_receipt(request)
         request_digest = self.request_digest(request)
         execution = request.get("execution") or {}
         is_agent = str(execution.get("mode") or "direct") == "agent"
@@ -197,7 +207,21 @@ class JobStore:
         media = request.get("media") or {}
         has_mutable_references = bool(task.get("sources") or media.get("attachments"))
         explicit_cache_key = self._validated_explicit_cache_key(request)
-        cacheable = (not is_agent and not has_mutable_references) or bool(explicit_cache_key)
+        reference_count = int(input_integrity.get("reference_count") or 0)
+        declared_reference_count = int(
+            input_integrity.get("declared_reference_count") or 0
+        )
+        references_cache_verifiable = (
+            reference_count == 0
+            or declared_reference_count == reference_count
+        )
+        cacheable = (
+            (
+                (not is_agent and not has_mutable_references)
+                or bool(explicit_cache_key)
+            )
+            and references_cache_verifiable
+        )
         if explicit_cache_key:
             cache_identity, cache_digest = self._explicit_cache_identity(
                 request, explicit_cache_key
@@ -221,6 +245,7 @@ class JobStore:
                 cacheable=cacheable,
                 conversation=conversation,
                 initial_poll_ms=initial_poll_ms,
+                input_integrity=input_integrity,
             )
         else:
             with self._cache_lock(cache_digest):
@@ -244,6 +269,7 @@ class JobStore:
                     cacheable=True,
                     conversation=conversation,
                     initial_poll_ms=initial_poll_ms,
+                    input_integrity=input_integrity,
                 )
                 self._write_cache_index(
                     cache_digest,
@@ -269,6 +295,7 @@ class JobStore:
                 "status": "recorded",
                 "event_log": str(self._job_dir(job_id) / "events.jsonl"),
             },
+            "input_integrity": input_integrity,
             "monitor_until_utc": self._read_state(job_id).get("monitor_until_utc"),
             **({"conversation": conversation} if conversation else {}),
         }
@@ -327,8 +354,15 @@ class JobStore:
                         or "auto"
                     ),
                     "purpose": str(attachment.get("purpose") or ""),
+                    "expected_sha256": (
+                        str(attachment.get("expected_sha256"))
+                        if "expected_sha256" in attachment
+                        else None
+                    ),
+                    "expected_bytes": attachment.get("expected_bytes"),
                 }
             )
+        reference_integrity = declaration_scope(request)
         config_fingerprint = self.request_digest(config)
         route_fingerprint = self.request_digest(route) if route else ""
         caller_cache_key_hash = hashlib.sha256(
@@ -369,6 +403,10 @@ class JobStore:
                 "mode": str(media_value.get("mode") or "auto"),
                 "attachments": attachment_protocol,
             },
+            "input_integrity_protocol": {
+                "schema": INPUT_INTEGRITY_SCHEMA,
+                "references": reference_integrity,
+            },
         }
         digest = self.request_digest(scope)
         receipt = {
@@ -394,6 +432,7 @@ class JobStore:
         cacheable: bool,
         conversation: dict[str, Any] | None,
         initial_poll_ms: int,
+        input_integrity: dict[str, Any],
     ) -> None:
         execution = request.get("execution") or {}
         is_agent = str(execution.get("mode") or "direct") == "agent"
@@ -457,6 +496,16 @@ class JobStore:
                 "monitor_until_utc": _utc_after(self._timeout_seconds(request)),
                 "cacheable": cacheable,
                 "cache_result_eligible": False,
+                "input_integrity": input_integrity,
+                "input_spool_cleanup": {
+                    "schema": INPUT_SPOOL_CLEANUP_SCHEMA,
+                    "status": (
+                        "not_applicable"
+                        if input_integrity.get("status") == "not_applicable"
+                        else "not_created"
+                    ),
+                    "verified_absent": True,
+                },
                 "poll_count": 0,
                 "initial_poll_ms": initial_poll_ms,
                 "conversation_root": (conversation or {}).get("root_job_id")
@@ -576,6 +625,8 @@ class JobStore:
             }
             if cache_identity:
                 receipt["cache_identity"] = cache_identity
+            if isinstance(state.get("input_integrity"), dict):
+                receipt["input_integrity"] = dict(state["input_integrity"])
             return receipt
         if job_status == "stale":
             receipt = {
@@ -588,6 +639,8 @@ class JobStore:
             }
             if cache_identity:
                 receipt["cache_identity"] = cache_identity
+            if isinstance(state.get("input_integrity"), dict):
+                receipt["input_integrity"] = dict(state["input_integrity"])
             return receipt
         if job_status not in {"queued", "running"}:
             return None
@@ -605,6 +658,8 @@ class JobStore:
         }
         if cache_identity:
             receipt["cache_identity"] = cache_identity
+        if isinstance(state.get("input_integrity"), dict):
+            receipt["input_integrity"] = dict(state["input_integrity"])
         return receipt
 
     def _cache_result_is_eligible(
@@ -670,6 +725,43 @@ class JobStore:
                     stream.close()
                 process_lock.release()
 
+    @contextmanager
+    def _job_lock(self, job_id: str):
+        lock_root = self.root / ".job-locks"
+        try:
+            lock_root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            if not lock_root.is_dir():
+                raise
+        lock_path = lock_root / f"{job_id}.lock"
+        deadline = time.monotonic() + _CACHE_LOCK_TIMEOUT_SECONDS
+        process_lock = _process_cache_lock(lock_path)
+        remaining = max(0.0, deadline - time.monotonic())
+        if not process_lock.acquire(timeout=remaining):
+            raise TimeoutError("Timed out acquiring the job state lock")
+        stream = None
+        acquired = False
+        try:
+            stream = lock_path.open("a+b", buffering=0)
+            if os.fstat(stream.fileno()).st_size == 0:
+                stream.write(b"\0")
+            while not acquired:
+                acquired = _try_lock_file(stream)
+                if acquired:
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Timed out acquiring the job state lock")
+                time.sleep(_CACHE_LOCK_POLL_SECONDS)
+            yield
+        finally:
+            try:
+                if acquired and stream is not None:
+                    _unlock_file(stream)
+            finally:
+                if stream is not None:
+                    stream.close()
+                process_lock.release()
+
     def _cache_index_path(self, cache_digest: str) -> Path:
         return self.root / ".cache-index" / f"{cache_digest}.json"
 
@@ -710,14 +802,9 @@ class JobStore:
         )
 
     def claim(self, job_id: str) -> dict[str, Any]:
+        value = self._input_lifecycle.claim(job_id)
         job_dir = self._job_dir(job_id)
-        request_path = job_dir / "request.json"
-        if not request_path.is_file():
-            raise FileNotFoundError(f"Job request is unavailable: {job_id}")
         state = self._read_state(job_id)
-        state["job_status"] = "running"
-        state["updated_utc"] = _utc_now()
-        _atomic_json(job_dir / "state.json", state)
         append_event(
             job_dir,
             "run.started",
@@ -727,10 +814,16 @@ class JobStore:
                 "execution_mode": (state.get("display") or {}).get("execution_mode"),
             },
         )
-        value = json.loads(request_path.read_text(encoding="utf-8"))
-        if not isinstance(value, dict):
-            raise ValueError("Stored job request is not an object")
         return value
+
+    def begin_execution(self, job_id: str) -> bool:
+        return self._input_lifecycle.begin_execution(job_id)
+
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        return self._input_lifecycle.cancel(job_id)
+
+    def cleanup_inputs(self, job_id: str) -> dict[str, Any]:
+        return self._input_lifecycle.cleanup(job_id)
 
     def progress_recorder(
         self,
@@ -900,61 +993,128 @@ class JobStore:
         return record
 
     def complete(self, job_id: str, result: dict[str, Any]) -> None:
-        job_dir = self._job_dir(job_id)
-        _atomic_json(job_dir / "result.json", result)
-        self._write_output_artifact(job_dir, result.get("output"))
-        state = self._read_state(job_id)
-        state["job_status"] = "completed"
-        state["result_status"] = str(result.get("status") or "unknown")
-        state["cache_result_eligible"] = bool(state.get("cacheable")) and (
-            state["result_status"] in CACHEABLE_RESULT_STATUSES
-        )
-        state["updated_utc"] = _utc_now()
-        _atomic_json(job_dir / "state.json", state)
-        completed_ok = state["result_status"] in CACHEABLE_RESULT_STATUSES
-        append_event(
-            job_dir,
-            "run.completed" if completed_ok else "run.failed",
-            (
-                "模型子运行已经完成，结果与校验回执可供 Codex 取回。"
-                if completed_ok
-                else "模型子运行未成功完成，失败回执已保留。"
-            ),
-            payload={
-                "result_status": state["result_status"],
-                "usage": result.get("usage") or {},
-                "checks": [
-                    {
-                        "id": check.get("id"),
-                        "passed": bool(check.get("passed")),
-                    }
-                    for check in (result.get("checks") or [])
-                    if isinstance(check, dict)
-                ],
-            },
-        )
-        cache_identity = state.get("cache_identity")
-        if bool(state.get("cacheable")) and isinstance(cache_identity, dict):
-            digest_value = str(cache_identity.get("digest") or "")
-            if digest_value.startswith("sha256:"):
-                cache_digest = digest_value.removeprefix("sha256:")
-                if len(cache_digest) == 64 and all(
-                    char in "0123456789abcdef" for char in cache_digest
-                ):
-                    with self._cache_lock(cache_digest):
-                        self._write_cache_index(
-                            cache_digest,
-                            job_id,
-                            cache_identity,
-                            status=(
-                                "completed"
-                                if state["cache_result_eligible"]
-                                else "ineligible"
-                            ),
-                        )
-        request_path = job_dir / "request.json"
-        if request_path.exists():
-            request_path.unlink()
+        job_dir = self._input_lifecycle.safe_job_dir(job_id)
+        with self._job_lock(job_id):
+            state = self._read_state(job_id)
+            if str(state.get("job_status") or "") in {
+                "cancelled",
+                "cancellation_requested",
+            }:
+                state["job_status"] = "cancelled"
+                state["result_status"] = "cancelled"
+                state["cache_result_eligible"] = False
+                state["worker_phase"] = "cancelled"
+                self._input_lifecycle.finish_locked(
+                    job_id,
+                    state=state,
+                )
+                return
+            input_integrity = state.get("input_integrity")
+            reference_count = (
+                int(input_integrity.get("reference_count") or 0)
+                if isinstance(input_integrity, dict)
+                else 0
+            )
+            result_status = str(result.get("status") or "unknown")
+            integrity_verified = (
+                reference_count == 0
+                or (
+                    isinstance(input_integrity, dict)
+                    and input_integrity.get("status") == "verified"
+                )
+            )
+            inputs_captured = (
+                reference_count == 0
+                or (
+                    isinstance(input_integrity, dict)
+                    and input_integrity.get("status")
+                    in {"verified", "spooled_unverified"}
+                )
+            )
+            if (
+                result_status in CACHEABLE_RESULT_STATUSES
+                and not inputs_captured
+            ):
+                raise ValueError(
+                    "Successful completion requires captured or verified "
+                    "job input integrity"
+                )
+            if result_status in CACHEABLE_RESULT_STATUSES:
+                self._input_lifecycle.assert_provider_completion(
+                    job_id,
+                    state=state,
+                    reference_count=reference_count,
+                )
+            result_path = job_dir / "result.json"
+            assert_safe_job_path(
+                job_dir,
+                result_path,
+                require_exists=False,
+            )
+            assert_safe_job_path(
+                job_dir,
+                result_path.with_suffix(".json.tmp"),
+                require_exists=False,
+            )
+            _atomic_json(result_path, result)
+            self._write_output_artifact(job_dir, result.get("output"))
+            state["job_status"] = "completed"
+            state["result_status"] = result_status
+            state["cache_result_eligible"] = (
+                bool(state.get("cacheable"))
+                and state["result_status"] in CACHEABLE_RESULT_STATUSES
+                and integrity_verified
+            )
+            state["worker_phase"] = "terminal"
+            self._input_lifecycle.persist_state_locked(
+                job_id,
+                state,
+            )
+            completed_ok = state["result_status"] in CACHEABLE_RESULT_STATUSES
+            append_event(
+                job_dir,
+                "run.completed" if completed_ok else "run.failed",
+                (
+                    "模型子运行已经完成，结果与校验回执可供 Codex 取回。"
+                    if completed_ok
+                    else "模型子运行未成功完成，失败回执已保留。"
+                ),
+                payload={
+                    "result_status": state["result_status"],
+                    "usage": result.get("usage") or {},
+                    "checks": [
+                        {
+                            "id": check.get("id"),
+                            "passed": bool(check.get("passed")),
+                        }
+                        for check in (result.get("checks") or [])
+                        if isinstance(check, dict)
+                    ],
+                },
+            )
+            cache_identity = state.get("cache_identity")
+            if bool(state.get("cacheable")) and isinstance(cache_identity, dict):
+                digest_value = str(cache_identity.get("digest") or "")
+                if digest_value.startswith("sha256:"):
+                    cache_digest = digest_value.removeprefix("sha256:")
+                    if len(cache_digest) == 64 and all(
+                        char in "0123456789abcdef" for char in cache_digest
+                    ):
+                        with self._cache_lock(cache_digest):
+                            self._write_cache_index(
+                                cache_digest,
+                                job_id,
+                                cache_identity,
+                                status=(
+                                    "completed"
+                                    if state["cache_result_eligible"]
+                                    else "ineligible"
+                                ),
+                            )
+            self._input_lifecycle.finish_locked(
+                job_id,
+                state=state,
+            )
 
     def fail(self, job_id: str, summary: str) -> None:
         self.complete(
@@ -977,11 +1137,27 @@ class JobStore:
         include_result: bool = False,
         full_result: bool = False,
     ) -> dict[str, Any]:
+        self._input_lifecycle.recover_if_dead(job_id)
         state = self._read_state(job_id)
-        stale = state.get("job_status") != "completed" and _is_expired(state.get("monitor_until_utc"))
+        terminal_statuses = {"completed", "failed", "cancelled"}
+        if str(state.get("job_status") or "") in terminal_statuses:
+            cleanup = dict(state.get("input_spool_cleanup") or {})
+            if not bool(cleanup.get("verified_absent")):
+                self.cleanup_inputs(job_id)
+                state = self._read_state(job_id)
+        stale = (
+            state.get("job_status") not in terminal_statuses
+            and state.get("job_status") != "cancellation_requested"
+            and _is_expired(state.get("monitor_until_utc"))
+        )
         effective_status = "stale" if stale else state.get("job_status")
         poll_after_ms = 0
-        if effective_status not in {"completed", "stale"}:
+        if effective_status not in {
+            "completed",
+            "failed",
+            "cancelled",
+            "stale",
+        }:
             state["poll_count"] = int(state.get("poll_count") or 0) + 1
             poll_after_ms = min(
                 self._initial_poll_ms_from_state(state) * (2 ** min(state["poll_count"], 3)),
@@ -1000,6 +1176,10 @@ class JobStore:
             "updated_utc": state.get("updated_utc"),
             "monitor_until_utc": state.get("monitor_until_utc"),
             "poll_after_ms": poll_after_ms,
+            "cacheable": bool(state.get("cacheable")),
+            "cache_result_eligible": bool(
+                state.get("cache_result_eligible")
+            ),
             "conversation": {
                 "root_job_id": state.get("conversation_root") or job_id,
                 "turn": int(state.get("conversation_turn") or 1),
@@ -1009,6 +1189,12 @@ class JobStore:
         }
         if isinstance(state.get("cache_identity"), dict):
             output["cache_identity"] = dict(state["cache_identity"])
+        if isinstance(state.get("input_integrity"), dict):
+            output["input_integrity"] = dict(state["input_integrity"])
+        if isinstance(state.get("input_spool_cleanup"), dict):
+            output["input_spool_cleanup"] = dict(state["input_spool_cleanup"])
+        if isinstance(state.get("worker_lease"), dict):
+            output["worker_lease"] = dict(state["worker_lease"])
         if poll_after_ms:
             output["recommended_check_utc"] = _utc_after(poll_after_ms // 1000)
         if stale:
@@ -1020,6 +1206,28 @@ class JobStore:
             output["decision"] = {
                 "owner": "top_model",
                 "options": ["inspect-job", "retry-with-force", "handle-in-codex"],
+            }
+        elif effective_status == "failed":
+            output["error"] = dict(
+                state.get("error")
+                or {
+                    "category": "worker_failed",
+                    "summary": "The job failed before producing a usable result.",
+                    "retryable": True,
+                }
+            )
+            output["decision"] = dict(
+                state.get("decision")
+                or {
+                    "owner": "top_model",
+                    "options": ["retry", "handle-in-codex"],
+                }
+            )
+        elif effective_status == "cancellation_requested":
+            output["status"] = "accepted"
+            output["decision"] = {
+                "owner": "toolkit",
+                "options": ["wait-for-cancelled", "inspect-job"],
             }
         result_path = self._job_dir(job_id) / "result.json"
         if include_result and state.get("job_status") == "completed" and result_path.is_file():
@@ -1084,7 +1292,13 @@ class JobStore:
         text, suffix = self._artifact_payload(value)
         if len(text) <= self.result_preview_chars:
             return
-        (job_dir / f"output{suffix}").write_text(text, encoding="utf-8")
+        artifact = job_dir / f"output{suffix}"
+        assert_safe_job_path(
+            job_dir,
+            artifact,
+            require_exists=False,
+        )
+        artifact.write_text(text, encoding="utf-8")
 
     def _compact_result_view(self, job_dir: Path, result: dict[str, Any]) -> dict[str, Any]:
         value = result.get("output")
@@ -1094,6 +1308,11 @@ class JobStore:
         if len(text) <= self.result_preview_chars:
             return result
         artifact = job_dir / f"output{suffix}"
+        assert_safe_job_path(
+            job_dir,
+            artifact,
+            require_exists=True,
+        )
         artifact_bytes = artifact.read_bytes()
         digest = hashlib.sha256(artifact_bytes).hexdigest()
         compact = dict(result)
