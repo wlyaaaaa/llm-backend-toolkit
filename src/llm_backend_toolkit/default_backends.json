@@ -20,6 +20,7 @@
           "runner": "codex-cli",
           "profile": "codex-ollama-main",
           "model": "qwen-main-v1",
+          "reasoning_effort": "max",
           "evidence": {
             "basis": "accepted_local_bakeoff",
             "live_verified": true,
@@ -31,6 +32,7 @@
           "runner": "codex-cli",
           "profile": "codex-ollama-main",
           "model": "qwen-main-v1",
+          "reasoning_effort": "max",
           "evidence": {
             "basis": "accepted_local_bakeoff",
             "live_verified": true,

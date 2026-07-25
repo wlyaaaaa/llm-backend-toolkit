@@ -34,15 +34,21 @@ class MediaProcessorTests(unittest.TestCase):
                 chineseasr_entry=None,
                 runner=runner,
             )
+            events = []
             result = processor.process(
                 [{"id": "img", "path": str(source), "kind": "image", "route": "specialist"}],
                 provider_supports_vision=True,
+                progress_callback=events.append,
             )
 
             self.assertEqual("recognized text", result.supplemental_text[0]["text"])
             self.assertIn("-Engine", seen[0])
             self.assertIn("-StopAfter", seen[0])
             self.assertEqual([], result.native_images)
+            self.assertEqual(
+                ["media.ocr.started", "media.ocr.completed"],
+                [event["public_event"]["kind"] for event in events],
+            )
 
     def test_chineseasr_reads_final_output_and_never_uses_a_shell_string(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -62,9 +68,11 @@ class MediaProcessorTests(unittest.TestCase):
                 chineseasr_entry=str(root / "asr-smart.ps1"),
                 runner=runner,
             )
+            events = []
             result = processor.process(
                 [{"id": "audio", "path": str(source), "kind": "audio", "route": "specialist"}],
                 provider_supports_vision=False,
+                progress_callback=events.append,
             )
 
             self.assertEqual("transcript", result.supplemental_text[0]["text"])
@@ -72,6 +80,10 @@ class MediaProcessorTests(unittest.TestCase):
             self.assertFalse(seen[0][1].get("shell", False))
             wait_index = seen[0][0].index("-WaitSec")
             self.assertGreaterEqual(int(seen[0][0][wait_index + 1]), 300)
+            self.assertEqual(
+                ["media.asr.started", "media.asr.completed"],
+                [event["public_event"]["kind"] for event in events],
+            )
 
     def test_auto_keeps_general_images_native_and_routes_audio_to_specialist(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -79,13 +91,16 @@ class MediaProcessorTests(unittest.TestCase):
             image.write_bytes(b"png")
             processor = MediaProcessor(localocr_entry=None, chineseasr_entry=None)
 
+            events = []
             result = processor.process(
                 [{"id": "img", "path": str(image), "kind": "image"}],
                 provider_supports_vision=True,
+                progress_callback=events.append,
             )
 
             self.assertEqual([str(image.resolve())], result.native_images)
             self.assertEqual("native", result.routes[0]["route"])
+            self.assertEqual("media.native.prepared", events[0]["public_event"]["kind"])
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import signal
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,10 @@ class AgentResponse:
     limit_usage: dict[str, Any] = field(default_factory=dict)
     limit_hit: str = ""
     event_projection: str = ""
+    machine_event_projection: str = ""
+    machine_event_status: str = ""
+    machine_event_count: int = 0
+    observability_level: str = "lifecycle"
 
 
 class AgentRunnerError(Exception):
@@ -64,8 +69,19 @@ def _bounded_process(
     timeout_seconds: int,
     env: dict[str, str] | None = None,
     max_output_chars: int = 1_000_000,
+    event_file: Path | None = None,
+    on_event: Any | None = None,
 ) -> tuple[int, str, str, int]:
     started = time.monotonic()
+    event_stop: threading.Event | None = None
+    event_thread: threading.Thread | None = None
+
+    def finish_event_tail() -> None:
+        if event_stop is None or event_thread is None:
+            return
+        event_stop.set()
+        event_thread.join(timeout=2)
+
     try:
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
         process = subprocess.Popen(
@@ -82,7 +98,17 @@ def _bounded_process(
             creationflags=creationflags,
             start_new_session=os.name != "nt",
         )
+        if event_file is not None and callable(on_event):
+            event_stop = threading.Event()
+            event_thread = threading.Thread(
+                target=_tail_machine_events,
+                args=(Path(event_file), on_event, event_stop),
+                name="aicli-public-event-tail",
+                daemon=True,
+            )
+            event_thread.start()
         stdout, stderr = process.communicate(stdin_text, timeout=timeout_seconds)
+        finish_event_tail()
     except subprocess.TimeoutExpired as exc:
         cleanup_confirmed = False
         if "process" in locals():
@@ -121,6 +147,7 @@ def _bounded_process(
                     process.communicate(timeout=5)
                 except (OSError, subprocess.SubprocessError):
                     pass
+        finish_event_tail()
         if not cleanup_confirmed:
             raise _runner_error(
                 "agent_budget_unenforced",
@@ -144,9 +171,57 @@ def _bounded_process(
             },
         ) from exc
     except OSError as exc:
+        finish_event_tail()
         raise _runner_error("agent_runner_unavailable", f"Agent process could not start: {type(exc).__name__}") from exc
     duration_ms = int((time.monotonic() - started) * 1000)
     return process.returncode, stdout[:max_output_chars], stderr[:max_output_chars], duration_ms
+
+
+def _tail_machine_events(
+    path: Path,
+    callback: Any,
+    stop: threading.Event,
+) -> None:
+    offset = 0
+    pending = b""
+    expected_sequence = 1
+    while True:
+        data = b""
+        try:
+            if path.is_file():
+                with path.open("rb") as stream:
+                    stream.seek(offset)
+                    data = stream.read(1_048_576)
+                    offset = stream.tell()
+        except OSError:
+            data = b""
+        if data:
+            pending += data
+            lines = pending.split(b"\n")
+            pending = lines.pop()
+            for encoded in lines:
+                if not encoded or len(encoded) > 65_536:
+                    continue
+                try:
+                    event = json.loads(encoded.decode("utf-8"))
+                    sequence = int(event.get("sequence") or 0)
+                except (UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                if (
+                    not isinstance(event, dict)
+                    or event.get("schema") != "aicli.machine-event.v1"
+                    or sequence != expected_sequence
+                ):
+                    continue
+                expected_sequence += 1
+                try:
+                    callback(event)
+                except Exception:
+                    continue
+            continue
+        if stop.is_set():
+            return
+        stop.wait(0.05)
 
 
 def _qwen_command_prefix(executable: str) -> list[str]:
@@ -371,6 +446,7 @@ class AiCliProfileRunner:
         self.engine = engine
         self.default_profile = default_profile
         self.entry = entry or os.environ.get("LLM_TOOLKIT_AICLI_ENTRY")
+        self._machine_events_supported: bool | None = None
 
     def _prefix(self) -> list[str]:
         entry_value = self.entry
@@ -389,6 +465,99 @@ class AiCliProfileRunner:
         if not pwsh:
             raise _runner_error("agent_runner_unavailable", "PowerShell 7 is unavailable.")
         return [pwsh, "-NoProfile", "-File", str(entry)]
+
+    def _supports_machine_events(self, prefix: list[str], workspace: Path) -> bool:
+        if self._machine_events_supported is not None:
+            return self._machine_events_supported
+        try:
+            code, stdout, _, _ = _bounded_process(
+                prefix + ["version", "--json"],
+                cwd=workspace,
+                stdin_text="",
+                timeout_seconds=10,
+                max_output_chars=100_000,
+            )
+            values = _json_values(stdout)
+            capabilities = values[-1].get("capabilities") if values else {}
+            self._machine_events_supported = bool(
+                code == 0
+                and isinstance(capabilities, dict)
+                and capabilities.get("machineEventProjection")
+                == "aicli.machine-event.v1"
+            )
+        except AgentRunnerError:
+            self._machine_events_supported = False
+        return self._machine_events_supported
+
+    @staticmethod
+    def _emit_machine_event(callback: Any, event: dict[str, Any]) -> None:
+        if not callable(callback):
+            return
+        kind = str(event.get("kind") or "")
+        status = str(event.get("status") or "")
+        item_type = str(event.get("item_type") or "")
+        phase = "waiting"
+        if kind == "reasoning.activity":
+            phase = "thinking"
+            summary = (
+                "智能体正在进行内部分析；只展示活动状态，不展示隐藏思维正文。"
+            )
+        elif kind == "tool.activity":
+            labels = {
+                "file_change": "编辑文件",
+                "command_execution": "执行命令",
+                "mcp_tool_call": "调用 MCP 工具",
+                "web_search": "查询公开资料",
+                "computer_use": "操作计算机",
+                "tool_call": "调用工具",
+                "dynamic_tool_call": "调用动态工具",
+            }
+            activity = labels.get(item_type, "调用工具")
+            summary = f"智能体正在{activity}。" if status != "completed" else f"智能体已完成{activity}。"
+        elif kind == "planning.activity":
+            summary = "智能体正在更新公开工作计划。"
+        elif kind == "output.completed":
+            phase = "generating"
+            summary = "智能体已形成一段公开输出。"
+        elif kind == "turn.completed":
+            phase = "validating"
+            summary = "智能体本轮工作完成，正在整理结果与回执。"
+        elif kind in {"turn.failed", "run.failed", "limit.hit"}:
+            phase = "failed"
+            summary = "智能体运行未成功完成，安全失败状态已保留。"
+        elif kind == "thread.started":
+            summary = "AICLI 已建立可观察的原生智能体线程。"
+        elif kind == "turn.started":
+            summary = "原生智能体已开始处理本轮任务。"
+        else:
+            return
+        allowed_payload = {
+            key: event.get(key)
+            for key in (
+                "status",
+                "item_type",
+                "steps",
+                "tool_calls",
+                "events_seen",
+                "error_category",
+                "limit",
+            )
+            if event.get(key) is not None
+        }
+        progress: dict[str, Any] = {
+            "phase": phase,
+            "public_event": {
+                "kind": f"agent.{kind}",
+                "summary_zh": summary,
+                "payload": allowed_payload,
+            },
+        }
+        if kind == "output.completed":
+            progress["content_delta"] = str(event.get("public_text") or "")
+        try:
+            callback(progress)
+        except Exception:
+            return
 
     def invoke(self, prompt: str, execution: dict[str, Any]) -> AgentResponse:
         workspace = Path(execution["workspace"])
@@ -417,20 +586,73 @@ class AiCliProfileRunner:
             native = []
         else:
             raise _runner_error("agent_runner_unavailable", f"Unsupported aicli agent engine: {self.engine}")
-        command = self._prefix() + [
+        prefix = self._prefix()
+        progress_callback = execution.get("_progress_callback")
+        machine_events_supported = (
+            self.engine == "codex"
+            and self._supports_machine_events(prefix, workspace)
+        )
+        if callable(progress_callback):
+            try:
+                progress_callback(
+                    {
+                        "phase": "waiting",
+                        "public_event": {
+                            "kind": "agent.observability",
+                            "summary_zh": (
+                                "AICLI 实时安全工作事件已接入观察台。"
+                                if machine_events_supported
+                                else "当前 AICLI 仅提供生命周期可见性；结果仍会完整交付。"
+                            ),
+                            "payload": {
+                                "level": (
+                                    "live_safe_events"
+                                    if machine_events_supported
+                                    else "lifecycle"
+                                )
+                            },
+                        },
+                    }
+                )
+            except Exception:
+                pass
+        command = prefix + [
             "run", profile, "--project", str(workspace), "--stdin", "--json",
             "--sandbox-policy", str(execution["policy"]),
             "--timeout-seconds", str(budget["timeout_seconds"]),
             "--max-steps", str(budget["max_steps"]),
             "--max-tool-calls", str(budget["max_tool_calls"]),
-            "--max-output-chars", "1000000", "--", *native,
+            "--max-output-chars", "1000000",
         ]
-        code, stdout, stderr, duration_ms = _bounded_process(
-            command,
-            cwd=workspace,
-            stdin_text=prompt,
-            timeout_seconds=int(budget["timeout_seconds"]) + 15,
-        )
+        event_temp: tempfile.TemporaryDirectory[str] | None = None
+        event_path: Path | None = None
+        if machine_events_supported:
+            event_temp = tempfile.TemporaryDirectory(
+                prefix="llm-toolkit-aicli-events-"
+            )
+            event_path = Path(event_temp.name) / "events.jsonl"
+            event_path.touch()
+            command.extend(["--event-file", str(event_path)])
+        command.extend(["--", *native])
+        try:
+            code, stdout, stderr, duration_ms = _bounded_process(
+                command,
+                cwd=workspace,
+                stdin_text=prompt,
+                timeout_seconds=int(budget["timeout_seconds"]) + 15,
+                event_file=event_path,
+                on_event=(
+                    lambda event: self._emit_machine_event(
+                        progress_callback,
+                        event,
+                    )
+                )
+                if callable(progress_callback)
+                else None,
+            )
+        finally:
+            if event_temp is not None:
+                event_temp.cleanup()
         envelopes = _json_values(stdout)
         if not envelopes:
             raise _runner_error("agent_failed", f"aicli returned no JSON envelope: {stderr.strip()[:500]}", retryable=True)
@@ -513,6 +735,17 @@ class AiCliProfileRunner:
                 "cleanup_method": str(limit_usage.get("cleanupMethod") or ""),
             },
             "event_projection": str(run.get("eventProjection") or ""),
+            "machine_event_projection": str(
+                run.get("machineEventProjection") or ""
+            ),
+            "machine_event_status": str(run.get("machineEventStatus") or ""),
+            "machine_event_count": int(run.get("machineEventCount") or 0),
+            "observability_level": (
+                "live_safe_events"
+                if machine_events_supported
+                and str(run.get("machineEventStatus") or "") == "ok"
+                else "lifecycle"
+            ),
         }
         if any(
             limit_enforcement.get(name) == "failed-closed"
@@ -568,6 +801,10 @@ class AiCliProfileRunner:
             limit_usage=receipt["limit_usage"],
             limit_hit="",
             event_projection=receipt["event_projection"],
+            machine_event_projection=receipt["machine_event_projection"],
+            machine_event_status=receipt["machine_event_status"],
+            machine_event_count=receipt["machine_event_count"],
+            observability_level=receipt["observability_level"],
         )
 
 

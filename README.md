@@ -69,17 +69,36 @@ python -m venv .venv
 不含外部文件引用的相同请求默认复用已完成结果；agent workspace、source 或 media 等可变引用默认不缓存。只有调用者在 `execution.cache_key` 提供通过验证、绑定真实内容与派生版本的语义身份，才允许这类请求命中缓存。显式 key 会忽略 `target_tokens`、预算和 workspace 等调度/工作元数据，但仍强制绑定已解析 backend、model、agent route/profile、隐私、reasoning、媒体与输出协议，不能跨 provider/model 或隐私边界误命中。v2 回执的 `cache_identity.mode=explicit` 只公开原始 key 的 SHA-256 `caller_cache_key_hash`，从不回显原始 key；两种模式都声明 `canonicalization=stdlib-json-sort-compact-utf8-v1`，对应 `json.dumps(..., ensure_ascii=False, sort_keys=True, separators=(",", ":"))` 的 UTF-8 SHA-256。显式 `digest` 还绑定解析后的完整安全 scope，供调用方作为不透明身份比较，不要求仅凭精简回执字段复算；无显式 key 时，`mode=request_digest` 的 `digest` 仍等于当前 `JobStore.request_digest`。v1 或缺失身份的旧 job 仍可按 ID 查询，但不会被新 v2 提交当作缓存证明。失败、取消和非 cacheable 结果不会成为命中目标。明确需要一次新尝试时使用 `submit --force`。
 回执同时给出 `recommended_check_utc` 与 `monitor_until_utc`。初次建议等待 30-60 秒，过早读取后指数退避；任务超过硬期限会显示 `stale`、停止建议轮询，并把重试或接管交回顶级模型。
 
-## 人类只读仪表盘
+## 模型调用观察台
 
-Windows 上可用一个常驻 PowerShell 窗口观察最新任务：
+`0.9.0` 提供正式的本机只读 GUI。它使用白底和纯绿主色，在一个常驻窗口中自动展示：
+
+- 多个模型调用和多轮 continuation，对话历史持久保留并可分页回看；
+- 中文工作时间线、AICLI 工具/文件编辑活动、OCR/ASR 阶段与公开输出；
+- 实际模型、执行方式、推理模式或 reasoning effort；
+- Token、耗时和 TPS；Ollama 完成后以 `completion_tokens / eval_duration_ns` 显示精确 TPS，运行中只显示明确标为近似的公开输出估算；
+- 最终结果、确定性校验和 Codex 是否已取回结果。
+
+启动本机服务：
 
 ```powershell
-pwsh -NoProfile -File .\scripts\Show-LlmBackendDashboard.ps1
+llm-backend-toolkit observer --no-open
 ```
 
-仪表盘使用增量行刷新，不会每两秒清屏；`R` 在人类视图与原始结果间展开/收起，`Q` 退出。direct Ollama 任务会显示中文阶段、公开回复片段、流式估算 TPS，最终块到达后改用 `eval_count / eval_duration` 的准确 TPS。结构化 JSON 在生成过程中不展示残缺正文。
+Windows 桌面应用模式：
 
-`progress.json` 只保留阶段、计数、公开回复短预览和少量最近事件；prompt、隐藏 thinking 原文、原始子进程事件、命令正文与命令输出不会写入进度文件。仪表盘中的“思考与工作进展”是可验证的工作摘要，不是 chain-of-thought。
+```powershell
+pwsh -NoProfile -File .\scripts\Start-LlmBackendObserver.ps1
+pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
+```
+
+启动器只创建一个 loopback 服务和一个 Edge app 窗口。窗口打开后通过 SSE 自动接收后续调用，不需要手动刷新；重复调用不会抢焦点。`Show-LlmBackendDashboard.ps1` 继续作为 PowerShell 降级视图。
+
+观察台显示的是经过净化的可验证工作过程，不是隐藏 chain-of-thought。prompt、隐藏 thinking/reasoning 正文、原始命令和参数、工具输入输出、环境变量、OCR/ASR 正文及绝对私密路径都不会进入公开事件日志。AICLI `0.3.2+` 可实时提供仅含活动类型、状态和公开 agent message 的安全事件；旧版会诚实降级为生命周期可见性，不会重跑模型任务。
+
+请求可选填 `observability.public_label` 作为持久历史中的非敏感短标题；观察台不会从私密任务正文自动生成标题。技能调用会在有合适公开名称时填写此字段。
+
+完整产品与安全合同见 [模型调用观察台设计](docs/model-observer.md)。
 
 ## 数据工厂智能体
 

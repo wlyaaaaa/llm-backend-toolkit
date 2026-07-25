@@ -96,6 +96,7 @@ class Toolkit:
                 attachments,
                 provider_supports_vision=bool(getattr(provider, "supports_vision", False)),
                 mode=str(media_config.get("mode") or "auto"),
+                progress_callback=progress_callback,
             )
             supplemental = [
                 {"attachment_id": item["id"], "kind": item["kind"], "text": item["text"]}
@@ -134,6 +135,7 @@ class Toolkit:
                 compacted=compacted,
                 media=media,
                 sources=sources,
+                progress_callback=progress_callback,
             )
             self._emit_progress(
                 progress_callback,
@@ -192,6 +194,7 @@ class Toolkit:
         compacted: Any,
         media: Any,
         sources: Any,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         workspace = Path(str(execution.get("workspace") or "")).expanduser()
         if not workspace.is_absolute() or not workspace.resolve().is_dir():
@@ -259,6 +262,7 @@ class Toolkit:
                 "native_images": list(media.native_images),
                 "profile": route["profile"],
                 "model": route["model"],
+                "_progress_callback": progress_callback,
             }
         )
         route_receipt = self._route_receipt(route, evidence, requested_runner=requested_runner)
@@ -320,6 +324,19 @@ class Toolkit:
                 "limit_usage": dict(getattr(response, "limit_usage", {}) or {}),
                 "limit_hit": str(getattr(response, "limit_hit", "") or "") or None,
                 "event_projection": str(getattr(response, "event_projection", "") or ""),
+                "machine_event_projection": str(
+                    getattr(response, "machine_event_projection", "") or ""
+                ),
+                "machine_event_status": str(
+                    getattr(response, "machine_event_status", "") or ""
+                ),
+                "machine_event_count": int(
+                    getattr(response, "machine_event_count", 0) or 0
+                ),
+                "observability_level": str(
+                    getattr(response, "observability_level", "lifecycle")
+                    or "lifecycle"
+                ),
                 "policy": policy,
                 "budget": budget,
                 "fallback_used": False,

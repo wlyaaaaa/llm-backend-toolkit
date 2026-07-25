@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .jobs import JobStore
+from .observer import ensure_observer, run_observer
 from .toolkit import Toolkit
 
 
@@ -109,9 +110,22 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--state-dir")
     probe.add_argument("--force", action="store_true", help="Create a new probe attempt instead of using the cache")
     probe.add_argument("--cloud-allowed", action="store_true", help="Explicitly allow this probe to send content to a cloud provider")
+    observer = subparsers.add_parser(
+        "observer",
+        help="Start or reuse the local human-visible model observer",
+    )
+    observer.add_argument("--state-dir")
+    observer.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Return the observer URL without opening a browser window",
+    )
     worker = subparsers.add_parser("_worker", help=argparse.SUPPRESS)
     worker.add_argument("--job-id", required=True)
     worker.add_argument("--state-dir", required=True)
+    observer_worker = subparsers.add_parser("_observer", help=argparse.SUPPRESS)
+    observer_worker.add_argument("--state-dir", required=True)
+    observer_worker.add_argument("--runtime-file", required=True)
     return parser
 
 
@@ -125,11 +139,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "submit":
             result = JobStore(args.state_dir).submit(_read_request(args.request), force=args.force)
         elif args.command == "job":
-            result = JobStore(args.state_dir).get(
-                args.id,
-                include_result=args.result or args.full_result,
-                full_result=args.full_result,
-            )
+            store = JobStore(args.state_dir)
+            if args.result or args.full_result:
+                result = store.collect(
+                    args.id,
+                    full_result=args.full_result,
+                )
+            else:
+                result = store.get(args.id)
         elif args.command == "status":
             toolkit = Toolkit()
             result = toolkit.status(args.backend or args.provider)
@@ -145,6 +162,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             result = JobStore(args.state_dir).submit(request, force=args.force)
             result["probe"] = {"backend": backend or "local-default", "case": args.case, "scope": "bounded"}
+        elif args.command == "observer":
+            result = ensure_observer(
+                args.state_dir,
+                open_browser=not args.no_open,
+            )
         elif args.command == "_worker":
             store = JobStore(args.state_dir)
             progress = None
@@ -163,6 +185,12 @@ def main(argv: list[str] | None = None) -> int:
                 if progress is not None:
                     progress({"phase": "failed"})
                 store.fail(args.job_id, f"Worker failed: {type(exc).__name__}")
+            return 0
+        elif args.command == "_observer":
+            run_observer(
+                args.state_dir,
+                runtime_file=args.runtime_file,
+            )
             return 0
         else:
             raise ValueError(f"Unsupported command: {args.command}")

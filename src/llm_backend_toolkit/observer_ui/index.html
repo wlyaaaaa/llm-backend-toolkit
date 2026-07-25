@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#ffffff">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'"
+    >
+    <title>模型调用观察台</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/assets/styles.css">
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace">跳到工作区</a>
+    <div class="app-shell">
+      <header class="app-header">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" role="img">
+              <path d="M7 4.75h6.1A4.9 4.9 0 0 1 18 9.65v5.6H11.9A4.9 4.9 0 0 1 7 10.35v-5.6Z"></path>
+              <path d="M5 8.75h4v4.8a2.7 2.7 0 0 0 2.7 2.7H15v3H9.9A4.9 4.9 0 0 1 5 14.35v-5.6Z"></path>
+            </svg>
+          </span>
+          <span class="brand-copy">
+            <strong>模型调用观察台</strong>
+            <span>LLM Backend Toolkit</span>
+          </span>
+        </div>
+
+        <div class="header-status">
+          <span id="last-updated" class="updated-time">等待首次同步</span>
+          <button id="refresh-button" class="icon-button" type="button" title="立即刷新" aria-label="立即刷新">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M19 8a7.5 7.5 0 1 0 .42 7.1"></path>
+              <path d="M19 3v5h-5"></path>
+            </svg>
+          </button>
+          <span id="connection-state" class="connection-chip" role="status">
+            <span class="connection-dot" aria-hidden="true"></span>
+            <span>正在连接</span>
+          </span>
+        </div>
+      </header>
+
+      <main id="workspace" class="workspace">
+        <nav class="run-sidebar" aria-label="模型调用记录">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">运行队列</p>
+              <h1>调用记录与历史</h1>
+            </div>
+            <span id="run-count" class="count-badge" aria-label="调用数量">0</span>
+          </div>
+
+          <label class="search-field" for="run-search">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="11" cy="11" r="6.5"></circle>
+              <path d="m16 16 4 4"></path>
+            </svg>
+            <span class="visually-hidden">搜索调用</span>
+            <input id="run-search" type="search" placeholder="搜索任务或模型" autocomplete="off">
+          </label>
+
+          <div class="filter-row" role="group" aria-label="筛选调用状态">
+            <button class="filter-button is-active" type="button" data-filter="all" aria-pressed="true">全部</button>
+            <button class="filter-button" type="button" data-filter="active" aria-pressed="false">执行中</button>
+            <button class="filter-button" type="button" data-filter="completed" aria-pressed="false">已完成</button>
+          </div>
+
+          <div id="run-list" class="run-list" aria-busy="true"></div>
+          <div id="run-list-empty" class="sidebar-empty" hidden>
+            <span>没有匹配的调用</span>
+            <small>调整搜索或筛选条件</small>
+          </div>
+          <button id="load-more-button" class="load-more-button" type="button" hidden>
+            加载更多历史
+          </button>
+        </nav>
+
+        <aside class="timeline-pane" aria-labelledby="timeline-title">
+          <div class="section-heading timeline-heading">
+            <div>
+              <p class="eyebrow">过程追踪</p>
+              <h2 id="timeline-title">工作时间线</h2>
+            </div>
+            <span id="timeline-status" class="quiet-label">未选择</span>
+          </div>
+          <ol id="timeline" class="timeline"></ol>
+        </aside>
+
+        <section class="detail-pane" aria-label="调用详情">
+          <div id="empty-state" class="empty-state">
+            <span class="empty-illustration" aria-hidden="true">
+              <svg viewBox="0 0 80 80">
+                <path d="M22 18h25a12 12 0 0 1 12 12v24H34a12 12 0 0 1-12-12V18Z"></path>
+                <path d="M16 29h12v16a10 10 0 0 0 10 10h15v8H30a14 14 0 0 1-14-14V29Z"></path>
+              </svg>
+            </span>
+            <h2>选择一条调用开始观察</h2>
+            <p>可查看模型工作过程、实时草稿、最终结果和校验回执。</p>
+          </div>
+
+          <div id="detail-content" class="detail-content" hidden>
+            <section class="run-overview" aria-labelledby="run-title">
+              <div class="overview-title">
+                <div>
+                  <div class="overview-kicker">
+                    <span id="run-status" class="status-badge">等待中</span>
+                    <span id="run-id" class="run-id"></span>
+                  </div>
+                  <h2 id="run-title">未命名任务</h2>
+                </div>
+                <button id="copy-id-button" class="subtle-button" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="8" y="8" width="11" height="11" rx="2"></rect>
+                    <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>
+                  </svg>
+                  复制 ID
+                </button>
+              </div>
+
+              <dl class="metric-grid">
+                <div class="metric">
+                  <dt>模型</dt>
+                  <dd id="metric-model">—</dd>
+                </div>
+                <div class="metric">
+                  <dt>执行方式</dt>
+                  <dd id="metric-execution">—</dd>
+                </div>
+                <div class="metric">
+                  <dt>推理等级</dt>
+                  <dd id="metric-reasoning">—</dd>
+                </div>
+                <div class="metric">
+                  <dt>Token</dt>
+                  <dd id="metric-tokens">—</dd>
+                </div>
+                <div class="metric">
+                  <dt>TPS</dt>
+                  <dd id="metric-tps">—</dd>
+                </div>
+                <div class="metric">
+                  <dt>耗时</dt>
+                  <dd id="metric-duration">—</dd>
+                </div>
+                <div class="metric">
+                  <dt>GPU</dt>
+                  <dd id="metric-gpu">—</dd>
+                </div>
+                <div class="metric">
+                  <dt>交付状态</dt>
+                  <dd id="metric-delivery">—</dd>
+                </div>
+              </dl>
+            </section>
+
+            <section class="detail-tabs" aria-label="调用输出与校验">
+              <div class="detail-tablist" role="tablist" aria-label="调用详情内容">
+                <button
+                  id="tab-draft"
+                  class="detail-tab is-active"
+                  type="button"
+                  role="tab"
+                  aria-selected="true"
+                  aria-controls="draft-panel"
+                  tabindex="0"
+                  data-tab="draft"
+                >实时草稿</button>
+                <button
+                  id="tab-result"
+                  class="detail-tab"
+                  type="button"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="result-panel"
+                  tabindex="-1"
+                  data-tab="result"
+                >最终结果</button>
+                <button
+                  id="tab-receipt"
+                  class="detail-tab"
+                  type="button"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="receipt-panel"
+                  tabindex="-1"
+                  data-tab="receipt"
+                >校验回执</button>
+              </div>
+
+            <section id="draft-panel" class="content-card draft-card" role="tabpanel" aria-labelledby="tab-draft">
+              <header class="card-header">
+                <div>
+                  <p class="eyebrow">Working output</p>
+                  <h3 id="draft-title">
+                    实时草稿
+                    <span id="draft-live-indicator" class="live-indicator" hidden>更新中</span>
+                  </h3>
+                </div>
+                <button class="copy-button" type="button" data-copy-target="draft-content">复制</button>
+              </header>
+              <pre id="draft-content" class="content-block" tabindex="0">尚未产生草稿</pre>
+            </section>
+
+            <section id="result-panel" class="content-card result-card" role="tabpanel" aria-labelledby="tab-result" hidden>
+              <header class="card-header">
+                <div>
+                  <p class="eyebrow">Delivered output</p>
+                  <h3 id="result-title">最终结果</h3>
+                </div>
+                <button class="copy-button" type="button" data-copy-target="result-content">复制</button>
+              </header>
+              <pre id="result-content" class="content-block" tabindex="0">等待任务完成</pre>
+            </section>
+
+            <section id="receipt-panel" class="content-card receipt-card" role="tabpanel" aria-labelledby="tab-receipt" hidden>
+              <header class="card-header">
+                <div>
+                  <p class="eyebrow">Verification</p>
+                  <h3 id="receipt-title">校验回执</h3>
+                </div>
+                <span id="receipt-summary" class="receipt-summary">暂无校验</span>
+              </header>
+              <div id="receipt-checks" class="check-list"></div>
+              <details class="raw-receipt">
+                <summary>查看结构化回执</summary>
+                <pre id="receipt-content" class="content-block compact" tabindex="0">暂无回执</pre>
+              </details>
+            </section>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>

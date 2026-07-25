@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-backend-toolkit"
-version = "0.8.0"
+version = "0.9.0"
 description = "A compact, result-observable toolkit for explicit cloud and local LLM calls."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,4 +28,9 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-llm_backend_toolkit = ["default_backends.json"]
+llm_backend_toolkit = [
+  "default_backends.json",
+  "observer_ui/*.html",
+  "observer_ui/*.css",
+  "observer_ui/*.js",
+]

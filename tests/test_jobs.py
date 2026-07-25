@@ -8,9 +8,11 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from llm_backend_toolkit.backends import BackendRegistry
 from llm_backend_toolkit.jobs import JobStore
+from llm_backend_toolkit.observability import append_event, read_events
 
 
 def _registry(
@@ -151,9 +153,10 @@ class JobStoreTests(unittest.TestCase):
             self.assertEqual("queued", state["job_status"])
             self.assertEqual(
                 {
-                    "task_goal": "g",
+                    "task_label": "模型生成任务",
                     "execution_mode": "direct",
                     "reasoning_mode": "off",
+                    "model": "qwen-main-v1",
                 },
                 state["display"],
             )
@@ -304,7 +307,7 @@ class JobStoreTests(unittest.TestCase):
             self.assertNotIn("request", queued)
             self.assertEqual("completed", completed["job_status"])
             self.assertEqual({"answer": 56}, completed["result"]["output"])
-            self.assertEqual("g", completed["display"]["task_goal"])
+            self.assertEqual("模型生成任务", completed["display"]["task_label"])
 
     def test_long_output_is_externalized_from_the_default_result_view(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -888,6 +891,168 @@ class JobStoreTests(unittest.TestCase):
             self.assertFalse(first["cacheable"])
             self.assertNotEqual(first["job_id"], second["job_id"])
             self.assertEqual(2, len(spawned))
+
+    def test_event_nested_payloads_use_recursive_positive_schemas(self):
+        with tempfile.TemporaryDirectory() as temp:
+            job_dir = Path(temp) / ("a" * 24)
+            append_event(
+                job_dir,
+                "run.completed",
+                "运行完成。",
+                payload={
+                    "result_status": "ok",
+                    "usage": {
+                        "prompt_tokens": 12,
+                        "completion_tokens": 5,
+                        "eval_duration_ns": 250_000_000,
+                        "tps_source": "eval_duration",
+                        "raw_log": "PRIVATE_USAGE_LOG",
+                        "details": {
+                            "raw_log": "PRIVATE_NESTED_USAGE_LOG",
+                            "path": "C:/private/usage.json",
+                        },
+                    },
+                    "checks": [
+                        {
+                            "id": "C:/private/checks/truth.json",
+                            "passed": False,
+                            "summary": "PRIVATE_CHECK_SUMMARY",
+                            "evidence": {"raw_log": "PRIVATE_CHECK_LOG"},
+                        }
+                    ],
+                    "unknown": {"raw_log": "PRIVATE_TOP_LEVEL_LOG"},
+                },
+            )
+            append_event(
+                job_dir,
+                "cache.hit",
+                "命中缓存。",
+                payload={
+                    "attempt_id": "attempt-1",
+                    "source_job_id": "..\\private\\source-job",
+                    "cache_identity": {
+                        "schema": "llm-backend-toolkit.explicit-cache-identity.v1",
+                        "mode": "explicit",
+                        "digest": "sha256:" + ("b" * 64),
+                        "backend": "local-a",
+                        "model": "model-v1",
+                        "caller_cache_key": "PRIVATE_CALLER_KEY",
+                        "nested": {"raw_log": "PRIVATE_CACHE_LOG"},
+                    },
+                },
+            )
+
+            completed, cache_hit = read_events(job_dir)
+
+            self.assertEqual(
+                {
+                    "result_status": "ok",
+                    "usage": {
+                        "prompt_tokens": 12,
+                        "completion_tokens": 5,
+                        "eval_duration_ns": 250_000_000,
+                        "tps_source": "eval_duration",
+                    },
+                    "checks": [
+                        {
+                            "id": completed["payload"]["checks"][0]["id"],
+                            "passed": False,
+                        }
+                    ],
+                },
+                completed["payload"],
+            )
+            self.assertRegex(
+                completed["payload"]["checks"][0]["id"],
+                r"^opaque-[0-9a-f]{16}$",
+            )
+            self.assertEqual(
+                {
+                    "schema": "llm-backend-toolkit.explicit-cache-identity.v1",
+                    "mode": "explicit",
+                    "digest": "sha256:" + ("b" * 64),
+                    "backend": "local-a",
+                    "model": "model-v1",
+                },
+                cache_hit["payload"]["cache_identity"],
+            )
+            self.assertRegex(
+                cache_hit["payload"]["source_job_id"],
+                r"^opaque-[0-9a-f]{16}$",
+            )
+            serialized = json.dumps([completed, cache_hit], ensure_ascii=False)
+            for private_value in (
+                "PRIVATE_USAGE_LOG",
+                "PRIVATE_NESTED_USAGE_LOG",
+                "PRIVATE_CHECK_SUMMARY",
+                "PRIVATE_CHECK_LOG",
+                "PRIVATE_TOP_LEVEL_LOG",
+                "PRIVATE_CALLER_KEY",
+                "PRIVATE_CACHE_LOG",
+                "C:/private",
+                "..\\private",
+            ):
+                self.assertNotIn(private_value, serialized)
+
+    def test_path_shaped_attachment_ids_become_stable_opaque_ids(self):
+        with tempfile.TemporaryDirectory() as temp:
+            job_dir = Path(temp) / ("c" * 24)
+            private_id = "C:\\private\\audio\\meeting.wav"
+            first = append_event(
+                job_dir,
+                "media.asr.started",
+                "开始语音识别。",
+                payload={"attachment_id": private_id, "kind": "audio"},
+            )
+            second = append_event(
+                job_dir,
+                "media.asr.completed",
+                "语音识别完成。",
+                payload={"attachment_id": private_id, "kind": "audio"},
+            )
+
+            first_id = first["payload"]["attachment_id"]
+            self.assertRegex(first_id, r"^opaque-[0-9a-f]{16}$")
+            self.assertEqual(first_id, second["payload"]["attachment_id"])
+            self.assertNotIn(private_id, json.dumps([first, second]))
+
+    def test_event_append_sequence_is_linear_and_only_terminal_events_fsync(self):
+        with tempfile.TemporaryDirectory() as temp:
+            job_dir = Path(temp) / ("d" * 24)
+            with patch(
+                "llm_backend_toolkit.observability.read_events",
+                side_effect=AssertionError("append_event must not scan the full event log"),
+            ), patch("llm_backend_toolkit.observability.os.fsync") as fsync:
+                started = time.monotonic()
+                for index in range(650):
+                    event = append_event(
+                        job_dir,
+                        "agent.tool.activity",
+                        "智能体正在调用工具。",
+                        payload={
+                            "status": "running",
+                            "item_type": "tool_call",
+                            "steps": index,
+                        },
+                    )
+                    self.assertEqual(index + 1, event["sequence"])
+                elapsed = time.monotonic() - started
+
+                self.assertLess(elapsed, 10.0)
+                self.assertEqual(0, fsync.call_count)
+                (job_dir / ".events-sequence.json").unlink()
+                terminal = append_event(
+                    job_dir,
+                    "run.completed",
+                    "运行完成。",
+                    payload={"result_status": "ok"},
+                )
+                self.assertEqual(651, terminal["sequence"])
+                self.assertGreaterEqual(fsync.call_count, 2)
+
+            events = read_events(job_dir, limit=700)
+            self.assertEqual(list(range(1, 652)), [event["sequence"] for event in events])
+            self.assertTrue((job_dir / ".events-sequence.json").is_file())
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from .errors import MediaError, ToolError
 
 
 Runner = Callable[..., Any]
+ProgressCallback = Callable[[dict[str, Any]], None]
 EXACT_IMAGE_PURPOSES = {"exact_text", "table", "formula", "scan", "layout", "coordinates"}
 
 
@@ -72,6 +73,7 @@ class MediaProcessor:
         *,
         provider_supports_vision: bool,
         mode: str = "auto",
+        progress_callback: ProgressCallback | None = None,
     ) -> MediaResult:
         native_images: list[str] = []
         supplemental_text: list[dict[str, str]] = []
@@ -107,12 +109,52 @@ class MediaProcessor:
                     raise self._error(f"Native route is unavailable for attachment: {attachment_id}")
                 native_images.append(str(path))
                 routes.append({"id": attachment_id, "kind": kind, "route": route})
+                self._emit(
+                    progress_callback,
+                    "media.native.prepared",
+                    "图片已准备通过模型原生视觉通道处理。",
+                    attachment_id=attachment_id,
+                    kind=kind,
+                    mode="native",
+                )
                 continue
 
             if kind == "image":
+                self._emit(
+                    progress_callback,
+                    "media.ocr.started",
+                    "LocalOCR 正在提取图片中的可验证文字。",
+                    attachment_id=attachment_id,
+                    kind=kind,
+                    mode="specialist",
+                )
                 text, output_path = self._run_localocr(path)
+                self._emit(
+                    progress_callback,
+                    "media.ocr.completed",
+                    "LocalOCR 已完成文字提取，正在交回模型。",
+                    attachment_id=attachment_id,
+                    kind=kind,
+                    mode="specialist",
+                )
             elif kind == "audio":
+                self._emit(
+                    progress_callback,
+                    "media.asr.started",
+                    "ChineseASR 正在转写中文音频。",
+                    attachment_id=attachment_id,
+                    kind=kind,
+                    mode="specialist",
+                )
                 text, output_path = self._run_chineseasr(path)
+                self._emit(
+                    progress_callback,
+                    "media.asr.completed",
+                    "ChineseASR 已完成音频转写，正在交回模型。",
+                    attachment_id=attachment_id,
+                    kind=kind,
+                    mode="specialist",
+                )
             else:
                 raise self._error(f"Specialist route does not support kind: {kind}")
             supplemental_text.append({"id": attachment_id, "kind": kind, "text": text})
@@ -120,6 +162,30 @@ class MediaProcessor:
             routes.append({"id": attachment_id, "kind": kind, "route": route})
 
         return MediaResult(native_images, supplemental_text, artifacts, routes)
+
+    @staticmethod
+    def _emit(
+        callback: ProgressCallback | None,
+        event_kind: str,
+        summary_zh: str,
+        **payload: Any,
+    ) -> None:
+        if callback is None:
+            return
+        try:
+            callback(
+                {
+                    "phase": "preparing",
+                    "public_event": {
+                        "kind": event_kind,
+                        "summary_zh": summary_zh,
+                        "payload": payload,
+                    },
+                }
+            )
+        except Exception:
+            # Observation is best effort and must never interrupt OCR/ASR.
+            return
 
     def _run_localocr(self, source: Path) -> tuple[str, str]:
         if not self.localocr_entry:

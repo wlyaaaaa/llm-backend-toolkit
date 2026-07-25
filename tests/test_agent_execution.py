@@ -1,3 +1,5 @@
+import json
+import sys
 import tempfile
 import unittest
 import subprocess
@@ -83,6 +85,158 @@ def agent_request(workspace):
 
 
 class AgentExecutionTests(unittest.TestCase):
+    def test_bounded_process_tails_complete_machine_event_lines(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            event_file = root / "events.jsonl"
+            event_file.touch()
+            script = root / "emit_events.py"
+            script.write_text(
+                "import json, pathlib, sys, time\n"
+                "path = pathlib.Path(sys.argv[1])\n"
+                "with path.open('a', encoding='utf-8') as stream:\n"
+                "    for sequence, kind in ((1, 'turn.started'), (2, 'turn.completed')):\n"
+                "        stream.write(json.dumps({'schema':'aicli.machine-event.v1','sequence':sequence,'kind':kind}) + '\\n')\n"
+                "        stream.flush()\n"
+                "        time.sleep(0.08)\n",
+                encoding="utf-8",
+            )
+            observed = []
+
+            code, _, _, _ = _bounded_process(
+                [sys.executable, str(script), str(event_file)],
+                cwd=root,
+                stdin_text="",
+                timeout_seconds=5,
+                event_file=event_file,
+                on_event=observed.append,
+            )
+
+            self.assertEqual(0, code)
+            self.assertEqual(
+                ["turn.started", "turn.completed"],
+                [event["kind"] for event in observed],
+            )
+
+    def test_aicli_machine_events_become_safe_chinese_progress(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = root / "aicli.ps1"
+            entry.write_text("# stub\n", encoding="utf-8")
+            runner = AiCliProfileRunner(
+                name="codex-cli",
+                engine="codex",
+                default_profile="codex-ollama-main",
+                entry=str(entry),
+            )
+            progress = []
+            envelope = {
+                "run": {
+                    "exitCode": 0,
+                    "durationMs": 50,
+                    "stdout": '{"type":"item.completed","item":{"type":"agent_message","text":"完成"}}',
+                    "limitEnforcement": {
+                        "timeout": "hard",
+                        "maxSteps": "hard",
+                        "maxToolCalls": "hard",
+                    },
+                    "limitUsage": {
+                        "steps": 2,
+                        "toolCalls": 1,
+                        "eventsSeen": 6,
+                        "protocol": "codex-jsonl",
+                        "cleanupConfirmed": True,
+                    },
+                    "eventProjection": "codex-public-v1",
+                    "machineEventProjection": "aicli.machine-event.v1",
+                    "machineEventStatus": "ok",
+                    "machineEventCount": 4,
+                }
+            }
+
+            def bounded(command, **kwargs):
+                if command[-2:] == ["version", "--json"]:
+                    return (
+                        0,
+                        json.dumps(
+                            {
+                                "capabilities": {
+                                    "machineEventProjection": "aicli.machine-event.v1"
+                                }
+                            }
+                        ),
+                        "",
+                        2,
+                    )
+                self.assertIn("--event-file", command)
+                self.assertIsNotNone(kwargs.get("event_file"))
+                callback = kwargs["on_event"]
+                callback(
+                    {
+                        "schema": "aicli.machine-event.v1",
+                        "sequence": 1,
+                        "kind": "reasoning.activity",
+                        "status": "started",
+                        "reasoning": "PRIVATE_REASONING",
+                    }
+                )
+                callback(
+                    {
+                        "schema": "aicli.machine-event.v1",
+                        "sequence": 2,
+                        "kind": "tool.activity",
+                        "status": "started",
+                        "item_type": "file_change",
+                        "command": "PRIVATE_COMMAND",
+                    }
+                )
+                callback(
+                    {
+                        "schema": "aicli.machine-event.v1",
+                        "sequence": 3,
+                        "kind": "output.completed",
+                        "status": "completed",
+                        "public_text": "公开阶段结果",
+                    }
+                )
+                return 0, json.dumps(envelope, ensure_ascii=False), "", 50
+
+            execution = {
+                "workspace": str(root),
+                "model": "qwen-main-v1",
+                "policy": "workspace-write",
+                "native_images": [],
+                "budget": {
+                    "timeout_seconds": 30,
+                    "max_steps": 4,
+                    "max_tool_calls": 4,
+                },
+                "_progress_callback": progress.append,
+            }
+            with patch(
+                "llm_backend_toolkit.agent_runners.shutil.which",
+                return_value="pwsh",
+            ), patch(
+                "llm_backend_toolkit.agent_runners._bounded_process",
+                side_effect=bounded,
+            ):
+                response = runner.invoke("task", execution)
+
+            self.assertEqual("完成", response.content)
+            self.assertEqual("live_safe_events", response.observability_level)
+            kinds = [
+                event["public_event"]["kind"]
+                for event in progress
+                if "public_event" in event
+            ]
+            self.assertIn("agent.reasoning.activity", kinds)
+            self.assertIn("agent.tool.activity", kinds)
+            self.assertIn("agent.output.completed", kinds)
+            serialized = json.dumps(progress, ensure_ascii=False)
+            self.assertNotIn("PRIVATE_REASONING", serialized)
+            self.assertNotIn("PRIVATE_COMMAND", serialized)
+            self.assertIn("公开阶段结果", serialized)
+
     def test_qwen_json_array_is_parsed_without_returning_event_trace(self):
         values = _json_values('[{"type":"tool","content":"hidden"},{"result":"FINAL_ONLY","stats":{"tools":{"totalCalls":3}}}]')
         self.assertEqual(2, len(values))

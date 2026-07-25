@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .backends import BackendRegistry
+from .context import _estimate_tokens
+from .observability import append_event, append_event_once, notify_observer
 
 
 Spawner = Callable[[str, Path], None]
@@ -108,11 +110,36 @@ def _display_text(value: Any, *, max_chars: int = 1_000) -> str:
     return text[:max_chars]
 
 
+def _observer_task_label(request: dict[str, Any]) -> str:
+    observability = request.get("observability") or {}
+    public_label = _display_text(
+        observability.get("public_label"),
+        max_chars=80,
+    )
+    if public_label:
+        return public_label
+    execution = request.get("execution") or {}
+    if str(execution.get("mode") or "direct") == "agent":
+        return "智能体工作任务"
+    attachments = list((request.get("media") or {}).get("attachments") or [])
+    kinds = {
+        str(item.get("kind") or "")
+        for item in attachments
+        if isinstance(item, dict)
+    }
+    if "audio" in kinds:
+        return "中文音频转写任务"
+    if "image" in kinds:
+        return "图像理解与文字提取任务"
+    return "模型生成任务"
+
+
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temp.replace(path)
+    notify_observer(path.parent)
 
 
 def _default_spawner(job_id: str, state_root: Path) -> None:
@@ -238,6 +265,10 @@ class JobStore:
             "forced": force,
             "cacheable": cacheable,
             "cache_identity": cache_identity,
+            "visibility": {
+                "status": "recorded",
+                "event_log": str(self._job_dir(job_id) / "events.jsonl"),
+            },
             "monitor_until_utc": self._read_state(job_id).get("monitor_until_utc"),
             **({"conversation": conversation} if conversation else {}),
         }
@@ -366,10 +397,50 @@ class JobStore:
     ) -> None:
         execution = request.get("execution") or {}
         is_agent = str(execution.get("mode") or "direct") == "agent"
-        task = request.get("task") or {}
+        requested_backend = str(
+            request.get("backend")
+            or request.get("provider")
+            or "local-default"
+        )
+        display_metadata: dict[str, Any] = {
+            "task_label": _observer_task_label(request),
+            "execution_mode": "agent" if is_agent else "direct",
+            "reasoning_mode": str(
+                (request.get("reasoning") or {}).get("mode") or "off"
+            ),
+        }
+        resolved_backend = requested_backend
+        try:
+            registry = self.registry or BackendRegistry.load()
+            resolved = registry.resolve(requested_backend)
+            resolved_backend = resolved.backend_id
+            display_metadata["model"] = str(resolved.config.get("model") or "")
+            if is_agent:
+                route_id = str(execution.get("runner") or "data_factory")
+                route = (resolved.config.get("agent_routes") or {}).get(route_id)
+                if isinstance(route, dict):
+                    display_metadata.update(
+                        {
+                            "runner": str(route.get("runner") or route_id),
+                            "profile": str(route.get("profile") or ""),
+                            "model": str(
+                                route.get("model")
+                                or display_metadata.get("model")
+                                or ""
+                            ),
+                            "reasoning_effort": str(
+                                route.get("reasoning_effort") or ""
+                            ),
+                        }
+                    )
+        except (OSError, UnicodeError, ValueError, TypeError):
+            # A visibility record must still exist when the worker will later
+            # fail closed on an invalid or unavailable registry.
+            pass
         job_dir = self._job_dir(job_id)
         job_dir.mkdir(parents=True, exist_ok=False)
         _atomic_json(job_dir / "request.json", request)
+        created_utc = _utc_now()
         _atomic_json(
             job_dir / "state.json",
             {
@@ -378,14 +449,11 @@ class JobStore:
                 "request_digest": request_digest,
                 "cache_identity": cache_identity,
                 "job_status": "queued",
-                "backend": str(
-                    request.get("backend")
-                    or request.get("provider")
-                    or "local-default"
-                ),
+                "backend": resolved_backend,
+                "model": str(display_metadata.get("model") or ""),
                 "provider": str(request.get("provider") or ""),
-                "created_utc": _utc_now(),
-                "updated_utc": _utc_now(),
+                "created_utc": created_utc,
+                "updated_utc": created_utc,
                 "monitor_until_utc": _utc_after(self._timeout_seconds(request)),
                 "cacheable": cacheable,
                 "cache_result_eligible": False,
@@ -395,13 +463,30 @@ class JobStore:
                 or job_id,
                 "conversation_turn": (conversation or {}).get("turn") or 1,
                 "conversation_max_turns": (conversation or {}).get("max_turns"),
-                "display": {
-                    "task_goal": _display_text(task.get("goal")),
-                    "execution_mode": "agent" if is_agent else "direct",
-                    "reasoning_mode": str(
-                        (request.get("reasoning") or {}).get("mode") or "off"
-                    ),
+                "display": display_metadata,
+                "visibility": {
+                    "status": "recorded",
+                    "event_schema": "llm-backend-toolkit.run-event.v1",
                 },
+            },
+        )
+        append_event(
+            job_dir,
+            "run.created",
+            "Codex 已创建可见模型子运行，正在等待执行。",
+            payload={
+                "task_label": _observer_task_label(request),
+                "backend": resolved_backend,
+                "model": str(display_metadata.get("model") or ""),
+                "execution_mode": "agent" if is_agent else "direct",
+                "reasoning_mode": str(
+                    (request.get("reasoning") or {}).get("mode") or "off"
+                ),
+                "reasoning_effort": str(
+                    display_metadata.get("reasoning_effort") or ""
+                ),
+                "conversation_root": (conversation or {}).get("root_job_id")
+                or job_id,
             },
         )
 
@@ -471,11 +556,23 @@ class JobStore:
         if job_status == "completed":
             if not self._cache_result_is_eligible(job_id, state):
                 return None
+            attempt_id = secrets.token_hex(8)
+            append_event(
+                self._job_dir(job_id),
+                "cache.hit",
+                "本次调用复用了这一子运行的已校验结果。",
+                payload={
+                    "attempt_id": attempt_id,
+                    "source_job_id": job_id,
+                    "cache_identity": cache_identity,
+                },
+            )
             receipt = {
                 "status": "cache_hit",
                 "job_id": job_id,
                 "job_status": "completed",
                 "poll_after_ms": 0,
+                "visibility_attempt_id": attempt_id,
             }
             if cache_identity:
                 receipt["cache_identity"] = cache_identity
@@ -621,6 +718,15 @@ class JobStore:
         state["job_status"] = "running"
         state["updated_utc"] = _utc_now()
         _atomic_json(job_dir / "state.json", state)
+        append_event(
+            job_dir,
+            "run.started",
+            "模型子运行已经启动。",
+            payload={
+                "backend": state.get("backend"),
+                "execution_mode": (state.get("display") or {}).get("execution_mode"),
+            },
+        )
         value = json.loads(request_path.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             raise ValueError("Stored job request is not an object")
@@ -646,6 +752,7 @@ class JobStore:
         metrics: dict[str, Any] = {
             "elapsed_seconds": 0.0,
             "content_chars": 0,
+            "estimated_output_tokens": 0,
             "thinking_active": False,
             "thinking_chars": 0,
             "token_events": 0,
@@ -673,6 +780,8 @@ class JobStore:
             delta = str(event.get("content_delta") or "")
             if allow_public_preview and delta and len(public_preview) < preview_limit:
                 public_preview = (public_preview + delta)[:preview_limit]
+            if delta:
+                metrics["estimated_output_tokens"] += _estimate_tokens(delta)
             if "elapsed_seconds" in event:
                 metrics["elapsed_seconds"] = round(float(event.get("elapsed_seconds") or 0.0), 3)
             if "content_chars" in event:
@@ -683,6 +792,26 @@ class JobStore:
                 metrics["thinking_chars"] = max(0, int(event.get("thinking_chars") or 0))
             if "token_events" in event:
                 metrics["token_events"] = max(0, int(event.get("token_events") or 0))
+
+            public_event = event.get("public_event")
+            if isinstance(public_event, dict):
+                kind = str(public_event.get("kind") or "")
+                summary = _display_text(
+                    public_event.get("summary_zh"),
+                    max_chars=500,
+                )
+                if re.fullmatch(r"[a-z][a-z0-9_.-]{0,95}", kind) and summary:
+                    payload_value = public_event.get("payload")
+                    append_event(
+                        job_dir,
+                        kind,
+                        summary,
+                        payload=(
+                            dict(payload_value)
+                            if isinstance(payload_value, dict)
+                            else {}
+                        ),
+                    )
 
             now = time.monotonic()
             updated_utc = _utc_now()
@@ -697,6 +826,55 @@ class JobStore:
                 )
                 events[:] = events[-8:]
                 last_phase = phase
+                observable = {
+                    "accepted": (
+                        "run.accepted",
+                        "模型执行器已经接收任务。",
+                    ),
+                    "queued": (
+                        "queue.entered",
+                        "任务正在等待本地 GPU 运行通道。",
+                    ),
+                    "preparing": (
+                        "work.preparing",
+                        "正在整理输入、来源与输出约束。",
+                    ),
+                    "connecting": (
+                        "model.connecting",
+                        "正在连接实际模型与 GPU Broker。",
+                    ),
+                    "waiting": (
+                        "work.waiting",
+                        "模型已经开始工作，等待下一项可公开事件。",
+                    ),
+                    "thinking": (
+                        "reasoning.activity",
+                        "深度推理处于活动状态，暂无可验证公开结论。",
+                    ),
+                    "generating": (
+                        "output.started",
+                        "模型开始生成公开输出。",
+                    ),
+                    "validating": (
+                        "validation.started",
+                        "公开输出生成结束，正在执行结果校验。",
+                    ),
+                }.get(phase)
+                if observable is not None:
+                    kind, summary = observable
+                    append_event(
+                        job_dir,
+                        kind,
+                        summary,
+                        payload={
+                            "phase": phase,
+                            "elapsed_seconds": metrics["elapsed_seconds"],
+                            "content_chars": metrics["content_chars"],
+                            "thinking_active": metrics["thinking_active"],
+                            "thinking_chars": metrics["thinking_chars"],
+                            "token_events": metrics["token_events"],
+                        },
+                    )
 
             payload: dict[str, Any] = {
                 "schema": "llm-backend-toolkit.progress.v1",
@@ -733,6 +911,28 @@ class JobStore:
         )
         state["updated_utc"] = _utc_now()
         _atomic_json(job_dir / "state.json", state)
+        completed_ok = state["result_status"] in CACHEABLE_RESULT_STATUSES
+        append_event(
+            job_dir,
+            "run.completed" if completed_ok else "run.failed",
+            (
+                "模型子运行已经完成，结果与校验回执可供 Codex 取回。"
+                if completed_ok
+                else "模型子运行未成功完成，失败回执已保留。"
+            ),
+            payload={
+                "result_status": state["result_status"],
+                "usage": result.get("usage") or {},
+                "checks": [
+                    {
+                        "id": check.get("id"),
+                        "passed": bool(check.get("passed")),
+                    }
+                    for check in (result.get("checks") or [])
+                    if isinstance(check, dict)
+                ],
+            },
+        )
         cache_identity = state.get("cache_identity")
         if bool(state.get("cacheable")) and isinstance(cache_identity, dict):
             digest_value = str(cache_identity.get("digest") or "")
@@ -827,6 +1027,29 @@ class JobStore:
             if not full_result:
                 result = self._compact_result_view(self._job_dir(job_id), result)
             output["result"] = result
+        return output
+
+    def collect(
+        self,
+        job_id: str,
+        *,
+        full_result: bool = False,
+    ) -> dict[str, Any]:
+        output = self.get(
+            job_id,
+            include_result=True,
+            full_result=full_result,
+        )
+        if (
+            output.get("job_status") == "completed"
+            and "result" in output
+        ):
+            append_event_once(
+                self._job_dir(job_id),
+                "handoff.collected",
+                "Codex 已取回这一模型子运行的结果。",
+                payload={"full_result": bool(full_result)},
+            )
         return output
 
     @staticmethod

@@ -89,6 +89,10 @@ class BackendRegistryTests(unittest.TestCase):
 
         self.assertEqual("local-default", default.backend_id)
         self.assertFalse(default.config["cloud"])
+        self.assertEqual(
+            "max",
+            default.config["agent_routes"]["data_factory"]["reasoning_effort"],
+        )
         self.assertEqual("fast-middle-agent", spark.backend_id)
         self.assertEqual("agent-only", spark.config["adapter"])
         self.assertTrue(spark.config["cloud"])

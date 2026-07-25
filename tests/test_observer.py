@@ -1,0 +1,773 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import threading
+import time
+import unittest
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import patch
+
+from llm_backend_toolkit.jobs import JobStore
+from llm_backend_toolkit.observer import (
+    OBSERVER_MAX_OUTPUT_BYTES,
+    ObserverStore,
+    _runtime_health,
+    _state_root_id,
+    create_observer_server,
+    observer_runtime_path,
+)
+from llm_backend_toolkit.observability import EVENT_SCHEMA, read_events
+
+
+def request() -> dict:
+    return {
+        "backend": "local-default",
+        "task": {
+            "goal": "用中文返回七乘以八。",
+            "expected_output": {"format": "text"},
+        },
+        "reasoning": {"mode": "on"},
+        "privacy": {"cloud_allowed": False},
+    }
+
+
+class VisibleRunEventTests(unittest.TestCase):
+    def test_visible_run_is_recorded_before_worker_spawn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            observed: list[dict] = []
+
+            def spawner(job_id: str, root: Path) -> None:
+                events = read_events(root / job_id)
+                self.assertEqual("run.created", events[0]["kind"])
+                self.assertEqual("模型生成任务", events[0]["payload"]["task_label"])
+                observed.extend(events)
+
+            receipt = JobStore(Path(temp), spawner=spawner).submit(request(), force=True)
+
+            self.assertEqual("accepted", receipt["status"])
+            self.assertTrue(observed)
+            state = json.loads(
+                (Path(temp) / receipt["job_id"] / "state.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual("recorded", state["visibility"]["status"])
+
+    def test_lifecycle_appends_public_events_without_hidden_reasoning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit(request(), force=True)
+            job_id = receipt["job_id"]
+            store.claim(job_id)
+            progress = store.progress_recorder(job_id, allow_public_preview=True)
+            progress(
+                {
+                    "phase": "thinking",
+                    "thinking_active": True,
+                    "thinking_chars": 42,
+                    "reasoning": "PRIVATE_HIDDEN_TRACE",
+                }
+            )
+            progress(
+                {
+                    "phase": "generating",
+                    "content_delta": "答案是 56。",
+                    "content_chars": 7,
+                }
+            )
+            store.complete(
+                job_id,
+                {
+                    "status": "ok",
+                    "output": "答案是 56。",
+                    "usage": {
+                        "prompt_tokens": 20,
+                        "completion_tokens": 10,
+                        "eval_duration_ns": 500_000_000,
+                    },
+                },
+            )
+
+            events = read_events(Path(temp) / job_id)
+            kinds = [event["kind"] for event in events]
+            self.assertIn("run.started", kinds)
+            self.assertIn("reasoning.activity", kinds)
+            self.assertIn("output.started", kinds)
+            self.assertIn("run.completed", kinds)
+            serialized = json.dumps(events, ensure_ascii=False)
+            self.assertNotIn("PRIVATE_HIDDEN_TRACE", serialized)
+
+    def test_public_subsystem_events_and_live_token_estimates_are_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit(request(), force=True)
+            job_id = receipt["job_id"]
+            store.claim(job_id)
+            progress = store.progress_recorder(job_id, allow_public_preview=True)
+
+            progress(
+                {
+                    "phase": "preparing",
+                    "public_event": {
+                        "kind": "media.ocr.started",
+                        "summary_zh": "LocalOCR 正在提取图片文字。",
+                        "payload": {
+                            "attachment_id": "scan",
+                            "reasoning": "PRIVATE_MEDIA_TRACE",
+                        },
+                    },
+                }
+            )
+            progress(
+                {
+                    "phase": "generating",
+                    "elapsed_seconds": 2.0,
+                    "content_delta": "公开回复",
+                    "content_chars": 4,
+                    "token_events": 2,
+                }
+            )
+
+            persisted = json.loads(
+                (Path(temp) / job_id / "progress.json").read_text(encoding="utf-8")
+            )
+            self.assertGreater(persisted["metrics"]["estimated_output_tokens"], 0)
+            events = read_events(Path(temp) / job_id)
+            media_event = next(
+                event for event in events if event["kind"] == "media.ocr.started"
+            )
+            self.assertEqual("scan", media_event["payload"]["attachment_id"])
+            self.assertNotIn("PRIVATE_MEDIA_TRACE", json.dumps(media_event))
+
+    def test_cache_hit_is_a_visible_attempt_on_the_source_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            first = store.submit(request())
+            store.claim(first["job_id"])
+            store.complete(first["job_id"], {"status": "ok", "output": "56"})
+
+            cached = store.submit(request())
+
+            self.assertEqual("cache_hit", cached["status"])
+            self.assertRegex(cached["visibility_attempt_id"], r"^[0-9a-f]{16}$")
+            events = read_events(Path(temp) / first["job_id"])
+            self.assertEqual("cache.hit", events[-1]["kind"])
+            self.assertEqual(
+                cached["visibility_attempt_id"],
+                events[-1]["payload"]["attempt_id"],
+            )
+
+    def test_collect_records_handoff_once_but_plain_get_does_not(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit(request(), force=True)
+            job_id = receipt["job_id"]
+            store.claim(job_id)
+            store.complete(job_id, {"status": "ok", "output": "56"})
+
+            store.get(job_id, include_result=True)
+            self.assertNotIn(
+                "handoff.collected",
+                [event["kind"] for event in read_events(Path(temp) / job_id)],
+            )
+            store.collect(job_id, full_result=False)
+            store.collect(job_id, full_result=True)
+
+            collected = [
+                event
+                for event in read_events(Path(temp) / job_id)
+                if event["kind"] == "handoff.collected"
+            ]
+            self.assertEqual(1, len(collected))
+
+    def test_concurrent_collect_is_cross_thread_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit(request(), force=True)
+            job_id = receipt["job_id"]
+            store.claim(job_id)
+            store.complete(job_id, {"status": "ok", "output": "56"})
+            errors: list[Exception] = []
+
+            def collect() -> None:
+                try:
+                    store.collect(job_id)
+                except Exception as exc:  # pragma: no cover - diagnostic capture
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=collect) for _ in range(16)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+            self.assertFalse(errors)
+            collected = [
+                event
+                for event in read_events(Path(temp) / job_id)
+                if event["kind"] == "handoff.collected"
+            ]
+            self.assertEqual(1, len(collected))
+
+
+class ObserverStoreTests(unittest.TestCase):
+    def test_large_text_and_json_artifacts_are_bounded_in_store_and_http(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = JobStore(root, spawner=lambda *_: None, result_preview_chars=128)
+            cases = (
+                (
+                    "text",
+                    "PUBLIC_TEXT_PREFIX" + ("x" * OBSERVER_MAX_OUTPUT_BYTES) + "PRIVATE_TEXT_TAIL",
+                    "output.txt",
+                    "PRIVATE_TEXT_TAIL",
+                ),
+                (
+                    "json",
+                    {
+                        "public": "PUBLIC_JSON_PREFIX",
+                        "padding": "x" * OBSERVER_MAX_OUTPUT_BYTES,
+                        "tail": "PRIVATE_JSON_TAIL",
+                    },
+                    "output.json",
+                    "PRIVATE_JSON_TAIL",
+                ),
+            )
+            jobs: list[tuple[str, Path, str]] = []
+            for _name, output, artifact_name, tail_canary in cases:
+                receipt = store.submit(request(), force=True)
+                job_id = receipt["job_id"]
+                store.claim(job_id)
+                store.complete(job_id, {"status": "ok", "output": output})
+                artifact = root / job_id / artifact_name
+                self.assertGreater(artifact.stat().st_size, OBSERVER_MAX_OUTPUT_BYTES)
+                jobs.append((job_id, artifact, tail_canary))
+
+            observer = ObserverStore(root)
+            server = create_observer_server(root, port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            try:
+                for job_id, artifact, tail_canary in jobs:
+                    direct = observer.get_run(job_id)
+                    with urllib.request.urlopen(
+                        f"{base}/api/runs/{job_id}",
+                        timeout=3,
+                    ) as response:
+                        http = json.load(response)
+
+                    for projected in (direct, http):
+                        output = projected["result"]["output"]
+                        self.assertEqual("preview", output["type"])
+                        self.assertTrue(output["truncated"])
+                        self.assertEqual("observer_size_limit", output["reason"])
+                        self.assertEqual(artifact.name, output["source"])
+                        self.assertEqual(artifact.stat().st_size, output["bytes"])
+                        self.assertNotIn(
+                            tail_canary,
+                            json.dumps(projected, ensure_ascii=False),
+                        )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_oversized_result_json_is_rejected_before_opening(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = JobStore(root, spawner=lambda *_: None)
+            receipt = store.submit(request(), force=True)
+            job_id = receipt["job_id"]
+            store.claim(job_id)
+            store.complete(job_id, {"status": "ok", "output": "small"})
+            result_path = root / job_id / "result.json"
+            tail_canary = "PRIVATE_RESULT_TAIL"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "output": "x" * OBSERVER_MAX_OUTPUT_BYTES + tail_canary,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertGreater(result_path.stat().st_size, OBSERVER_MAX_OUTPUT_BYTES)
+            original_open = Path.open
+
+            def guarded_open(path: Path, *args, **kwargs):
+                if Path(path) == result_path:
+                    raise AssertionError("oversized result.json must not be opened")
+                return original_open(path, *args, **kwargs)
+
+            with patch.object(Path, "open", autospec=True, side_effect=guarded_open):
+                detail = ObserverStore(root).get_run(job_id)
+
+            output = detail["result"]["output"]
+            self.assertEqual("bounded", detail["result"]["status"])
+            self.assertEqual("preview", output["type"])
+            self.assertEqual("result.json", output["source"])
+            self.assertEqual(result_path.stat().st_size, output["bytes"])
+            self.assertEqual("observer_size_limit", output["reason"])
+            self.assertNotIn(tail_canary, json.dumps(detail, ensure_ascii=False))
+
+    def test_large_history_only_reads_result_and_events_for_requested_page(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            start = datetime(2026, 7, 25, tzinfo=timezone.utc)
+            for index in range(1_000):
+                job_id = f"{index:024x}"
+                job_dir = root / job_id
+                job_dir.mkdir()
+                stamp = (
+                    start + timedelta(seconds=index)
+                ).isoformat().replace("+00:00", "Z")
+                (job_dir / "state.json").write_text(
+                    json.dumps(
+                        {
+                            "job_status": "completed",
+                            "result_status": "ok",
+                            "backend": "local-default",
+                            "created_utc": stamp,
+                            "updated_utc": stamp,
+                            "display": {"task_label": f"历史任务 {index}"},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (job_dir / "progress.json").write_text("{}", encoding="utf-8")
+                (job_dir / "result.json").write_text(
+                    json.dumps({"status": "ok", "output": f"result-{index}"}),
+                    encoding="utf-8",
+                )
+                (job_dir / "events.jsonl").write_text("", encoding="utf-8")
+
+            observer_module = __import__(
+                "llm_backend_toolkit.observer",
+                fromlist=["_read_json"],
+            )
+            with (
+                patch(
+                    "llm_backend_toolkit.observer._read_json",
+                    wraps=observer_module._read_json,
+                ) as json_reader,
+                patch(
+                    "llm_backend_toolkit.observer.read_events",
+                    wraps=observer_module.read_events,
+                ) as event_reader,
+            ):
+                started = time.perf_counter()
+                listing = ObserverStore(root).list_runs(limit=25, offset=100)
+                elapsed = time.perf_counter() - started
+
+            result_json_reads = [
+                call
+                for call in json_reader.call_args_list
+                if Path(call.args[0]).name == "result.json"
+            ]
+            self.assertEqual(1_000, listing["total"])
+            self.assertEqual(25, len(listing["runs"]))
+            self.assertEqual(125, listing["next_offset"])
+            self.assertEqual(0, len(result_json_reads))
+            self.assertEqual(25, event_reader.call_count)
+            self.assertLess(elapsed, 2.0)
+
+    def test_private_prompt_paths_and_unapproved_metadata_never_enter_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            private_canary = r"C:\private\PRIVATE_PROMPT_TOKEN"
+            private_request = request()
+            private_request["task"]["goal"] = private_canary
+            private_request["observability"] = {
+                "public_label": "修复缓存身份回执",
+            }
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit(private_request, force=True)
+            job_id = receipt["job_id"]
+            store.claim(job_id)
+            progress = store.progress_recorder(
+                job_id,
+                allow_public_preview=False,
+            )
+            progress(
+                {
+                    "phase": "preparing",
+                    "public_event": {
+                        "kind": "media.ocr.started",
+                        "summary_zh": "LocalOCR 正在处理附件。",
+                        "payload": {
+                            "attachment_id": "scan",
+                            "path": private_canary,
+                            "command": private_canary,
+                            "api_key": private_canary,
+                        },
+                    },
+                }
+            )
+            store.complete(
+                job_id,
+                {
+                    "status": "ok",
+                    "output": "PUBLIC_OUTPUT",
+                    "artifacts": [{"path": private_canary}],
+                    "command": private_canary,
+                    "stdout": private_canary,
+                    "usage": {
+                        "completion_tokens": 12,
+                        "eval_duration_ns": 1_000_000_000,
+                        "raw_log": private_canary,
+                    },
+                    "checks": [
+                        {
+                            "id": private_canary,
+                            "passed": True,
+                            "summary": "公开校验通过",
+                            "raw_log": private_canary,
+                        }
+                    ],
+                    "source_receipt": [
+                        {
+                            "id": private_canary,
+                            "sha256": "a" * 64,
+                            "source_chars": 20,
+                            "selected_chars": 10,
+                            "selected_ranges": [
+                                {
+                                    "line_start": 1,
+                                    "line_end": 2,
+                                    "path": private_canary,
+                                }
+                            ],
+                            "path": private_canary,
+                        }
+                    ],
+                    "media_routes": [
+                        {
+                            "id": private_canary,
+                            "kind": "image",
+                            "route": "specialist",
+                            "path": private_canary,
+                        }
+                    ],
+                    "execution_receipt": {
+                        "runner": "codex-cli",
+                        "duration_ms": 123,
+                        "session_id": private_canary,
+                        "command": private_canary,
+                        "budget": {
+                            "timeout_seconds": 60,
+                            "raw_log": private_canary,
+                        },
+                        "limit_usage": {
+                            "steps": 2,
+                            "events_seen": 5,
+                            "raw_log": private_canary,
+                        },
+                    },
+                },
+            )
+
+            state_text = (Path(temp) / job_id / "state.json").read_text(
+                encoding="utf-8"
+            )
+            events_text = json.dumps(read_events(Path(temp) / job_id), ensure_ascii=False)
+            observer = ObserverStore(Path(temp))
+            projected = json.dumps(
+                {
+                    "list": observer.list_runs(),
+                    "detail": observer.get_run(job_id),
+                },
+                ensure_ascii=False,
+            )
+
+            self.assertNotIn(private_canary, state_text)
+            self.assertNotIn(private_canary, events_text)
+            self.assertNotIn(private_canary, projected)
+            self.assertNotIn("artifacts", projected)
+            self.assertIn("PUBLIC_OUTPUT", projected)
+            self.assertIn("公开校验通过", projected)
+            self.assertIn("opaque-", projected)
+            self.assertIn("completion_tokens", projected)
+            self.assertNotIn("raw_log", projected)
+            self.assertIn("修复缓存身份回执", projected)
+
+    def test_public_label_is_bounded_and_never_falls_back_to_prompt_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            private_canary = "PRIVATE_PROMPT_MUST_NOT_BECOME_A_TITLE"
+            submitted = request()
+            submitted["task"]["goal"] = private_canary
+            submitted["observability"] = {
+                "public_label": "  可见   中文标题  " + ("长" * 200),
+            }
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            job_id = store.submit(submitted, force=True)["job_id"]
+
+            state = json.loads(
+                (Path(temp) / job_id / "state.json").read_text(encoding="utf-8")
+            )
+            detail = ObserverStore(Path(temp)).get_run(job_id)
+
+            label = state["display"]["task_label"]
+            self.assertEqual(80, len(label))
+            self.assertTrue(label.startswith("可见 中文标题"))
+            self.assertEqual(label, detail["display"]["task_label"])
+            self.assertNotIn(private_canary, json.dumps(detail, ensure_ascii=False))
+
+    def test_event_window_keeps_latest_terminal_and_handoff_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit(request(), force=True)
+            job_id = receipt["job_id"]
+            job_dir = Path(temp) / job_id
+            events = []
+            for sequence in range(1, 601):
+                kind = "agent.tool.activity"
+                if sequence == 599:
+                    kind = "run.completed"
+                elif sequence == 600:
+                    kind = "handoff.collected"
+                events.append(
+                    json.dumps(
+                        {
+                            "schema": EVENT_SCHEMA,
+                            "job_id": job_id,
+                            "event_id": f"{job_id}:{sequence}",
+                            "sequence": sequence,
+                            "occurred_utc": "2026-07-25T12:00:00Z",
+                            "kind": kind,
+                            "visibility": "public",
+                            "summary_zh": f"公开事件 {sequence}",
+                            "payload": (
+                                {"full_result": False}
+                                if kind == "handoff.collected"
+                                else {"status": "completed"}
+                            ),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            (job_dir / "events.jsonl").write_text(
+                "\n".join(events) + "\n",
+                encoding="utf-8",
+            )
+
+            observed = read_events(job_dir)
+            detail = ObserverStore(Path(temp)).get_run(job_id)
+
+            self.assertEqual(500, len(observed))
+            self.assertEqual(101, observed[0]["sequence"])
+            self.assertEqual("handoff.collected", observed[-1]["kind"])
+            self.assertEqual("collected", detail["handoff"]["status"])
+
+    def test_runtime_identity_isolated_for_sibling_state_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root_a = Path(temp) / "a" / "jobs"
+            root_b = Path(temp) / "b" / "jobs"
+            root_a.mkdir(parents=True)
+            root_b.mkdir(parents=True)
+            self.assertNotEqual(
+                observer_runtime_path(root_a),
+                observer_runtime_path(root_b),
+            )
+            self.assertEqual(root_a, observer_runtime_path(root_a).parent)
+            server = create_observer_server(root_a, port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                runtime_a = {
+                    "schema": "llm-backend-toolkit.observer-runtime.v1",
+                    "url": f"http://127.0.0.1:{server.server_port}/",
+                    "state_root": str(root_a),
+                    "state_root_id": _state_root_id(root_a),
+                }
+                runtime_b = {
+                    **runtime_a,
+                    "state_root": str(root_b),
+                    "state_root_id": _state_root_id(root_b),
+                }
+                self.assertTrue(_runtime_health(runtime_a, root_a))
+                self.assertFalse(_runtime_health(runtime_b, root_b))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_snapshot_lists_runs_and_computes_tps_without_poll_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit(request(), force=True)
+            job_id = receipt["job_id"]
+            store.claim(job_id)
+            store.complete(
+                job_id,
+                {
+                    "status": "ok",
+                    "output": {"answer": 56},
+                    "backend": {"model": "qwen-main-v1"},
+                    "usage": {
+                        "prompt_tokens": 80,
+                        "completion_tokens": 40,
+                        "eval_duration_ns": 2_000_000_000,
+                    },
+                    "checks": [{"id": "valid_json", "passed": True}],
+                },
+            )
+            poll_count_before = json.loads(
+                (Path(temp) / job_id / "state.json").read_text(encoding="utf-8")
+            )["poll_count"]
+
+            observer = ObserverStore(Path(temp))
+            listing = observer.list_runs()
+            detail = observer.get_run(job_id)
+
+            self.assertEqual(job_id, listing["runs"][0]["job_id"])
+            self.assertEqual("qwen-main-v1", detail["model"])
+            self.assertEqual(20.0, detail["performance"]["tokens_per_second"])
+            self.assertEqual(
+                "eval_duration",
+                detail["performance"]["tokens_per_second_source"],
+            )
+            self.assertEqual({"answer": 56}, detail["result"]["output"])
+            self.assertTrue(detail["events"])
+            poll_count_after = json.loads(
+                (Path(temp) / job_id / "state.json").read_text(encoding="utf-8")
+            )["poll_count"]
+            self.assertEqual(poll_count_before, poll_count_after)
+
+    def test_submission_metadata_resolves_model_profile_and_reasoning_effort(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent_request = request()
+            agent_request["backend"] = "fast-middle-agent"
+            agent_request["privacy"]["cloud_allowed"] = True
+            agent_request["execution"] = {
+                "mode": "agent",
+                "runner": "data_factory",
+                "workspace": temp,
+            }
+
+            receipt = JobStore(Path(temp) / "jobs", spawner=lambda *_: None).submit(
+                agent_request,
+                force=True,
+            )
+            detail = ObserverStore(Path(temp) / "jobs").get_run(receipt["job_id"])
+
+            self.assertEqual("fast-middle-agent", detail["backend"])
+            self.assertEqual("gpt-5.3-codex-spark", detail["model"])
+            self.assertEqual("codex-spark-xhigh", detail["display"]["profile"])
+            self.assertEqual("codex-cli", detail["display"]["runner"])
+            self.assertEqual("xhigh", detail["display"]["reasoning_effort"])
+
+    def test_history_is_paginated_and_preserves_conversation_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            first = store.submit(request(), force=True)
+            store.claim(first["job_id"])
+            store.complete(first["job_id"], {"status": "ok", "output": "第一轮"})
+            continuation = request()
+            continuation["continuation"] = {
+                "from_job_id": first["job_id"],
+                "max_turns": 3,
+            }
+            second = store.submit(continuation, force=True)
+            independent = store.submit(request(), force=True)
+
+            observer = ObserverStore(Path(temp))
+            page_one = observer.list_runs(limit=2, offset=0)
+            page_two = observer.list_runs(limit=2, offset=2)
+            second_detail = observer.get_run(second["job_id"])
+
+            self.assertEqual(3, page_one["total"])
+            self.assertEqual(2, len(page_one["runs"]))
+            self.assertEqual(2, page_one["next_offset"])
+            self.assertEqual(1, len(page_two["runs"]))
+            self.assertIsNone(page_two["next_offset"])
+            self.assertEqual(
+                first["job_id"],
+                second_detail["conversation"]["root_job_id"],
+            )
+            self.assertEqual(2, second_detail["conversation"]["turn"])
+            self.assertNotEqual(
+                second_detail["conversation"]["root_job_id"],
+                ObserverStore(Path(temp)).get_run(independent["job_id"])[
+                    "conversation"
+                ]["root_job_id"],
+            )
+
+    def test_unchanged_history_reuses_cached_summaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            for _ in range(5):
+                receipt = store.submit(request(), force=True)
+                store.claim(receipt["job_id"])
+                store.complete(
+                    receipt["job_id"],
+                    {"status": "ok", "output": "done"},
+                )
+            observer = ObserverStore(Path(temp))
+            observer.list_runs()
+
+            with patch(
+                "llm_backend_toolkit.observer._read_json",
+                wraps=__import__(
+                    "llm_backend_toolkit.observer",
+                    fromlist=["_read_json"],
+                )._read_json,
+            ) as reader:
+                observer.list_runs()
+
+            self.assertEqual(0, reader.call_count)
+
+    def test_signature_bootstraps_generation_marker_for_legacy_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = JobStore(root, spawner=lambda *_: None)
+            store.submit(request(), force=True)
+            marker = root / ".observer-generation"
+            marker.unlink()
+
+            signature = ObserverStore(root).signature()
+
+            self.assertTrue(marker.is_file())
+            self.assertTrue(signature.startswith("generation:"))
+
+    def test_http_observer_serves_health_runs_detail_and_gui(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit(request(), force=True)
+            server = create_observer_server(Path(temp), port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            try:
+                with urllib.request.urlopen(f"{base}/api/health", timeout=3) as response:
+                    health = json.load(response)
+                with urllib.request.urlopen(f"{base}/api/runs", timeout=3) as response:
+                    runs = json.load(response)
+                with urllib.request.urlopen(
+                    f"{base}/api/runs?limit=1&offset=0",
+                    timeout=3,
+                ) as response:
+                    first_page = json.load(response)
+                with urllib.request.urlopen(
+                    f"{base}/api/runs/{receipt['job_id']}", timeout=3
+                ) as response:
+                    detail = json.load(response)
+                with urllib.request.urlopen(f"{base}/", timeout=3) as response:
+                    html = response.read().decode("utf-8")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+            self.assertEqual("ok", health["status"])
+            self.assertNotIn("state_root", health)
+            self.assertNotIn("state_root", runs)
+            self.assertEqual(receipt["job_id"], runs["runs"][0]["job_id"])
+            self.assertEqual(1, first_page["total"])
+            self.assertIsNone(first_page["next_offset"])
+            self.assertEqual(receipt["job_id"], detail["job_id"])
+            self.assertIn("模型调用观察台", html)
+
+
+if __name__ == "__main__":
+    unittest.main()

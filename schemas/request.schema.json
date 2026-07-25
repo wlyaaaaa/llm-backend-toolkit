@@ -96,6 +96,19 @@
       },
       "additionalProperties": false
     },
+    "observability": {
+      "type": "object",
+      "description": "Caller-declared public presentation metadata. It is shown in the local observer and is never inferred from the private task prompt.",
+      "properties": {
+        "public_label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Short non-sensitive title that is safe to display in persistent local history."
+        }
+      },
+      "additionalProperties": false
+    },
     "execution": {
       "type": "object",
       "properties": {
