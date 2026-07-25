@@ -22,7 +22,117 @@
     "artifacts": {"type": "array"},
     "media_routes": {"type": "array"},
     "execution_receipt": {"type": "object"},
-    "cache_identity": {"type": "object"},
+    "cache_identity": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "schema",
+            "mode",
+            "digest",
+            "canonicalization",
+            "caller_cache_key_hash",
+            "backend",
+            "model",
+            "route",
+            "profile"
+          ],
+          "properties": {
+            "schema": {
+              "const": "llm-backend-toolkit.explicit-cache-identity.v2"
+            },
+            "mode": {"const": "explicit"},
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "canonicalization": {
+              "const": "stdlib-json-sort-compact-utf8-v1"
+            },
+            "caller_cache_key_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "backend": {"type": "string", "minLength": 1},
+            "model": {"type": "string"},
+            "route": {"type": ["string", "null"]},
+            "profile": {"type": ["string", "null"]}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "schema",
+            "mode",
+            "digest",
+            "canonicalization"
+          ],
+          "properties": {
+            "schema": {
+              "const": "llm-backend-toolkit.explicit-cache-identity.v2"
+            },
+            "mode": {"const": "request_digest"},
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "canonicalization": {
+              "const": "stdlib-json-sort-compact-utf8-v1"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "deprecated": true,
+          "required": [
+            "schema",
+            "mode",
+            "digest",
+            "backend",
+            "model",
+            "route",
+            "profile"
+          ],
+          "properties": {
+            "schema": {
+              "const": "llm-backend-toolkit.explicit-cache-identity.v1"
+            },
+            "mode": {"const": "explicit"},
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "backend": {"type": "string", "minLength": 1},
+            "model": {"type": "string"},
+            "route": {"type": ["string", "null"]},
+            "profile": {"type": ["string", "null"]}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "deprecated": true,
+          "required": [
+            "schema",
+            "mode",
+            "digest"
+          ],
+          "properties": {
+            "schema": {
+              "const": "llm-backend-toolkit.explicit-cache-identity.v1"
+            },
+            "mode": {"const": "request_digest"},
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
     "error": {"type": "object"},
     "decision": {},
     "job_id": {"type": "string"},

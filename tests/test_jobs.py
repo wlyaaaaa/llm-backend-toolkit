@@ -1,3 +1,4 @@
+import hashlib
 import json
 import multiprocessing
 import os
@@ -433,6 +434,185 @@ class JobStoreTests(unittest.TestCase):
             self.assertEqual(1, len(spawned))
             state = store.get(first["job_id"])
             self.assertEqual("explicit", state["cache_identity"]["mode"])
+
+    def test_explicit_cache_identity_v2_hashes_key_and_is_stable_across_receipts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cache_key = (
+                "personalos-model-batch:raw-a:extractor-v1:"
+                "schema-v1:model-v1:prompt-v1"
+            )
+            expected_key_hash = "sha256:" + hashlib.sha256(
+                cache_key.encode("utf-8")
+            ).hexdigest()
+            store = JobStore(
+                Path(temp),
+                spawner=lambda *_: None,
+                registry=_registry(),
+            )
+            request = _explicit_agent_request(cache_key)
+
+            accepted = store.submit(request)
+            persisted = store.get(accepted["job_id"])
+            store.claim(accepted["job_id"])
+            running = store.submit(request)
+            store.complete(
+                accepted["job_id"],
+                {"status": "ok", "output": {"facts": []}},
+            )
+            cache_hit = store.submit(request)
+            completed = store.get(accepted["job_id"])
+
+            identity = accepted["cache_identity"]
+            self.assertEqual(
+                "llm-backend-toolkit.explicit-cache-identity.v2",
+                identity["schema"],
+            )
+            self.assertEqual("explicit", identity["mode"])
+            self.assertEqual(
+                "stdlib-json-sort-compact-utf8-v1",
+                identity["canonicalization"],
+            )
+            self.assertEqual(expected_key_hash, identity["caller_cache_key_hash"])
+            self.assertNotIn("caller_cache_key", identity)
+            state_text = (
+                Path(temp) / accepted["job_id"] / "state.json"
+            ).read_text(encoding="utf-8")
+            index_text = next(
+                (Path(temp) / ".cache-index").glob("*.json")
+            ).read_text(encoding="utf-8")
+            self.assertNotIn(cache_key, state_text)
+            self.assertNotIn(cache_key, index_text)
+            for receipt in (
+                persisted,
+                running,
+                cache_hit,
+                completed,
+            ):
+                self.assertEqual(identity, receipt["cache_identity"])
+                self.assertNotIn(
+                    cache_key,
+                    json.dumps(receipt, ensure_ascii=False),
+                )
+            self.assertEqual("running", running["status"])
+            self.assertEqual("cache_hit", cache_hit["status"])
+
+    def test_request_digest_identity_v2_declares_canonicalization_profile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            request = {
+                "provider": "qwen-main-v1",
+                "task": {"goal": "canonical request"},
+            }
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+
+            receipt = store.submit(request)
+
+            self.assertEqual(
+                {
+                    "schema": (
+                        "llm-backend-toolkit.explicit-cache-identity.v2"
+                    ),
+                    "mode": "request_digest",
+                    "digest": (
+                        "sha256:" + JobStore.request_digest(request)
+                    ),
+                    "canonicalization": (
+                        "stdlib-json-sort-compact-utf8-v1"
+                    ),
+                },
+                receipt["cache_identity"],
+            )
+
+    def test_old_or_missing_explicit_identity_is_readable_but_never_a_v2_hit(self):
+        variants = ("v1", "missing")
+        for variant in variants:
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as temp:
+                spawned = []
+                store = JobStore(
+                    Path(temp),
+                    spawner=lambda job_id, _root: spawned.append(job_id),
+                    registry=_registry(),
+                )
+                request = _explicit_agent_request()
+                first = store.submit(request)
+                state_path = Path(temp) / first["job_id"] / "state.json"
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                identity = dict(state["cache_identity"])
+                if variant == "v1":
+                    state["cache_identity"] = {
+                        "schema": (
+                            "llm-backend-toolkit.explicit-cache-identity.v1"
+                        ),
+                        "mode": "explicit",
+                        "digest": identity["digest"],
+                        "backend": identity["backend"],
+                        "model": identity["model"],
+                        "route": identity["route"],
+                        "profile": identity["profile"],
+                    }
+                else:
+                    state.pop("cache_identity")
+                state_path.write_text(
+                    json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+
+                readable = store.get(first["job_id"])
+                second = store.submit(request)
+
+                if variant == "v1":
+                    self.assertEqual(
+                        "llm-backend-toolkit.explicit-cache-identity.v1",
+                        readable["cache_identity"]["schema"],
+                    )
+                else:
+                    self.assertNotIn("cache_identity", readable)
+                self.assertEqual("accepted", second["status"])
+                self.assertNotEqual(first["job_id"], second["job_id"])
+                self.assertEqual(
+                    "llm-backend-toolkit.explicit-cache-identity.v2",
+                    second["cache_identity"]["schema"],
+                )
+                self.assertEqual(2, len(spawned))
+
+    def test_v1_request_digest_state_is_readable_but_not_a_v2_hit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            spawned = []
+            store = JobStore(
+                Path(temp),
+                spawner=lambda job_id, _root: spawned.append(job_id),
+            )
+            request = {
+                "provider": "qwen-main-v1",
+                "task": {"goal": "legacy request digest"},
+            }
+            first = store.submit(request)
+            state_path = Path(temp) / first["job_id"] / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            identity = dict(state["cache_identity"])
+            state["cache_identity"] = {
+                "schema": "llm-backend-toolkit.explicit-cache-identity.v1",
+                "mode": "request_digest",
+                "digest": identity["digest"],
+            }
+            state_path.write_text(
+                json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            readable = store.get(first["job_id"])
+            second = store.submit(request)
+
+            self.assertEqual(
+                "llm-backend-toolkit.explicit-cache-identity.v1",
+                readable["cache_identity"]["schema"],
+            )
+            self.assertEqual("accepted", second["status"])
+            self.assertNotEqual(first["job_id"], second["job_id"])
+            self.assertEqual(
+                "llm-backend-toolkit.explicit-cache-identity.v2",
+                second["cache_identity"]["schema"],
+            )
+            self.assertEqual(2, len(spawned))
 
     def test_explicit_cache_key_change_invalidates_raw_extractor_schema_model_or_prompt_identity(self):
         with tempfile.TemporaryDirectory() as temp:

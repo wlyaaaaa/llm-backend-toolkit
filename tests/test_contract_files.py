@@ -37,6 +37,66 @@ class ContractFileTests(unittest.TestCase):
         self.assertIn("pattern", cache_key)
         self.assertIn("execution_receipt", response_schema["properties"])
         self.assertIn("cache_identity", response_schema["properties"])
+        cache_identities = response_schema["properties"]["cache_identity"][
+            "oneOf"
+        ]
+        explicit_identity = next(
+            value
+            for value in cache_identities
+            if value["properties"]["mode"]["const"] == "explicit"
+            and value["properties"]["schema"]["const"].endswith(".v2")
+        )
+        request_digest_identity = next(
+            value
+            for value in cache_identities
+            if value["properties"]["mode"]["const"] == "request_digest"
+            and value["properties"]["schema"]["const"].endswith(".v2")
+        )
+        self.assertEqual(
+            "llm-backend-toolkit.explicit-cache-identity.v2",
+            explicit_identity["properties"]["schema"]["const"],
+        )
+        self.assertIn(
+            "caller_cache_key_hash",
+            explicit_identity["required"],
+        )
+        self.assertEqual(
+            set(explicit_identity["required"]),
+            set(explicit_identity["properties"]),
+        )
+        self.assertNotIn(
+            "caller_cache_key",
+            explicit_identity["properties"],
+        )
+        self.assertEqual(
+            "stdlib-json-sort-compact-utf8-v1",
+            explicit_identity["properties"]["canonicalization"]["const"],
+        )
+        self.assertEqual(
+            set(request_digest_identity["required"]),
+            set(request_digest_identity["properties"]),
+        )
+        self.assertEqual(
+            "stdlib-json-sort-compact-utf8-v1",
+            request_digest_identity["properties"]["canonicalization"][
+                "const"
+            ],
+        )
+        legacy_identities = [
+            value
+            for value in cache_identities
+            if value["properties"]["schema"]["const"].endswith(".v1")
+        ]
+        self.assertEqual(2, len(legacy_identities))
+        self.assertTrue(
+            all(value.get("deprecated") is True for value in legacy_identities)
+        )
+        self.assertTrue(
+            all(
+                set(value["required"]) == set(value["properties"])
+                for value in legacy_identities
+            )
+        )
         self.assertIn("accepted", response_schema["properties"]["status"]["enum"])
         self.assertEqual("local-default", example["backend"])
         self.assertEqual("off", example["reasoning"]["mode"])

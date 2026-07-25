@@ -19,10 +19,11 @@ from .backends import BackendRegistry
 
 
 Spawner = Callable[[str, Path], None]
-EXPLICIT_CACHE_IDENTITY_SCHEMA = "llm-backend-toolkit.explicit-cache-identity.v1"
+EXPLICIT_CACHE_IDENTITY_SCHEMA = "llm-backend-toolkit.explicit-cache-identity.v2"
 CACHE_INDEX_SCHEMA = "llm-backend-toolkit.cache-index.v1"
 CACHE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+/=-]{0,511}$")
 CACHEABLE_RESULT_STATUSES = frozenset({"ok", "partial"})
+REQUEST_DIGEST_CANONICALIZATION = "stdlib-json-sort-compact-utf8-v1"
 _CACHE_LOCK_TIMEOUT_SECONDS = 5.0
 _CACHE_LOCK_POLL_SECONDS = 0.01
 _PROCESS_CACHE_LOCKS_GUARD = threading.Lock()
@@ -180,6 +181,7 @@ class JobStore:
                 "schema": EXPLICIT_CACHE_IDENTITY_SCHEMA,
                 "mode": "request_digest",
                 "digest": f"sha256:{cache_digest}",
+                "canonicalization": REQUEST_DIGEST_CANONICALIZATION,
             }
         initial_poll_ms = self._initial_poll_ms(request)
         if force or not cacheable:
@@ -198,7 +200,6 @@ class JobStore:
                 existing = self._find_cached_submission(
                     cache_digest=cache_digest,
                     cache_identity=cache_identity,
-                    request_digest=request_digest,
                     initial_poll_ms=initial_poll_ms,
                 )
                 if existing is not None:
@@ -299,10 +300,14 @@ class JobStore:
             )
         config_fingerprint = self.request_digest(config)
         route_fingerprint = self.request_digest(route) if route else ""
+        caller_cache_key_hash = hashlib.sha256(
+            cache_key.encode("utf-8")
+        ).hexdigest()
         scope = {
             "schema": EXPLICIT_CACHE_IDENTITY_SCHEMA,
+            "canonicalization": REQUEST_DIGEST_CANONICALIZATION,
             "request_protocol": "llm-backend-toolkit.request.v1",
-            "caller_cache_key": cache_key,
+            "caller_cache_key_hash": f"sha256:{caller_cache_key_hash}",
             "backend": {
                 "id": resolved.backend_id,
                 "adapter": str(config.get("adapter") or ""),
@@ -339,6 +344,8 @@ class JobStore:
             "schema": EXPLICIT_CACHE_IDENTITY_SCHEMA,
             "mode": "explicit",
             "digest": f"sha256:{digest}",
+            "canonicalization": REQUEST_DIGEST_CANONICALIZATION,
+            "caller_cache_key_hash": f"sha256:{caller_cache_key_hash}",
             "backend": resolved.backend_id,
             "model": str(config.get("model") or ""),
             "route": route_id or None,
@@ -403,7 +410,6 @@ class JobStore:
         *,
         cache_digest: str,
         cache_identity: dict[str, Any],
-        request_digest: str,
         initial_poll_ms: int,
     ) -> dict[str, Any] | None:
         indexed = self._read_cache_index(cache_digest)
@@ -416,7 +422,6 @@ class JobStore:
             if indexed_state is not None and self._state_matches_cache(
                 indexed_state,
                 cache_identity=cache_identity,
-                request_digest=request_digest,
             ):
                 receipt = self._existing_submission_receipt(
                     indexed_job_id,
@@ -434,7 +439,6 @@ class JobStore:
         if not self._state_matches_cache(
             primary_state,
             cache_identity=cache_identity,
-            request_digest=request_digest,
         ):
             return None
         return self._existing_submission_receipt(
@@ -448,18 +452,11 @@ class JobStore:
         state: dict[str, Any],
         *,
         cache_identity: dict[str, Any],
-        request_digest: str,
     ) -> bool:
         stored = state.get("cache_identity")
         if isinstance(stored, dict):
-            return (
-                stored.get("mode") == cache_identity.get("mode")
-                and stored.get("digest") == cache_identity.get("digest")
-            )
-        return (
-            cache_identity.get("mode") == "request_digest"
-            and state.get("request_digest") == request_digest
-        )
+            return stored == cache_identity
+        return False
 
     def _existing_submission_receipt(
         self,
