@@ -2,12 +2,14 @@ import hashlib
 import json
 import multiprocessing
 import os
+import subprocess
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from llm_backend_toolkit.input_integrity import release_job_input_lease
 from llm_backend_toolkit.jobs import JobNotRunnableError, JobStore
 from llm_backend_toolkit.providers import ProviderResponse
 from llm_backend_toolkit.toolkit import Toolkit
@@ -278,6 +280,7 @@ class JobInputIntegrityTests(unittest.TestCase):
             image.unlink()
 
             provider = _ReadingProvider()
+            self.assertTrue(store.begin_execution(accepted["job_id"]))
             result = Toolkit(providers={"qwen-main-v1": provider}).invoke(claimed)
             store.complete(accepted["job_id"], result)
             completed = store.get(accepted["job_id"], include_result=True)
@@ -317,6 +320,7 @@ class JobInputIntegrityTests(unittest.TestCase):
             )
             first = store.submit(first_request)
             store.claim(first["job_id"])
+            self.assertTrue(store.begin_execution(first["job_id"]))
             store.complete(first["job_id"], {"status": "ok", "output": "done"})
 
             source.write_bytes(second_bytes)
@@ -495,7 +499,7 @@ class JobInputIntegrityTests(unittest.TestCase):
                     outcome.append(type(error).__name__)
 
             with mock.patch(
-                "llm_backend_toolkit.jobs.prepare_job_inputs",
+                "llm_backend_toolkit.input_lifecycle.prepare_job_inputs",
                 side_effect=slow_prepare,
             ):
                 worker = threading.Thread(target=claim_in_thread)
@@ -535,7 +539,7 @@ class JobInputIntegrityTests(unittest.TestCase):
                 return prepare_job_inputs(request_value, job_dir=job_dir)
 
             with mock.patch(
-                "llm_backend_toolkit.jobs.prepare_job_inputs",
+                "llm_backend_toolkit.input_lifecycle.prepare_job_inputs",
                 side_effect=slow_prepare,
             ):
                 worker = threading.Thread(
@@ -553,6 +557,14 @@ class JobInputIntegrityTests(unittest.TestCase):
 
             self.assertFalse(worker.is_alive())
             self.assertTrue(store.begin_execution(receipt["job_id"]))
+            requested = store.cancel(receipt["job_id"])
+            self.assertEqual(
+                "cancellation_requested", requested["job_status"]
+            )
+            store.complete(
+                receipt["job_id"],
+                {"status": "ok", "output": "MUST-NOT-PUBLISH"},
+            )
 
     def test_successful_completion_with_unverified_references_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -578,6 +590,467 @@ class JobInputIntegrityTests(unittest.TestCase):
 
             self.assertFalse((job_dir / "result.json").exists())
             self.assertFalse(any(job_dir.glob("output.*")))
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "Windows share-mode protection is the production byte-immutability boundary",
+    )
+    def test_spooled_media_cannot_be_same_size_rewritten_before_provider_consumes_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source.txt"
+            image = root / "image.png"
+            source_bytes = b"BOUND-SOURCE"
+            image_a = b"IMAGE-ALPHA"
+            image_b = b"IMAGE-BRAVO"
+            self.assertEqual(len(image_a), len(image_b))
+            source.write_bytes(source_bytes)
+            image.write_bytes(image_a)
+            request = _request(
+                _reference(source, source_bytes, reference_id="source-a"),
+                attachments=[
+                    {
+                        **_reference(image, image_a, reference_id="image-a"),
+                        "kind": "image",
+                        "route": "native",
+                    }
+                ],
+            )
+            store = JobStore(root / "jobs", spawner=lambda *_: None)
+            receipt = store.submit(request)
+            claimed = store.claim(receipt["job_id"])
+            media_spool = Path(claimed["media"]["attachments"][0]["path"])
+
+            with self.assertRaises((PermissionError, OSError)):
+                media_spool.write_bytes(image_b)
+
+            provider = _ReadingProvider()
+            self.assertTrue(store.begin_execution(receipt["job_id"]))
+            result = Toolkit(providers={"qwen-main-v1": provider}).invoke(claimed)
+            store.complete(receipt["job_id"], result)
+
+            self.assertEqual("ok", result["status"])
+            self.assertEqual([image_a], provider.calls[0]["media_bytes"])
+            self.assertNotIn(image_b, provider.calls[0]["media_bytes"])
+
+    def test_lost_protected_handle_blocks_modified_spool_before_provider_and_result(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source.txt"
+            image = root / "image.png"
+            source_bytes = b"BOUND-SOURCE"
+            image_a = b"IMAGE-ALPHA"
+            image_b = b"IMAGE-BRAVO"
+            source.write_bytes(source_bytes)
+            image.write_bytes(image_a)
+            store = JobStore(root / "jobs", spawner=lambda *_: None)
+            receipt = store.submit(
+                _request(
+                    _reference(
+                        source,
+                        source_bytes,
+                        reference_id="source-a",
+                    ),
+                    attachments=[
+                        {
+                            **_reference(
+                                image,
+                                image_a,
+                                reference_id="image-a",
+                            ),
+                            "kind": "image",
+                            "route": "native",
+                        }
+                    ],
+                )
+            )
+            claimed = store.claim(receipt["job_id"])
+            job_dir = root / "jobs" / receipt["job_id"]
+            media_spool = Path(claimed["media"]["attachments"][0]["path"])
+            release_job_input_lease(job_dir)
+            media_spool.write_bytes(image_b)
+            provider = _ReadingProvider()
+
+            with self.assertRaisesRegex(
+                JobNotRunnableError,
+                "consumption binding",
+            ):
+                store.begin_execution(receipt["job_id"])
+
+            state = store.get(receipt["job_id"])
+            self.assertEqual([], provider.calls)
+            self.assertEqual("failed", state["job_status"])
+            self.assertEqual(
+                "input_consumption_binding_lost",
+                state["error"]["category"],
+            )
+            self.assertFalse((job_dir / "result.json").exists())
+            self.assertFalse(state["cache_result_eligible"])
+
+    def test_input_spool_symlink_is_rejected_without_writing_outside_job(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source.txt"
+            outside = root / "outside"
+            source_bytes = b"NO-ESCAPE"
+            source.write_bytes(source_bytes)
+            outside.mkdir()
+            marker = outside / "keep.txt"
+            marker.write_text("keep", encoding="utf-8")
+            store = JobStore(root / "jobs", spawner=lambda *_: None)
+            receipt = store.submit(
+                _request(
+                    _reference(source, source_bytes, reference_id="source-a")
+                )
+            )
+            spool_root = root / "jobs" / receipt["job_id"] / "input-spool"
+            try:
+                spool_root.symlink_to(outside, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlink unavailable: {error}")
+
+            with self.assertRaisesRegex(
+                ValueError, "reparse|symlink|containment"
+            ):
+                store.claim(receipt["job_id"])
+
+            self.assertEqual("keep", marker.read_text(encoding="utf-8"))
+            self.assertEqual([marker], list(outside.iterdir()))
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "Windows junction coverage requires cmd.exe mklink /J",
+    )
+    def test_cleanup_refuses_input_spool_junction_and_preserves_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / "junction-target"
+            outside.mkdir()
+            marker = outside / "keep.txt"
+            marker.write_text("keep", encoding="utf-8")
+            store = JobStore(root / "jobs", spawner=lambda *_: None)
+            receipt = store.submit(
+                {
+                    "provider": "qwen-main-v1",
+                    "task": {"goal": "synthetic"},
+                }
+            )
+            store.cancel(receipt["job_id"])
+            spool_root = root / "jobs" / receipt["job_id"] / "input-spool"
+            completed = subprocess.run(
+                [
+                    "cmd",
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(spool_root),
+                    str(outside),
+                ],
+                capture_output=True,
+                text=True,
+                shell=False,
+                check=False,
+            )
+            if completed.returncode != 0:
+                self.skipTest(
+                    f"junction creation unavailable: {completed.returncode}"
+                )
+            try:
+                cleanup = store.cleanup_inputs(receipt["job_id"])
+
+                self.assertEqual("blocked", cleanup["status"])
+                self.assertEqual(
+                    "blocked_unsafe_path",
+                    cleanup["input_spool_cleanup"]["status"],
+                )
+                self.assertEqual("keep", marker.read_text(encoding="utf-8"))
+            finally:
+                if os.path.lexists(spool_root):
+                    os.rmdir(spool_root)
+
+    def test_undeclared_legacy_reference_is_captured_but_never_verified_or_cached(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source.txt"
+            source.write_bytes(b"LEGACY-COMPATIBLE")
+            request = _request(
+                {
+                    "id": "source-a",
+                    "path": str(source),
+                }
+            )
+            store = JobStore(root / "jobs", spawner=lambda *_: None)
+
+            accepted = store.submit(request)
+            claimed = store.claim(accepted["job_id"])
+            running = store.get(accepted["job_id"])
+            self.assertTrue(store.begin_execution(accepted["job_id"]))
+            result = Toolkit(providers={"qwen-main-v1": _ReadingProvider()}).invoke(
+                claimed
+            )
+            store.complete(accepted["job_id"], result)
+            completed = store.get(accepted["job_id"], include_result=True)
+            repeated = store.submit(request)
+
+            self.assertFalse(accepted["cacheable"])
+            self.assertEqual(
+                "spooled_unverified", running["input_integrity"]["status"]
+            )
+            self.assertEqual(
+                "captured_unverified",
+                running["input_integrity"]["references"][0]["status"],
+            )
+            self.assertEqual("completed", completed["job_status"])
+            self.assertFalse(completed["cache_result_eligible"])
+            self.assertEqual("accepted", repeated["status"])
+            self.assertNotEqual(accepted["job_id"], repeated["job_id"])
+
+    def test_get_recovers_dead_worker_leases_for_all_input_phases(self):
+        cases = (
+            ("input_spooling", "running", "failed"),
+            ("provider_running", "running", "failed"),
+            ("provider_running", "cancellation_requested", "cancelled"),
+        )
+        for worker_phase, job_status, expected_terminal in cases:
+            with self.subTest(
+                worker_phase=worker_phase,
+                job_status=job_status,
+            ), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                store = JobStore(root / "jobs", spawner=lambda *_: None)
+                receipt = store.submit(
+                    {
+                        "provider": "qwen-main-v1",
+                        "task": {"goal": "synthetic"},
+                    }
+                )
+                job_dir = root / "jobs" / receipt["job_id"]
+                spool_root = job_dir / "input-spool"
+                spool_root.mkdir()
+                (spool_root / "payload.bin").write_bytes(b"PRIVATE-SPOOL")
+                (job_dir / "result.json").write_text(
+                    '{"status":"ok","output":"UNCOMMITTED"}\n',
+                    encoding="utf-8",
+                )
+                (job_dir / "output.txt").write_text(
+                    "UNCOMMITTED",
+                    encoding="utf-8",
+                )
+                state_path = job_dir / "state.json"
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                state["job_status"] = job_status
+                state["worker_phase"] = worker_phase
+                state["worker_lease"] = {
+                    "schema": "llm-backend-toolkit.worker-lease.v1",
+                    "status": "active",
+                    "lease_id": "synthetic-dead-worker",
+                    "owner_pid": 2_147_483_647,
+                    "owner_start_token": "synthetic-dead",
+                    "heartbeat_utc": "2000-01-01T00:00:00Z",
+                    "phase": worker_phase,
+                }
+                state_path.write_text(
+                    json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+
+                recovered = store.get(receipt["job_id"])
+
+                self.assertEqual(expected_terminal, recovered["job_status"])
+                self.assertFalse(spool_root.exists())
+                self.assertFalse((job_dir / "result.json").exists())
+                self.assertFalse((job_dir / "output.txt").exists())
+                self.assertTrue(
+                    recovered["input_spool_cleanup"]["verified_absent"]
+                )
+                if expected_terminal == "failed":
+                    self.assertEqual(
+                        "worker_lease_lost",
+                        recovered["error"]["category"],
+                    )
+
+    def test_live_worker_lease_blocks_takeover_and_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source.txt"
+            value = b"LIVE-WORKER"
+            source.write_bytes(value)
+            store = JobStore(root / "jobs", spawner=lambda *_: None)
+            receipt = store.submit(
+                _request(_reference(source, value, reference_id="source-a"))
+            )
+            store.claim(receipt["job_id"])
+            spool_root = root / "jobs" / receipt["job_id"] / "input-spool"
+
+            running = store.get(receipt["job_id"])
+            cleanup = store.cleanup_inputs(receipt["job_id"])
+
+            self.assertEqual("active", running["worker_lease"]["status"])
+            self.assertEqual(os.getpid(), running["worker_lease"]["owner_pid"])
+            self.assertEqual("blocked", cleanup["status"])
+            self.assertTrue(spool_root.is_dir())
+            cancelled = store.cancel(receipt["job_id"])
+            self.assertEqual("cancelled", cancelled["job_status"])
+            self.assertFalse(spool_root.exists())
+
+    def test_manifest_write_failure_is_terminal_sanitized_and_fully_cleaned(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "PRIVATE-PATH-MARKER.txt"
+            private_value = b"PRIVATE-CONTENT-MARKER"
+            source.write_bytes(private_value)
+            store = JobStore(root / "jobs", spawner=lambda *_: None)
+            receipt = store.submit(
+                _request(
+                    _reference(
+                        source,
+                        private_value,
+                        reference_id="source-a",
+                    )
+                )
+            )
+            job_dir = root / "jobs" / receipt["job_id"]
+            original_write_text = Path.write_text
+
+            def fail_manifest_write(path, *args, **kwargs):
+                if path.name == "manifest.json":
+                    raise OSError(
+                        f"synthetic private failure {source} "
+                        f"{private_value.decode('ascii')}"
+                    )
+                return original_write_text(path, *args, **kwargs)
+
+            with mock.patch.object(
+                Path,
+                "write_text",
+                new=fail_manifest_write,
+            ):
+                with self.assertRaises(JobNotRunnableError) as raised:
+                    store.claim(receipt["job_id"])
+
+            state = store.get(receipt["job_id"])
+            serialized_state = json.dumps(state, ensure_ascii=False)
+            serialized_error = str(raised.exception)
+
+            self.assertEqual("failed", state["job_status"])
+            self.assertEqual("failed", state["result_status"])
+            self.assertFalse(state["cache_result_eligible"])
+            self.assertEqual("released", state["worker_lease"]["status"])
+            self.assertEqual(
+                "input_preparation_failed",
+                state["error"]["category"],
+            )
+            self.assertTrue(
+                state["input_spool_cleanup"]["verified_absent"]
+            )
+            self.assertFalse((job_dir / "input-spool").exists())
+            self.assertFalse((job_dir / "request.json").exists())
+            self.assertFalse((job_dir / "prepared-request.json").exists())
+            self.assertFalse((job_dir / "prepared-request.json.tmp").exists())
+            self.assertFalse((job_dir / "result.json").exists())
+            self.assertFalse(any(job_dir.glob("output.*")))
+            self.assertNotIn(str(source), serialized_state)
+            self.assertNotIn(private_value.decode("ascii"), serialized_state)
+            self.assertNotIn(str(source), serialized_error)
+            self.assertNotIn(private_value.decode("ascii"), serialized_error)
+
+    def test_prepared_request_write_failure_is_terminal_sanitized_and_fully_cleaned(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "PRIVATE-PATH-MARKER.txt"
+            private_value = b"PRIVATE-CONTENT-MARKER"
+            source.write_bytes(private_value)
+            store = JobStore(root / "jobs", spawner=lambda *_: None)
+            receipt = store.submit(
+                _request(
+                    _reference(
+                        source,
+                        private_value,
+                        reference_id="source-a",
+                    )
+                )
+            )
+            job_dir = root / "jobs" / receipt["job_id"]
+            from llm_backend_toolkit import input_lifecycle
+
+            original_atomic_job_json = input_lifecycle._atomic_job_json
+
+            def fail_prepared_write(job_path, path, value):
+                if path.name == "prepared-request.json":
+                    raise OSError(
+                        f"synthetic private failure {source} "
+                        f"{private_value.decode('ascii')}"
+                    )
+                return original_atomic_job_json(job_path, path, value)
+
+            with mock.patch.object(
+                input_lifecycle,
+                "_atomic_job_json",
+                new=fail_prepared_write,
+            ):
+                with self.assertRaises(JobNotRunnableError) as raised:
+                    store.claim(receipt["job_id"])
+
+            state = store.get(receipt["job_id"])
+            serialized_state = json.dumps(state, ensure_ascii=False)
+            serialized_error = str(raised.exception)
+
+            self.assertEqual("failed", state["job_status"])
+            self.assertEqual("failed", state["result_status"])
+            self.assertFalse(state["cache_result_eligible"])
+            self.assertEqual("released", state["worker_lease"]["status"])
+            self.assertEqual(
+                "input_preparation_failed",
+                state["error"]["category"],
+            )
+            self.assertTrue(
+                state["input_spool_cleanup"]["verified_absent"]
+            )
+            self.assertFalse((job_dir / "input-spool").exists())
+            self.assertFalse((job_dir / "request.json").exists())
+            self.assertFalse((job_dir / "prepared-request.json").exists())
+            self.assertFalse((job_dir / "prepared-request.json.tmp").exists())
+            self.assertFalse((job_dir / "result.json").exists())
+            self.assertFalse(any(job_dir.glob("output.*")))
+            self.assertNotIn(str(source), serialized_state)
+            self.assertNotIn(private_value.decode("ascii"), serialized_state)
+            self.assertNotIn(str(source), serialized_error)
+            self.assertNotIn(private_value.decode("ascii"), serialized_error)
+
+    def test_pre_provider_base_exceptions_are_cleaned_but_not_swallowed(self):
+        for exception_type in (KeyboardInterrupt, SystemExit):
+            with self.subTest(
+                exception_type=exception_type.__name__
+            ), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                store = JobStore(root / "jobs", spawner=lambda *_: None)
+                receipt = store.submit(
+                    {
+                        "provider": "qwen-main-v1",
+                        "task": {"goal": "synthetic"},
+                    }
+                )
+                job_dir = root / "jobs" / receipt["job_id"]
+
+                with mock.patch(
+                    "llm_backend_toolkit.input_lifecycle.prepare_job_inputs",
+                    side_effect=exception_type(),
+                ):
+                    with self.assertRaises(exception_type):
+                        store.claim(receipt["job_id"])
+
+                state = store.get(receipt["job_id"])
+                self.assertEqual("failed", state["job_status"])
+                self.assertFalse(state["cache_result_eligible"])
+                self.assertEqual(
+                    "released",
+                    state["worker_lease"]["status"],
+                )
+                self.assertTrue(
+                    state["input_spool_cleanup"]["verified_absent"]
+                )
+                self.assertFalse((job_dir / "request.json").exists())
 
     def test_get_repairs_a_crash_between_terminal_state_and_spool_cleanup(self):
         with tempfile.TemporaryDirectory() as temp:

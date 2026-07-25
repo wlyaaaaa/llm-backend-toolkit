@@ -887,6 +887,7 @@ class JobStoreTests(unittest.TestCase):
             }
             first = store.submit(request)
             store.claim(first["job_id"])
+            self.assertTrue(store.begin_execution(first["job_id"]))
             store.complete(first["job_id"], {"status": "ok", "output": "done"})
 
             second = store.submit(request)
