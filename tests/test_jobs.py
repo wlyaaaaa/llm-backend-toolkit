@@ -1,4 +1,6 @@
 import json
+import multiprocessing
+import os
 import tempfile
 import threading
 import time
@@ -66,6 +68,65 @@ def _explicit_agent_request(
             "budget": {"timeout_seconds": 900, "max_steps": 20, "max_tool_calls": 80},
         },
     }
+
+
+def _spawn_submit_same_cache_key(
+    state_root: str,
+    request: dict,
+    ready_queue,
+    start_event,
+    result_queue,
+) -> None:
+    try:
+        root = Path(state_root)
+
+        def record_spawn(job_id: str, _root: Path) -> None:
+            with (root / "spawned.log").open("a", encoding="utf-8") as stream:
+                stream.write(job_id + "\n")
+
+        store = JobStore(root, spawner=record_spawn, registry=_registry())
+        ready_queue.put(os.getpid())
+        if not start_event.wait(15):
+            raise TimeoutError("spawn test start barrier timed out")
+        receipt = store.submit(request)
+        result_queue.put(
+            {
+                "ok": True,
+                "job_id": receipt["job_id"],
+                "status": receipt["status"],
+            }
+        )
+    except BaseException as error:
+        result_queue.put(
+            {
+                "ok": False,
+                "error": f"{type(error).__name__}: {error}",
+            }
+        )
+
+
+def _spawn_exit_while_holding_cache_lock(
+    state_root: str,
+    cache_digest: str,
+    acquired_path: str,
+) -> None:
+    store = JobStore(Path(state_root), spawner=lambda *_: None)
+    with store._cache_lock(cache_digest):
+        Path(acquired_path).write_text("acquired\n", encoding="utf-8")
+        os._exit(0)
+
+
+def _spawn_hold_cache_lock(
+    state_root: str,
+    cache_digest: str,
+    acquired_queue,
+    release_event,
+) -> None:
+    store = JobStore(Path(state_root), spawner=lambda *_: None)
+    with store._cache_lock(cache_digest):
+        acquired_queue.put(os.getpid())
+        if not release_event.wait(20):
+            raise TimeoutError("spawn test release barrier timed out")
 
 
 class JobStoreTests(unittest.TestCase):
@@ -511,6 +572,125 @@ class JobStoreTests(unittest.TestCase):
             self.assertTrue(
                 all(receipt["status"] in {"accepted", "running"} for receipt in receipts)
             )
+
+    def test_spawn_processes_with_same_explicit_key_create_and_spawn_once(self):
+        context = multiprocessing.get_context("spawn")
+        with tempfile.TemporaryDirectory() as temp:
+            ready_queue = context.Queue()
+            start_event = context.Event()
+            result_queue = context.Queue()
+            request = _explicit_agent_request()
+            processes = [
+                context.Process(
+                    target=_spawn_submit_same_cache_key,
+                    args=(
+                        temp,
+                        request,
+                        ready_queue,
+                        start_event,
+                        result_queue,
+                    ),
+                )
+                for _ in range(12)
+            ]
+            for process in processes:
+                process.start()
+            for _ in processes:
+                ready_queue.get(timeout=30)
+            start_event.set()
+            results = [result_queue.get(timeout=30) for _ in processes]
+            for process in processes:
+                process.join(timeout=30)
+                self.assertFalse(process.is_alive())
+                self.assertEqual(0, process.exitcode)
+
+            self.assertTrue(
+                all(result["ok"] for result in results),
+                results,
+            )
+            job_ids = {result["job_id"] for result in results}
+            self.assertEqual(1, len(job_ids))
+            self.assertTrue(
+                all(
+                    result["status"] in {"accepted", "running"}
+                    for result in results
+                )
+            )
+            spawned = (Path(temp) / "spawned.log").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual([next(iter(job_ids))], spawned)
+
+    def test_process_exit_releases_cache_lock_without_stale_lease(self):
+        context = multiprocessing.get_context("spawn")
+        with tempfile.TemporaryDirectory() as temp:
+            acquired_path = Path(temp) / "acquired.txt"
+            cache_digest = "a" * 64
+            process = context.Process(
+                target=_spawn_exit_while_holding_cache_lock,
+                args=(temp, cache_digest, str(acquired_path)),
+            )
+            process.start()
+            process.join(timeout=30)
+            self.assertFalse(process.is_alive())
+            self.assertEqual(0, process.exitcode)
+            self.assertTrue(acquired_path.is_file())
+
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            started = time.monotonic()
+            with store._cache_lock(cache_digest):
+                pass
+            self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_old_lock_file_never_steals_a_live_owner_lock(self):
+        context = multiprocessing.get_context("spawn")
+        with tempfile.TemporaryDirectory() as temp:
+            cache_digest = "b" * 64
+            acquired_queue = context.Queue()
+            release_event = context.Event()
+            process = context.Process(
+                target=_spawn_hold_cache_lock,
+                args=(
+                    temp,
+                    cache_digest,
+                    acquired_queue,
+                    release_event,
+                ),
+            )
+            process.start()
+            acquired_queue.get(timeout=30)
+            lock_path = (
+                Path(temp)
+                / ".cache-locks"
+                / f"{cache_digest}.lock"
+            )
+            old = time.time() - 3600
+            os.utime(lock_path, (old, old))
+
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            started = time.monotonic()
+            try:
+                with self.assertRaisesRegex(
+                    TimeoutError,
+                    "cache identity lock",
+                ):
+                    with store._cache_lock(cache_digest):
+                        pass
+                elapsed = time.monotonic() - started
+                self.assertGreaterEqual(elapsed, 4.5)
+                self.assertLess(elapsed, 7.0)
+            finally:
+                release_event.set()
+                process.join(timeout=30)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=30)
+            self.assertEqual(0, process.exitcode)
+
+            started = time.monotonic()
+            with store._cache_lock(cache_digest):
+                pass
+            self.assertLess(time.monotonic() - started, 1.0)
 
     def test_mutable_file_references_are_not_cached_without_a_content_fingerprint(self):
         with tempfile.TemporaryDirectory() as temp:

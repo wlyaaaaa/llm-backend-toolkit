@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -7,6 +8,7 @@ import re
 import secrets
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -21,6 +23,55 @@ EXPLICIT_CACHE_IDENTITY_SCHEMA = "llm-backend-toolkit.explicit-cache-identity.v1
 CACHE_INDEX_SCHEMA = "llm-backend-toolkit.cache-index.v1"
 CACHE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+/=-]{0,511}$")
 CACHEABLE_RESULT_STATUSES = frozenset({"ok", "partial"})
+_CACHE_LOCK_TIMEOUT_SECONDS = 5.0
+_CACHE_LOCK_POLL_SECONDS = 0.01
+_PROCESS_CACHE_LOCKS_GUARD = threading.Lock()
+_PROCESS_CACHE_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _process_cache_lock(path: Path) -> threading.Lock:
+    key = os.path.normcase(os.fspath(path))
+    with _PROCESS_CACHE_LOCKS_GUARD:
+        return _PROCESS_CACHE_LOCKS.setdefault(key, threading.Lock())
+
+
+def _try_lock_file(stream) -> bool:
+    stream.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        try:
+            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as error:
+            if error.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK} or getattr(
+                error, "winerror", None
+            ) in {32, 33}:
+                return False
+            raise
+        return True
+
+    import fcntl
+
+    try:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        if error.errno in {errno.EACCES, errno.EAGAIN}:
+            return False
+        raise
+    return True
+
+
+def _unlock_file(stream) -> None:
+    stream.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def default_state_root() -> Path:
@@ -489,31 +540,41 @@ class JobStore:
     @contextmanager
     def _cache_lock(self, cache_digest: str):
         lock_root = self.root / ".cache-locks"
-        lock_root.mkdir(parents=True, exist_ok=True)
-        lock_path = lock_root / cache_digest
-        deadline = time.monotonic() + 5.0
-        while True:
-            try:
-                lock_path.mkdir()
-                break
-            except FileExistsError:
-                try:
-                    age = time.time() - lock_path.stat().st_mtime
-                    if age >= 30.0:
-                        lock_path.rmdir()
-                        continue
-                except (FileNotFoundError, OSError):
-                    pass
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("Timed out acquiring the cache identity lock")
-                time.sleep(0.01)
         try:
+            lock_root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            if not lock_root.is_dir():
+                raise
+        lock_path = lock_root / f"{cache_digest}.lock"
+        deadline = time.monotonic() + _CACHE_LOCK_TIMEOUT_SECONDS
+        process_lock = _process_cache_lock(lock_path)
+        remaining = max(0.0, deadline - time.monotonic())
+        if not process_lock.acquire(timeout=remaining):
+            raise TimeoutError("Timed out acquiring the cache identity lock")
+        stream = None
+        acquired = False
+        try:
+            stream = lock_path.open("a+b", buffering=0)
+            if os.fstat(stream.fileno()).st_size == 0:
+                stream.write(b"\0")
+            while not acquired:
+                acquired = _try_lock_file(stream)
+                if acquired:
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "Timed out acquiring the cache identity lock"
+                    )
+                time.sleep(_CACHE_LOCK_POLL_SECONDS)
             yield
         finally:
             try:
-                lock_path.rmdir()
-            except FileNotFoundError:
-                pass
+                if acquired and stream is not None:
+                    _unlock_file(stream)
+            finally:
+                if stream is not None:
+                    stream.close()
+                process_lock.release()
 
     def _cache_index_path(self, cache_digest: str) -> Path:
         return self.root / ".cache-index" / f"{cache_digest}.json"
