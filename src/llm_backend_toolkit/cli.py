@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .jobs import JobStore
+from .input_integrity import InputIntegrityError
+from .jobs import JobNotRunnableError, JobStore
 from .toolkit import Toolkit
 
 
@@ -150,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
             progress = None
             try:
                 request = store.claim(args.job_id)
+                if not store.begin_execution(args.job_id):
+                    return 0
                 expected = ((request.get("task") or {}).get("expected_output") or {})
                 output_format = str(expected.get("format") or "text").lower()
                 progress = store.progress_recorder(
@@ -159,6 +162,8 @@ def main(argv: list[str] | None = None) -> int:
                 progress({"phase": "accepted"})
                 result = Toolkit().invoke(request, progress_callback=progress)
                 store.complete(args.job_id, result)
+            except (InputIntegrityError, JobNotRunnableError):
+                return 0
             except Exception as exc:
                 if progress is not None:
                     progress({"phase": "failed"})

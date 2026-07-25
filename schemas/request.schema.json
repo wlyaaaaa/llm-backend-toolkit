@@ -29,8 +29,22 @@
             "properties": {
               "id": {"type": "string", "minLength": 1},
               "path": {"type": "string", "minLength": 1},
+              "expected_sha256": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "description": "Optional caller-declared digest of the exact bytes the async worker must consume."
+              },
+              "expected_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Optional caller-declared byte size paired with expected_sha256."
+              },
               "top_k": {"type": "integer", "minimum": 1},
               "max_chars": {"type": "integer", "minimum": 256}
+            },
+            "dependentRequired": {
+              "expected_sha256": ["expected_bytes"],
+              "expected_bytes": ["expected_sha256"]
             },
             "additionalProperties": false
           }
@@ -75,9 +89,23 @@
             "properties": {
               "id": {"type": "string", "minLength": 1},
               "path": {"type": "string", "minLength": 1},
+              "expected_sha256": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "description": "Optional caller-declared digest of the exact bytes the async worker must consume."
+              },
+              "expected_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Optional caller-declared byte size paired with expected_sha256."
+              },
               "kind": {"enum": ["image", "audio"]},
               "route": {"enum": ["auto", "native", "specialist"]},
               "purpose": {"type": "string"}
+            },
+            "dependentRequired": {
+              "expected_sha256": ["expected_bytes"],
+              "expected_bytes": ["expected_sha256"]
             },
             "additionalProperties": false
           }

@@ -16,6 +16,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .backends import BackendRegistry
+from .input_integrity import (
+    INPUT_INTEGRITY_SCHEMA,
+    INPUT_SPOOL_CLEANUP_SCHEMA,
+    InputIntegrityError,
+    cleanup_job_inputs,
+    declaration_scope,
+    pending_receipt,
+    prepare_job_inputs,
+)
 
 
 Spawner = Callable[[str, Path], None]
@@ -28,6 +37,10 @@ _CACHE_LOCK_TIMEOUT_SECONDS = 5.0
 _CACHE_LOCK_POLL_SECONDS = 0.01
 _PROCESS_CACHE_LOCKS_GUARD = threading.Lock()
 _PROCESS_CACHE_LOCKS: dict[str, threading.Lock] = {}
+
+
+class JobNotRunnableError(ValueError):
+    pass
 
 
 def _process_cache_lock(path: Path) -> threading.Lock:
@@ -163,6 +176,7 @@ class JobStore:
 
     def submit(self, request: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
         request, conversation = self._prepare_continuation(request)
+        input_integrity = pending_receipt(request)
         request_digest = self.request_digest(request)
         execution = request.get("execution") or {}
         is_agent = str(execution.get("mode") or "direct") == "agent"
@@ -194,6 +208,7 @@ class JobStore:
                 cacheable=cacheable,
                 conversation=conversation,
                 initial_poll_ms=initial_poll_ms,
+                input_integrity=input_integrity,
             )
         else:
             with self._cache_lock(cache_digest):
@@ -217,6 +232,7 @@ class JobStore:
                     cacheable=True,
                     conversation=conversation,
                     initial_poll_ms=initial_poll_ms,
+                    input_integrity=input_integrity,
                 )
                 self._write_cache_index(
                     cache_digest,
@@ -238,6 +254,7 @@ class JobStore:
             "forced": force,
             "cacheable": cacheable,
             "cache_identity": cache_identity,
+            "input_integrity": input_integrity,
             "monitor_until_utc": self._read_state(job_id).get("monitor_until_utc"),
             **({"conversation": conversation} if conversation else {}),
         }
@@ -296,8 +313,15 @@ class JobStore:
                         or "auto"
                     ),
                     "purpose": str(attachment.get("purpose") or ""),
+                    "expected_sha256": (
+                        str(attachment.get("expected_sha256"))
+                        if "expected_sha256" in attachment
+                        else None
+                    ),
+                    "expected_bytes": attachment.get("expected_bytes"),
                 }
             )
+        reference_integrity = declaration_scope(request)
         config_fingerprint = self.request_digest(config)
         route_fingerprint = self.request_digest(route) if route else ""
         caller_cache_key_hash = hashlib.sha256(
@@ -338,6 +362,10 @@ class JobStore:
                 "mode": str(media_value.get("mode") or "auto"),
                 "attachments": attachment_protocol,
             },
+            "input_integrity_protocol": {
+                "schema": INPUT_INTEGRITY_SCHEMA,
+                "references": reference_integrity,
+            },
         }
         digest = self.request_digest(scope)
         receipt = {
@@ -363,6 +391,7 @@ class JobStore:
         cacheable: bool,
         conversation: dict[str, Any] | None,
         initial_poll_ms: int,
+        input_integrity: dict[str, Any],
     ) -> None:
         execution = request.get("execution") or {}
         is_agent = str(execution.get("mode") or "direct") == "agent"
@@ -389,6 +418,16 @@ class JobStore:
                 "monitor_until_utc": _utc_after(self._timeout_seconds(request)),
                 "cacheable": cacheable,
                 "cache_result_eligible": False,
+                "input_integrity": input_integrity,
+                "input_spool_cleanup": {
+                    "schema": INPUT_SPOOL_CLEANUP_SCHEMA,
+                    "status": (
+                        "not_applicable"
+                        if input_integrity.get("status") == "not_applicable"
+                        else "not_created"
+                    ),
+                    "verified_absent": True,
+                },
                 "poll_count": 0,
                 "initial_poll_ms": initial_poll_ms,
                 "conversation_root": (conversation or {}).get("root_job_id")
@@ -479,6 +518,8 @@ class JobStore:
             }
             if cache_identity:
                 receipt["cache_identity"] = cache_identity
+            if isinstance(state.get("input_integrity"), dict):
+                receipt["input_integrity"] = dict(state["input_integrity"])
             return receipt
         if job_status == "stale":
             receipt = {
@@ -491,6 +532,8 @@ class JobStore:
             }
             if cache_identity:
                 receipt["cache_identity"] = cache_identity
+            if isinstance(state.get("input_integrity"), dict):
+                receipt["input_integrity"] = dict(state["input_integrity"])
             return receipt
         if job_status not in {"queued", "running"}:
             return None
@@ -508,6 +551,8 @@ class JobStore:
         }
         if cache_identity:
             receipt["cache_identity"] = cache_identity
+        if isinstance(state.get("input_integrity"), dict):
+            receipt["input_integrity"] = dict(state["input_integrity"])
         return receipt
 
     def _cache_result_is_eligible(
@@ -573,6 +618,43 @@ class JobStore:
                     stream.close()
                 process_lock.release()
 
+    @contextmanager
+    def _job_lock(self, job_id: str):
+        lock_root = self.root / ".job-locks"
+        try:
+            lock_root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            if not lock_root.is_dir():
+                raise
+        lock_path = lock_root / f"{job_id}.lock"
+        deadline = time.monotonic() + _CACHE_LOCK_TIMEOUT_SECONDS
+        process_lock = _process_cache_lock(lock_path)
+        remaining = max(0.0, deadline - time.monotonic())
+        if not process_lock.acquire(timeout=remaining):
+            raise TimeoutError("Timed out acquiring the job state lock")
+        stream = None
+        acquired = False
+        try:
+            stream = lock_path.open("a+b", buffering=0)
+            if os.fstat(stream.fileno()).st_size == 0:
+                stream.write(b"\0")
+            while not acquired:
+                acquired = _try_lock_file(stream)
+                if acquired:
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Timed out acquiring the job state lock")
+                time.sleep(_CACHE_LOCK_POLL_SECONDS)
+            yield
+        finally:
+            try:
+                if acquired and stream is not None:
+                    _unlock_file(stream)
+            finally:
+                if stream is not None:
+                    stream.close()
+                process_lock.release()
+
     def _cache_index_path(self, cache_digest: str) -> Path:
         return self.root / ".cache-index" / f"{cache_digest}.json"
 
@@ -614,17 +696,200 @@ class JobStore:
 
     def claim(self, job_id: str) -> dict[str, Any]:
         job_dir = self._job_dir(job_id)
-        request_path = job_dir / "request.json"
-        if not request_path.is_file():
-            raise FileNotFoundError(f"Job request is unavailable: {job_id}")
-        state = self._read_state(job_id)
-        state["job_status"] = "running"
+        with self._job_lock(job_id):
+            state = self._read_state(job_id)
+            job_status = str(state.get("job_status") or "")
+            if job_status in {"cancelled", "cancellation_requested"}:
+                raise JobNotRunnableError(f"Job is cancelled: {job_id}")
+            if job_status != "queued":
+                raise JobNotRunnableError(
+                    f"Job is already claimed or terminal: {job_id}"
+                )
+            request_path = job_dir / "request.json"
+            if not request_path.is_file():
+                raise FileNotFoundError(f"Job request is unavailable: {job_id}")
+            value = json.loads(request_path.read_text(encoding="utf-8"))
+            if not isinstance(value, dict):
+                raise ValueError("Stored job request is not an object")
+            state["job_status"] = "running"
+            state["worker_phase"] = "input_spooling"
+            state["input_spool_cleanup"] = {
+                "schema": INPUT_SPOOL_CLEANUP_SCHEMA,
+                "status": "retained_for_running",
+                "verified_absent": False,
+            }
+            state["updated_utc"] = _utc_now()
+            _atomic_json(job_dir / "state.json", state)
+        try:
+            prepared, input_integrity = prepare_job_inputs(
+                value,
+                job_dir=job_dir,
+            )
+        except InputIntegrityError as error:
+            with self._job_lock(job_id):
+                state = self._read_state(job_id)
+                if str(state.get("job_status") or "") in {
+                    "cancelled",
+                    "cancellation_requested",
+                }:
+                    state["job_status"] = "cancelled"
+                    state["result_status"] = "cancelled"
+                    state["cache_result_eligible"] = False
+                    state["worker_phase"] = "cancelled"
+                else:
+                    state["job_status"] = "failed"
+                    state["result_status"] = "failed"
+                    state["cache_result_eligible"] = False
+                    state["input_integrity"] = error.receipt
+                    state["error"] = {
+                        "category": "input_integrity_failed",
+                        "summary": error.summary,
+                        "retryable": False,
+                    }
+                    state["decision"] = {
+                        "owner": "top_model",
+                        "options": [
+                            "inspect-input-integrity",
+                            "submit-corrected-reference",
+                        ],
+                    }
+                state["updated_utc"] = _utc_now()
+                _atomic_json(job_dir / "state.json", state)
+                self._cleanup_inputs_locked(job_id, state=state)
+            raise
+        _atomic_json(job_dir / "prepared-request.json", prepared)
+        with self._job_lock(job_id):
+            state = self._read_state(job_id)
+            if str(state.get("job_status") or "") in {
+                "cancelled",
+                "cancellation_requested",
+            }:
+                state["job_status"] = "cancelled"
+                state["result_status"] = "cancelled"
+                state["cache_result_eligible"] = False
+                state["worker_phase"] = "cancelled"
+                state["updated_utc"] = _utc_now()
+                _atomic_json(job_dir / "state.json", state)
+                self._cleanup_inputs_locked(job_id, state=state)
+                raise JobNotRunnableError(f"Job is cancelled: {job_id}")
+            state["job_status"] = "running"
+            state["worker_phase"] = "inputs_verified"
+            state["input_integrity"] = input_integrity
+            state["input_spool_cleanup"] = {
+                "schema": INPUT_SPOOL_CLEANUP_SCHEMA,
+                "status": (
+                    "not_applicable"
+                    if input_integrity.get("status") == "not_applicable"
+                    else "retained_for_running"
+                ),
+                "verified_absent": input_integrity.get("status")
+                == "not_applicable",
+            }
+            state["updated_utc"] = _utc_now()
+            _atomic_json(job_dir / "state.json", state)
+            return prepared
+
+    def begin_execution(self, job_id: str) -> bool:
+        with self._job_lock(job_id):
+            state = self._read_state(job_id)
+            job_status = str(state.get("job_status") or "")
+            if job_status in {"cancelled", "cancellation_requested"}:
+                if job_status == "cancellation_requested":
+                    state["job_status"] = "cancelled"
+                    state["result_status"] = "cancelled"
+                    state["updated_utc"] = _utc_now()
+                    _atomic_json(self._job_dir(job_id) / "state.json", state)
+                self._cleanup_inputs_locked(job_id, state=state)
+                return False
+            if job_status != "running":
+                raise JobNotRunnableError(f"Job is not runnable: {job_id}")
+            if str(state.get("worker_phase") or "") != "inputs_verified":
+                raise JobNotRunnableError(
+                    f"Job inputs are not verified for provider execution: {job_id}"
+                )
+            state["worker_phase"] = "provider_running"
+            state["updated_utc"] = _utc_now()
+            _atomic_json(self._job_dir(job_id) / "state.json", state)
+            return True
+
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        with self._job_lock(job_id):
+            state = self._read_state(job_id)
+            job_status = str(state.get("job_status") or "")
+            if job_status in {"completed", "failed", "cancelled"}:
+                cleanup = self._cleanup_inputs_locked(job_id, state=state)
+                return {
+                    "status": "ok",
+                    "job_id": job_id,
+                    "job_status": job_status,
+                    "input_spool_cleanup": cleanup,
+                }
+            state["cache_result_eligible"] = False
+            state["updated_utc"] = _utc_now()
+            if job_status == "queued" or state.get("worker_phase") == "inputs_verified":
+                state["job_status"] = "cancelled"
+                state["result_status"] = "cancelled"
+                state["worker_phase"] = "cancelled"
+                _atomic_json(self._job_dir(job_id) / "state.json", state)
+                cleanup = self._cleanup_inputs_locked(job_id, state=state)
+                return {
+                    "status": "ok",
+                    "job_id": job_id,
+                    "job_status": "cancelled",
+                    "input_spool_cleanup": cleanup,
+                }
+            state["job_status"] = "cancellation_requested"
+            state["cancellation_requested"] = True
+            _atomic_json(self._job_dir(job_id) / "state.json", state)
+            cleanup = dict(state.get("input_spool_cleanup") or {})
+            return {
+                "status": "accepted",
+                "job_id": job_id,
+                "job_status": "cancellation_requested",
+                "input_spool_cleanup": cleanup,
+            }
+
+    def cleanup_inputs(self, job_id: str) -> dict[str, Any]:
+        with self._job_lock(job_id):
+            state = self._read_state(job_id)
+            job_status = str(state.get("job_status") or "")
+            if job_status not in {"completed", "failed", "cancelled"}:
+                return {
+                    "status": "blocked",
+                    "job_id": job_id,
+                    "job_status": job_status,
+                    "error": {
+                        "category": "input_spool_in_use",
+                        "summary": (
+                            "Input spool cleanup is allowed only after the job is "
+                            "completed, failed, or cancelled."
+                        ),
+                        "retryable": True,
+                    },
+                    "input_spool_cleanup": dict(
+                        state.get("input_spool_cleanup") or {}
+                    ),
+                }
+            cleanup = self._cleanup_inputs_locked(job_id, state=state)
+            return {
+                "status": "ok",
+                "job_id": job_id,
+                "job_status": job_status,
+                "input_spool_cleanup": cleanup,
+            }
+
+    def _cleanup_inputs_locked(
+        self,
+        job_id: str,
+        *,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        job_dir = self._job_dir(job_id)
+        cleanup = cleanup_job_inputs(job_dir)
+        state["input_spool_cleanup"] = cleanup
         state["updated_utc"] = _utc_now()
         _atomic_json(job_dir / "state.json", state)
-        value = json.loads(request_path.read_text(encoding="utf-8"))
-        if not isinstance(value, dict):
-            raise ValueError("Stored job request is not an object")
-        return value
+        return cleanup
 
     def progress_recorder(
         self,
@@ -723,38 +988,73 @@ class JobStore:
 
     def complete(self, job_id: str, result: dict[str, Any]) -> None:
         job_dir = self._job_dir(job_id)
-        _atomic_json(job_dir / "result.json", result)
-        self._write_output_artifact(job_dir, result.get("output"))
-        state = self._read_state(job_id)
-        state["job_status"] = "completed"
-        state["result_status"] = str(result.get("status") or "unknown")
-        state["cache_result_eligible"] = bool(state.get("cacheable")) and (
-            state["result_status"] in CACHEABLE_RESULT_STATUSES
-        )
-        state["updated_utc"] = _utc_now()
-        _atomic_json(job_dir / "state.json", state)
-        cache_identity = state.get("cache_identity")
-        if bool(state.get("cacheable")) and isinstance(cache_identity, dict):
-            digest_value = str(cache_identity.get("digest") or "")
-            if digest_value.startswith("sha256:"):
-                cache_digest = digest_value.removeprefix("sha256:")
-                if len(cache_digest) == 64 and all(
-                    char in "0123456789abcdef" for char in cache_digest
-                ):
-                    with self._cache_lock(cache_digest):
-                        self._write_cache_index(
-                            cache_digest,
-                            job_id,
-                            cache_identity,
-                            status=(
-                                "completed"
-                                if state["cache_result_eligible"]
-                                else "ineligible"
-                            ),
-                        )
-        request_path = job_dir / "request.json"
-        if request_path.exists():
-            request_path.unlink()
+        with self._job_lock(job_id):
+            state = self._read_state(job_id)
+            if str(state.get("job_status") or "") in {
+                "cancelled",
+                "cancellation_requested",
+            }:
+                state["job_status"] = "cancelled"
+                state["result_status"] = "cancelled"
+                state["cache_result_eligible"] = False
+                state["worker_phase"] = "cancelled"
+                state["updated_utc"] = _utc_now()
+                _atomic_json(job_dir / "state.json", state)
+                self._cleanup_inputs_locked(job_id, state=state)
+                return
+            input_integrity = state.get("input_integrity")
+            reference_count = (
+                int(input_integrity.get("reference_count") or 0)
+                if isinstance(input_integrity, dict)
+                else 0
+            )
+            result_status = str(result.get("status") or "unknown")
+            integrity_verified = (
+                reference_count == 0
+                or (
+                    isinstance(input_integrity, dict)
+                    and input_integrity.get("status") == "verified"
+                )
+            )
+            if (
+                result_status in CACHEABLE_RESULT_STATUSES
+                and not integrity_verified
+            ):
+                raise ValueError(
+                    "Cacheable completion requires verified job input integrity"
+                )
+            _atomic_json(job_dir / "result.json", result)
+            self._write_output_artifact(job_dir, result.get("output"))
+            state["job_status"] = "completed"
+            state["result_status"] = result_status
+            state["cache_result_eligible"] = (
+                bool(state.get("cacheable"))
+                and state["result_status"] in CACHEABLE_RESULT_STATUSES
+                and integrity_verified
+            )
+            state["worker_phase"] = "terminal"
+            state["updated_utc"] = _utc_now()
+            _atomic_json(job_dir / "state.json", state)
+            cache_identity = state.get("cache_identity")
+            if bool(state.get("cacheable")) and isinstance(cache_identity, dict):
+                digest_value = str(cache_identity.get("digest") or "")
+                if digest_value.startswith("sha256:"):
+                    cache_digest = digest_value.removeprefix("sha256:")
+                    if len(cache_digest) == 64 and all(
+                        char in "0123456789abcdef" for char in cache_digest
+                    ):
+                        with self._cache_lock(cache_digest):
+                            self._write_cache_index(
+                                cache_digest,
+                                job_id,
+                                cache_identity,
+                                status=(
+                                    "completed"
+                                    if state["cache_result_eligible"]
+                                    else "ineligible"
+                                ),
+                            )
+            self._cleanup_inputs_locked(job_id, state=state)
 
     def fail(self, job_id: str, summary: str) -> None:
         self.complete(
@@ -778,10 +1078,25 @@ class JobStore:
         full_result: bool = False,
     ) -> dict[str, Any]:
         state = self._read_state(job_id)
-        stale = state.get("job_status") != "completed" and _is_expired(state.get("monitor_until_utc"))
+        terminal_statuses = {"completed", "failed", "cancelled"}
+        if str(state.get("job_status") or "") in terminal_statuses:
+            cleanup = dict(state.get("input_spool_cleanup") or {})
+            if not bool(cleanup.get("verified_absent")):
+                self.cleanup_inputs(job_id)
+                state = self._read_state(job_id)
+        stale = (
+            state.get("job_status") not in terminal_statuses
+            and state.get("job_status") != "cancellation_requested"
+            and _is_expired(state.get("monitor_until_utc"))
+        )
         effective_status = "stale" if stale else state.get("job_status")
         poll_after_ms = 0
-        if effective_status not in {"completed", "stale"}:
+        if effective_status not in {
+            "completed",
+            "failed",
+            "cancelled",
+            "stale",
+        }:
             state["poll_count"] = int(state.get("poll_count") or 0) + 1
             poll_after_ms = min(
                 self._initial_poll_ms_from_state(state) * (2 ** min(state["poll_count"], 3)),
@@ -809,6 +1124,10 @@ class JobStore:
         }
         if isinstance(state.get("cache_identity"), dict):
             output["cache_identity"] = dict(state["cache_identity"])
+        if isinstance(state.get("input_integrity"), dict):
+            output["input_integrity"] = dict(state["input_integrity"])
+        if isinstance(state.get("input_spool_cleanup"), dict):
+            output["input_spool_cleanup"] = dict(state["input_spool_cleanup"])
         if poll_after_ms:
             output["recommended_check_utc"] = _utc_after(poll_after_ms // 1000)
         if stale:
@@ -820,6 +1139,28 @@ class JobStore:
             output["decision"] = {
                 "owner": "top_model",
                 "options": ["inspect-job", "retry-with-force", "handle-in-codex"],
+            }
+        elif effective_status == "failed":
+            output["error"] = dict(
+                state.get("error")
+                or {
+                    "category": "worker_failed",
+                    "summary": "The job failed before producing a usable result.",
+                    "retryable": True,
+                }
+            )
+            output["decision"] = dict(
+                state.get("decision")
+                or {
+                    "owner": "top_model",
+                    "options": ["retry", "handle-in-codex"],
+                }
+            )
+        elif effective_status == "cancellation_requested":
+            output["status"] = "accepted"
+            output["decision"] = {
+                "owner": "toolkit",
+                "options": ["wait-for-cancelled", "inspect-job"],
             }
         result_path = self._job_dir(job_id) / "result.json"
         if include_result and state.get("job_status") == "completed" and result_path.is_file():
