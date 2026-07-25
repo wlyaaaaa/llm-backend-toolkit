@@ -227,11 +227,11 @@ function calculateDuration(detail) {
 function calculateTps(detail) {
   const explicit = pick(
     detail,
-    "performance.tokens_per_second",
-    "tps",
-    "result.tps",
     "result.usage.tps",
     "usage.tps",
+    "result.tps",
+    "tps",
+    "performance.tokens_per_second",
   );
   const completionTokens = Number(
     pick(
@@ -255,21 +255,23 @@ function calculateTps(detail) {
   }
   const source = String(
     firstDefined(
-      pick(detail, "tps_source"),
-      pick(detail, "performance.tokens_per_second_source"),
       pick(detail, "result.usage.tps_source"),
       pick(detail, "usage.tps_source"),
+      pick(detail, "tps_source"),
+      pick(detail, "performance.tokens_per_second_source"),
       "",
     ),
   ).toLowerCase();
   if (Number.isFinite(Number(explicit)) && source) {
     const value = Number(explicit).toFixed(Number(explicit) < 10 ? 1 : 0);
-    return ["exact", "eval_duration"].includes(source) ? `${value}（精确）` : `≈ ${value}`;
+    return ["exact", "eval_duration"].includes(source)
+      ? `${value}（精确）`
+      : `≈ ${value}（估算）`;
   }
   const durationNs = Number(pick(detail, "result.usage.total_duration_ns", "usage.total_duration_ns"));
   if (Number.isFinite(completionTokens) && Number.isFinite(durationNs) && durationNs > 0) {
     const estimate = completionTokens / (durationNs / 1_000_000_000);
-    return `≈ ${estimate.toFixed(estimate < 10 ? 1 : 0)}`;
+    return `≈ ${estimate.toFixed(estimate < 10 ? 1 : 0)}（估算）`;
   }
   return "—";
 }
@@ -337,9 +339,9 @@ function reasoningLevel(detail) {
   const value = String(
     firstDefined(
       pick(detail, "display.reasoning_effort"),
-      pick(detail, "display.reasoning_mode"),
       pick(detail, "result.execution_receipt.reasoning_effort"),
       pick(detail, "request.reasoning.effort"),
+      pick(detail, "display.reasoning_mode"),
       pick(detail, "request.reasoning.mode"),
       "—",
     ),
@@ -350,6 +352,7 @@ function reasoningLevel(detail) {
     low: "低",
     medium: "中",
     high: "高",
+    max: "最高",
     xhigh: "超高",
     ultra: "极高",
   };

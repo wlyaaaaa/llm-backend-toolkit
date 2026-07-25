@@ -314,6 +314,11 @@ class AgentExecutionTests(unittest.TestCase):
                         "cleanupConfirmed": True,
                         "cleanupMethod": "none",
                     },
+                    "usage": {
+                        "input_tokens": 120,
+                        "cached_input_tokens": 32,
+                        "output_tokens": 8,
+                    },
                     "eventProjection": "codex-public-v1",
                 }
             }
@@ -339,6 +344,71 @@ class AgentExecutionTests(unittest.TestCase):
             self.assertTrue(response.limit_usage["cleanup_confirmed"])
             self.assertEqual("", response.limit_hit)
             self.assertEqual("codex-public-v1", response.event_projection)
+            self.assertEqual(
+                {
+                    "input_tokens": 120,
+                    "cached_input_tokens": 32,
+                    "output_tokens": 8,
+                },
+                response.usage,
+            )
+
+    def test_aicli_agent_usage_ignores_non_integer_or_negative_fields(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = root / "aicli.ps1"
+            entry.write_text("# stub\n", encoding="utf-8")
+            runner = AiCliProfileRunner(
+                name="codex-cli",
+                engine="codex",
+                default_profile="codex-ollama-main",
+                entry=str(entry),
+            )
+            envelope = {
+                "run": {
+                    "exitCode": 0,
+                    "durationMs": 1000,
+                    "stdout": (
+                        '{"type":"item.completed",'
+                        '"item":{"type":"agent_message","text":"done"}}'
+                    ),
+                    "limitEnforcement": {
+                        "timeout": "hard",
+                        "maxSteps": "hard",
+                        "maxToolCalls": "hard",
+                    },
+                    "usage": {
+                        "input_tokens": 0,
+                        "cached_input_tokens": -1,
+                        "output_tokens": True,
+                        "untrusted_extra": 99,
+                    },
+                }
+            }
+
+            with patch(
+                "llm_backend_toolkit.agent_runners.shutil.which",
+                return_value="pwsh",
+            ), patch(
+                "llm_backend_toolkit.agent_runners._bounded_process",
+                return_value=(0, json.dumps(envelope), "", 1000),
+            ):
+                response = runner.invoke(
+                    "task",
+                    {
+                        "workspace": str(root),
+                        "model": "qwen-main-v1",
+                        "policy": "workspace-write",
+                        "native_images": [],
+                        "budget": {
+                            "timeout_seconds": 30,
+                            "max_steps": 4,
+                            "max_tool_calls": 4,
+                        },
+                    },
+                )
+
+            self.assertEqual({"input_tokens": 0}, response.usage)
 
     def test_codex_agent_rejects_a_success_envelope_without_hard_event_limits(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -713,6 +783,43 @@ class AgentExecutionTests(unittest.TestCase):
             self.assertEqual("qwen-code", result["execution_receipt"]["runner"])
             self.assertEqual(4, result["execution_receipt"]["tool_calls"])
             self.assertNotIn("reasoning", result)
+
+    def test_agent_mode_normalizes_usage_and_marks_wall_clock_tps_as_estimated(self):
+        with tempfile.TemporaryDirectory() as temp:
+            runner = FakeRunner(
+                AgentResponse(
+                    content='{"answer": 56}',
+                    runner="codex-cli",
+                    model="qwen-main-v1",
+                    exit_code=0,
+                    duration_ms=2000,
+                    usage={
+                        "input_tokens": 120,
+                        "cached_input_tokens": 32,
+                        "output_tokens": 40,
+                    },
+                )
+            )
+            toolkit = Toolkit(
+                providers={"qwen-main-v1": FakeProvider()},
+                runners={"data_factory": runner},
+            )
+
+            result = toolkit.invoke(agent_request(Path(temp)))
+
+            self.assertEqual(
+                {
+                    "prompt_tokens": 120,
+                    "cached_tokens": 32,
+                    "completion_tokens": 40,
+                    "total_tokens": 160,
+                    "elapsed_seconds": 2.0,
+                    "tps": 20.0,
+                    "tps_source": "wall_clock_estimate",
+                },
+                result["usage"],
+            )
+            self.assertNotIn("eval_duration_ns", result["usage"])
 
     def test_zero_tool_call_budget_is_preserved_instead_of_replaced_by_the_default(self):
         with tempfile.TemporaryDirectory() as temp:

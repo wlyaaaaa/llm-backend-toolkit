@@ -311,6 +311,7 @@ class Toolkit:
             return result
         output, checks = self._check_output(response.content, (request.get("task") or {}).get("expected_output") or {})
         status = "ok" if all(check["passed"] for check in checks) else "partial"
+        usage = self._agent_usage(response)
         return {
             "status": status,
             "output": output,
@@ -318,7 +319,7 @@ class Toolkit:
             "provider": {"requested": resolved.requested, "actual": response.model or resolved.backend_id},
             "context_receipt": compacted.receipt,
             "delegation_receipt": self._delegation_receipt(compacted.receipt, sources.receipt),
-            "usage": {},
+            "usage": usage,
             "checks": checks,
             "uncertainties": [] if status == "ok" else ["One or more deterministic result checks failed."],
             "artifacts": media.artifacts,
@@ -405,6 +406,44 @@ class Toolkit:
             except (ProviderCallError, OSError, ValueError):
                 provider_status = None
         return self.registry.evaluate_route_evidence(route, provider_status)
+
+    @staticmethod
+    def _agent_usage(response: Any) -> dict[str, Any]:
+        raw_usage = getattr(response, "usage", {})
+        if not isinstance(raw_usage, dict):
+            return {}
+        normalized: dict[str, Any] = {}
+        field_map = {
+            "input_tokens": "prompt_tokens",
+            "cached_input_tokens": "cached_tokens",
+            "output_tokens": "completion_tokens",
+        }
+        for source, target in field_map.items():
+            value = raw_usage.get(source)
+            if type(value) is int and value >= 0:
+                normalized[target] = value
+        if "prompt_tokens" in normalized and "completion_tokens" in normalized:
+            normalized["total_tokens"] = (
+                normalized["prompt_tokens"] + normalized["completion_tokens"]
+            )
+        duration_ms = getattr(response, "duration_ms", None)
+        if (
+            "completion_tokens" in normalized
+            and type(duration_ms) is int
+            and duration_ms > 0
+        ):
+            elapsed_seconds = duration_ms / 1000.0
+            normalized.update(
+                {
+                    "elapsed_seconds": elapsed_seconds,
+                    "tps": round(
+                        normalized["completion_tokens"] / elapsed_seconds,
+                        1,
+                    ),
+                    "tps_source": "wall_clock_estimate",
+                }
+            )
+        return normalized
 
     @staticmethod
     def _route_receipt(

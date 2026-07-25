@@ -661,6 +661,7 @@ def _performance(
     prompt_tokens = usage.get("prompt_tokens")
     completion_tokens = usage.get("completion_tokens")
     duration_ns = usage.get("eval_duration_ns")
+    runner_elapsed_seconds = usage.get("elapsed_seconds")
     tokens_per_second: float | None = None
     tokens_per_second_source = "unavailable"
     try:
@@ -670,6 +671,15 @@ def _performance(
                 1,
             )
             tokens_per_second_source = "eval_duration"
+        elif (
+            completion_tokens is not None
+            and float(runner_elapsed_seconds or 0) > 0
+        ):
+            tokens_per_second = round(
+                float(completion_tokens) / float(runner_elapsed_seconds),
+                1,
+            )
+            tokens_per_second_source = "wall_clock_estimate"
         elif completion_tokens is not None and elapsed_seconds > 0:
             tokens_per_second = round(float(completion_tokens) / elapsed_seconds, 1)
             tokens_per_second_source = "wall_clock_estimate"
@@ -963,6 +973,38 @@ class _ObserverServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+def _stream_updates(
+    store: ObserverStore,
+    stream: Any,
+    *,
+    monotonic: Any = None,
+    sleep: Any = None,
+) -> None:
+    clock = monotonic or time.monotonic
+    pause = sleep or time.sleep
+    previous = ""
+    heartbeat = clock()
+    try:
+        while True:
+            signature = store.signature()
+            now = clock()
+            if signature != previous:
+                payload = json.dumps({"signature": signature}, ensure_ascii=False)
+                stream.write(
+                    f"event: refresh\ndata: {payload}\n\n".encode("utf-8")
+                )
+                stream.flush()
+                previous = signature
+                heartbeat = now
+            elif now - heartbeat >= 10:
+                stream.write(b": heartbeat\n\n")
+                stream.flush()
+                heartbeat = now
+            pause(0.5)
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        return
+
+
 def _asset_root() -> Path:
     return Path(__file__).with_name("observer_ui")
 
@@ -1038,26 +1080,7 @@ def create_observer_server(
             self.send_header("Connection", "keep-alive")
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
-            previous = ""
-            deadline = time.monotonic() + 30
-            heartbeat = 0.0
-            try:
-                while time.monotonic() < deadline:
-                    signature = store.signature()
-                    now = time.monotonic()
-                    if signature != previous:
-                        payload = json.dumps({"signature": signature}, ensure_ascii=False)
-                        self.wfile.write(f"event: refresh\ndata: {payload}\n\n".encode("utf-8"))
-                        self.wfile.flush()
-                        previous = signature
-                        heartbeat = now
-                    elif now - heartbeat >= 10:
-                        self.wfile.write(b": heartbeat\n\n")
-                        self.wfile.flush()
-                        heartbeat = now
-                    time.sleep(0.5)
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                return
+            _stream_updates(store, self.wfile)
 
         def do_GET(self) -> None:
             if not self._host_allowed():

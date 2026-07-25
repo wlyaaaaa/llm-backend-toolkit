@@ -166,6 +166,7 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("performance.tokens_per_second", self.js)
         self.assertIn("estimated_output_tokens", self.js)
         self.assertIn("≈", self.js)
+        self.assertIn("（估算）", self.js)
         self.assertIn("token_events", self.js)
         self.assertIn("片段", self.js)
         self.assertNotIn('title: "调用已提交"', self.js)
@@ -180,6 +181,28 @@ class ObserverUiTests(unittest.TestCase):
             timeline_body.index('pick(detail, "events")'),
             timeline_body.index('pick(detail, "progress.events")'),
         )
+
+    def test_agent_route_effort_and_max_label_take_priority(self) -> None:
+        reasoning = self.js.split("function reasoningLevel(detail)", 1)[1].split(
+            "function gpuLabel", 1
+        )[0]
+        self.assertLess(
+            reasoning.index('"display.reasoning_effort"'),
+            reasoning.index('"display.reasoning_mode"'),
+        )
+        self.assertLess(
+            reasoning.index('"display.reasoning_effort"'),
+            reasoning.index('"request.reasoning.mode"'),
+        )
+        self.assertLess(
+            reasoning.index('"result.execution_receipt.reasoning_effort"'),
+            reasoning.index('"display.reasoning_mode"'),
+        )
+        self.assertLess(
+            reasoning.index('"result.execution_receipt.reasoning_effort"'),
+            reasoning.index('"request.reasoning.mode"'),
+        )
+        self.assertIn('max: "最高"', reasoning)
 
     def test_client_formats_structured_values_without_html_injection(self) -> None:
         self.assertIn("JSON.stringify(value, null, 2)", self.js)

@@ -16,6 +16,7 @@ from llm_backend_toolkit.observer import (
     ObserverStore,
     _runtime_health,
     _state_root_id,
+    _stream_updates,
     create_observer_server,
     observer_runtime_path,
 )
@@ -35,6 +36,39 @@ def request() -> dict:
 
 
 class VisibleRunEventTests(unittest.TestCase):
+    def test_sse_stream_survives_past_thirty_seconds_until_client_disconnect(self) -> None:
+        class StaticStore:
+            @staticmethod
+            def signature() -> str:
+                return "generation:stable"
+
+        class DisconnectingStream:
+            def __init__(self) -> None:
+                self.writes: list[bytes] = []
+
+            def write(self, value: bytes) -> None:
+                self.writes.append(value)
+                if len(self.writes) == 3:
+                    raise BrokenPipeError
+
+            @staticmethod
+            def flush() -> None:
+                return
+
+        ticks = iter((0.0, 31.0, 62.0, 93.0))
+        stream = DisconnectingStream()
+
+        _stream_updates(
+            StaticStore(),
+            stream,
+            monotonic=lambda: next(ticks),
+            sleep=lambda _seconds: None,
+        )
+
+        self.assertTrue(stream.writes[0].startswith(b"event: refresh\n"))
+        self.assertEqual(b": heartbeat\n\n", stream.writes[1])
+        self.assertEqual(b": heartbeat\n\n", stream.writes[2])
+
     def test_visible_run_is_recorded_before_worker_spawn(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             observed: list[dict] = []
@@ -633,6 +667,40 @@ class ObserverStoreTests(unittest.TestCase):
                 (Path(temp) / job_id / "state.json").read_text(encoding="utf-8")
             )["poll_count"]
             self.assertEqual(poll_count_before, poll_count_after)
+
+    def test_agent_tps_uses_reported_runner_wall_time_not_job_lifetime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit(request(), force=True)
+            job_id = receipt["job_id"]
+            store.claim(job_id)
+            store.complete(
+                job_id,
+                {
+                    "status": "ok",
+                    "output": {"answer": 56},
+                    "backend": {"model": "qwen-main-v1"},
+                    "usage": {
+                        "prompt_tokens": 120,
+                        "cached_tokens": 32,
+                        "completion_tokens": 40,
+                        "total_tokens": 160,
+                        "elapsed_seconds": 2.0,
+                        "tps": 20.0,
+                        "tps_source": "wall_clock_estimate",
+                    },
+                    "checks": [{"id": "valid_json", "passed": True}],
+                },
+            )
+
+            detail = ObserverStore(Path(temp)).get_run(job_id)
+
+            self.assertEqual(20.0, detail["performance"]["tokens_per_second"])
+            self.assertEqual(
+                "wall_clock_estimate",
+                detail["performance"]["tokens_per_second_source"],
+            )
+            self.assertEqual(32, detail["result"]["usage"]["cached_tokens"])
 
     def test_submission_metadata_resolves_model_profile_and_reasoning_effort(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

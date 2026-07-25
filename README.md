@@ -91,7 +91,7 @@ python -m venv .venv
 - 多个模型调用和多轮 continuation，对话历史持久保留并可分页回看；
 - 中文工作时间线、AICLI 工具/文件编辑活动、OCR/ASR 阶段与公开输出；
 - 实际模型、执行方式、推理模式或 reasoning effort；
-- Token、耗时和 TPS；Ollama 完成后以 `completion_tokens / eval_duration_ns` 显示精确 TPS，运行中只显示明确标为近似的公开输出估算；
+- Token、耗时和 TPS；Ollama 完成后以 `completion_tokens / eval_duration_ns` 显示精确 TPS，AICLI agent 的安全真实 usage 只与整段墙钟耗时计算并明确标为估算，运行中公开输出同样只显示估算；
 - 最终结果、确定性校验和 Codex 是否已取回结果。
 
 启动本机服务：

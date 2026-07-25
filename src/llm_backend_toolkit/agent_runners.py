@@ -34,6 +34,7 @@ class AgentResponse:
     machine_event_status: str = ""
     machine_event_count: int = 0
     observability_level: str = "lifecycle"
+    usage: dict[str, int] = field(default_factory=dict)
 
 
 class AgentRunnerError(Exception):
@@ -273,6 +274,21 @@ def _json_values(text: str) -> list[dict[str, Any]]:
         if isinstance(value, dict):
             values.append(value)
     return values
+
+
+def _safe_aicli_usage(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    usage: dict[str, int] = {}
+    for field_name in (
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+    ):
+        field_value = value.get(field_name)
+        if type(field_value) is int and field_value >= 0:
+            usage[field_name] = field_value
+    return usage
 
 
 def _extract_text(value: Any) -> str:
@@ -660,6 +676,7 @@ class AiCliProfileRunner:
         run = envelope.get("run") or {}
         child_stdout = str(run.get("stdout") or "")
         child_values = _json_values(child_stdout)
+        usage = _safe_aicli_usage(run.get("usage"))
         limit_enforcement = dict(run.get("limitEnforcement") or {})
         limit_usage = dict(run.get("limitUsage") or {})
         limit_hit = str(run.get("limitHit") or "")
@@ -793,6 +810,7 @@ class AiCliProfileRunner:
             model=model,
             exit_code=child_code,
             duration_ms=int(run.get("durationMs") or duration_ms),
+            usage=usage,
             tool_calls=tool_calls,
             session_id=session_id,
             stop_reason="completed",

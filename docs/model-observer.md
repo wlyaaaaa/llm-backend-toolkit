@@ -29,7 +29,7 @@
 Token 指标必须说明依据：
 
 - `eval_duration`：Ollama 最终 usage，精确；
-- `wall_clock_estimate`：完成 token 数除以墙钟时间，近似；
+- `wall_clock_estimate`：AICLI agent 返回的安全真实完成 token 数除以整段执行墙钟时间，近似，不冒充模型 eval TPS；
 - `public_content_estimate`：运行中仅依据公开输出估算，近似；
 - `unavailable` / `not_applicable`：无法可靠计算，OCR/ASR 不冒充 token TPS。
 
@@ -54,7 +54,7 @@ Toolkit 调用 OCR/ASR 时会把开始/完成阶段写入同一个模型 job。�
 
 ## 实时与性能
 
-- `/api/stream` 只发送 refresh 信号，详情仍由同源 loopback JSON API 读取。
+- `/api/stream` 只发送 refresh 信号，详情仍由同源 loopback JSON API 读取；连接会持续发送 heartbeat，直到客户端主动断开，不会在任务仍运行时静默到期。
 - 浏览器断线时降级为有界轮询；SSE 恢复后停止轮询。
 - GUI 首屏只加载最近 100 条，旧历史按页加载。
 - 服务缓存未变化的终态摘要；活跃任务继续计算新鲜耗时。
