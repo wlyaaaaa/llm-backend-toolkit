@@ -274,7 +274,7 @@ class JobStoreTests(unittest.TestCase):
             self.assertNotIn("PRIVATE_HIDDEN_TRACE", raw)
             self.assertNotIn('"partial"', raw)
 
-    def test_progress_recorder_accumulates_only_bounded_public_reply_preview(self):
+    def test_progress_recorder_replaces_streamed_preview_with_completed_reply(self):
         with tempfile.TemporaryDirectory() as temp:
             store = JobStore(Path(temp), spawner=lambda *_: None)
             receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
@@ -287,12 +287,61 @@ class JobStoreTests(unittest.TestCase):
             )
 
             recorder({"phase": "generating", "content_delta": "你好，"})
-            recorder({"phase": "completed", "content_delta": "这是公开回复。"})
+            recorder({"phase": "generating", "content_delta": "这是"})
+            recorder(
+                {
+                    "phase": "completed",
+                    "content_replace": "你好，这是公开回复。",
+                    "public_event": {
+                        "kind": "agent.output.completed",
+                        "summary_zh": "你好，这是公开回复。",
+                        "payload": {"status": "completed"},
+                    },
+                }
+            )
 
             progress = json.loads(
                 (Path(temp) / receipt["job_id"] / "progress.json").read_text(encoding="utf-8")
             )
             self.assertEqual("你好，这是公开回复。", progress["public_preview"])
+            self.assertEqual("completed", progress["phase"])
+            completed_events = [
+                event
+                for event in read_events(Path(temp) / receipt["job_id"])
+                if event["kind"] == "agent.output.completed"
+            ]
+            self.assertEqual(1, len(completed_events))
+            self.assertEqual(
+                "你好，这是公开回复。",
+                completed_events[0]["summary_zh"],
+            )
+
+    def test_progress_recorder_completed_reply_sets_preview_without_deltas(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(
+                receipt["job_id"],
+                allow_public_preview=True,
+                preview_chars=200,
+                write_interval_seconds=0.05,
+            )
+
+            recorder(
+                {
+                    "phase": "completed",
+                    "content_replace": "没有增量时的完整公开回复。",
+                }
+            )
+
+            progress = json.loads(
+                (Path(temp) / receipt["job_id"] / "progress.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                "没有增量时的完整公开回复。",
+                progress["public_preview"],
+            )
             self.assertEqual("completed", progress["phase"])
 
     def test_get_returns_compact_state_and_result_only_after_completion(self):

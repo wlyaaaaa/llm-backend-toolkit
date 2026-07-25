@@ -73,6 +73,46 @@ class ToolkitTests(unittest.TestCase):
             [event["phase"] for event in events],
         )
         self.assertEqual("公开回复", events[2]["content_delta"])
+        self.assertFalse(
+            any(
+                (event.get("public_event") or {}).get("kind")
+                == "context.compaction.completed"
+                for event in events
+            )
+        )
+
+    def test_applied_context_compaction_emits_a_public_event_and_limit_receipt(self):
+        provider = FakeProvider(
+            ProviderResponse(content='{"answer": 56}', model="qwen-main-v1")
+        )
+        toolkit = Toolkit(providers={"qwen-main-v1": provider})
+        compacting_request = base_request()
+        compacting_request["task"]["instructions"].append(
+            compacting_request["task"]["instructions"][0]
+        )
+        events = []
+
+        result = toolkit.invoke(compacting_request, progress_callback=events.append)
+
+        context_event = next(
+            event["public_event"]
+            for event in events
+            if (event.get("public_event") or {}).get("kind")
+            == "context.compaction.completed"
+        )
+        self.assertEqual("已自动压缩调用前上下文。", context_event["summary_zh"])
+        self.assertTrue(context_event["payload"]["applied"])
+        self.assertFalse(context_event["payload"]["lossy"])
+        self.assertEqual(1, context_event["payload"]["duplicates_removed"])
+        self.assertGreater(
+            context_event["payload"]["estimated_tokens_before"],
+            context_event["payload"]["estimated_tokens_after"],
+        )
+        self.assertEqual(
+            262144,
+            context_event["payload"]["context_window_tokens"],
+        )
+        self.assertEqual(262144, result["backend"]["context_window_tokens"])
 
     def test_success_returns_result_side_checks_and_no_reasoning(self):
         provider = FakeProvider(

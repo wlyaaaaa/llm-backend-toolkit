@@ -46,6 +46,8 @@ _USAGE_NUMBER_FIELDS = frozenset(
         "elapsed_seconds",
         "tps",
         "tokens_per_second",
+        "current_context_tokens",
+        "context_window_tokens",
     }
 )
 _USAGE_TEXT_FIELDS = frozenset({"tps_source", "tokens_per_second_source"})
@@ -382,13 +384,38 @@ def _public_payload(kind: str, payload: Any) -> dict[str, Any]:
         )
     if kind == "workspace.change.observed":
         return _project_workspace_change_payload(payload)
+    if kind == "context.compaction.completed":
+        return _project_flat_payload(
+            payload,
+            text_fields=frozenset({"mode"}),
+            number_fields=frozenset(
+                {
+                    "duplicates_removed",
+                    "estimated_tokens_before",
+                    "estimated_tokens_after",
+                    "target_tokens",
+                    "context_window_tokens",
+                }
+            ),
+            bool_fields=frozenset({"applied", "lossy"}),
+        )
     if kind.startswith("agent."):
         return _project_flat_payload(
             payload,
             text_fields=frozenset(
                 {"status", "item_type", "error_category", "limit", "level"}
             ),
-            number_fields=frozenset({"steps", "tool_calls", "events_seen"}),
+            id_fields=frozenset({"error_code"}),
+            number_fields=frozenset(
+                {
+                    "steps",
+                    "tool_calls",
+                    "events_seen",
+                    "current_tokens",
+                    "context_window_tokens",
+                    "compaction_count",
+                }
+            ),
         )
     if kind in _EVENT_PAYLOAD_FIELDS:
         return _project_flat_payload(

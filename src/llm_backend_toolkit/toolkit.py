@@ -224,6 +224,39 @@ class Toolkit:
             result["backend"] = self._backend_receipt(resolved)
             return result
 
+        if compacted.receipt.get("applied") is True:
+            context_payload = {
+                "mode": compacted.receipt.get("mode"),
+                "applied": True,
+                "lossy": bool(compacted.receipt.get("lossy")),
+                "duplicates_removed": int(
+                    compacted.receipt.get("duplicates_removed") or 0
+                ),
+                "estimated_tokens_before": int(
+                    compacted.receipt.get("estimated_tokens_before") or 0
+                ),
+                "estimated_tokens_after": int(
+                    compacted.receipt.get("estimated_tokens_after") or 0
+                ),
+                "target_tokens": int(
+                    compacted.receipt.get("target_tokens") or 0
+                ),
+            }
+            context_window_tokens = resolved.config.get("context_window_tokens")
+            if type(context_window_tokens) is int:
+                context_payload["context_window_tokens"] = context_window_tokens
+            self._emit_progress(
+                progress_callback,
+                {
+                    "phase": "preparing",
+                    "public_event": {
+                        "kind": "context.compaction.completed",
+                        "summary_zh": "已自动压缩调用前上下文。",
+                        "payload": context_payload,
+                    },
+                },
+            )
+
         execution = request.get("execution") or {}
         execution_mode = str(execution.get("mode") or "direct")
         if execution_mode not in {"direct", "agent"}:
@@ -575,6 +608,13 @@ class Toolkit:
             value = raw_usage.get(source)
             if type(value) is int and value >= 0:
                 normalized[target] = value
+        for field_name in (
+            "current_context_tokens",
+            "context_window_tokens",
+        ):
+            value = raw_usage.get(field_name)
+            if type(value) is int and value >= 0:
+                normalized[field_name] = value
         if "prompt_tokens" in normalized and "completion_tokens" in normalized:
             normalized["total_tokens"] = (
                 normalized["prompt_tokens"] + normalized["completion_tokens"]
@@ -615,7 +655,7 @@ class Toolkit:
 
     @staticmethod
     def _backend_receipt(resolved: ResolvedBackend) -> dict[str, Any]:
-        return {
+        receipt = {
             "requested": resolved.requested,
             "resolved": resolved.backend_id,
             "model": resolved.config.get("model"),
@@ -623,6 +663,10 @@ class Toolkit:
             "default_applied": resolved.default_applied,
             "alias_applied": resolved.alias_applied,
         }
+        context_window_tokens = resolved.config.get("context_window_tokens")
+        if type(context_window_tokens) is int:
+            receipt["context_window_tokens"] = context_window_tokens
+        return receipt
 
     @staticmethod
     def _delegation_receipt(context: dict[str, Any], sources: list[dict[str, Any]]) -> dict[str, Any]:

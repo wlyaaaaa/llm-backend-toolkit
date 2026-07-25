@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -23,10 +24,22 @@ def _ps_quote(value: str | Path) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def _pwsh_encoded_command(command: str) -> list[str]:
+    encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
+    return [
+        "pwsh",
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        encoded,
+    ]
+
+
 def _run_for_json(command: str) -> dict[str, object]:
+    wrapped_command = f"$result = {command}\n$result | ConvertTo-Json -Compress\n"
     completed = subprocess.run(
-        ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "-"],
-        input=f"$result = {command}\n$result | ConvertTo-Json -Compress\n",
+        _pwsh_encoded_command(wrapped_command),
         check=True,
         capture_output=True,
         text=True,
@@ -42,8 +55,7 @@ def _run_for_json(command: str) -> dict[str, object]:
 
 def _run_powershell(command: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "-"],
-        input=f"{command}\n",
+        _pwsh_encoded_command(command),
         check=False,
         capture_output=True,
         text=True,

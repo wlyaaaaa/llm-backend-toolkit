@@ -2,15 +2,19 @@
 
 ## 最终产品效果
 
-模型调用观察台是 `llm-backend-toolkit` 的本机只读可观察面。用户只需打开一次桌面 GUI；此后 AI 通过受管 skill 发起的任务会自动出现并实时更新，不需要手动刷新，也不会由每次调用反复抢焦点。
+模型调用观察台是 `llm-backend-toolkit` 的本机只读可观察面。用户只需从桌面或开始菜单打开一次白底纯绿 GUI；此后 AI 通过受管 skill 发起的任务会自动出现并实时更新，不需要手动刷新，也不会由每次调用反复抢焦点。
 
 界面由三部分组成：
 
 1. 调用记录与历史：显示并发任务、独立对话和 continuation 轮次，支持筛选、搜索和分页加载旧历史。
-2. 中文工作时间线：显示排队、输入整理、GPU/模型连接、推理活动、公开输出、工具与文件编辑、OCR/ASR、校验和交付事件。
-3. 详情：展示公开草稿、最终输出和校验回执，以及模型、推理等级、Token、TPS、耗时、GPU 与交付状态。
+2. 中文工作时间线：显示排队、输入整理、GPU/模型连接、推理活动、分段公开输出、安全工具与文件编辑活动、OCR/ASR、校验和交付事件。
+3. 详情：展示流式公开草稿、最终输出、校验回执、经安全复验的本机完整路径和调用方 opt-in 的有界 diff，以及模型、推理等级、累计 Token、当前上下文、Token/s、耗时、GPU 与交付状态。
 
 所有历史以耐久 job artifact 为准；读取 GUI 不增加轮询计数，也不等于 Codex 已取回结果。只有结果读取入口会记录 `handoff.collected`。
+
+公开草稿只消费 AICLI 投影出的安全 `agent_message`：每个 `output.delta` 都会作为单个增量进入 progress recorder，并借助 SSE refresh 无刷新分段显示。`output.completed` 仍作为最终输出和时间线事件保留，但携带有界完整公开文本 replacement；recorder 用它替换草稿而不是再次追加，因此已有 delta 不会重复，没有 delta 时也能直接建立完整 preview。这些公开消息不是隐藏 chain-of-thought。
+
+Codex `0.145.x` 存在一个已实测的窄生命周期例外：一条或多条较早公开 `agentMessage` 可能已经发送 delta，却不再发送自己的 completed，随后由一条更晚的 completed final 收口。AICLI 只在版本确为 `0.145.x`、所有未完成项都是较早的公开 `agentMessage`、且之后存在非空 completed final 时兼容；推理、工具、文件项未完成，final 缺失，final 之后才出现未完成消息，或未来 Codex 版本都继续明确失败。这样既保留真实实时消息，也不会把任意协议漂移伪装成成功。
 
 ## 真实性边界
 
@@ -42,16 +46,39 @@
 
 `include` 是调用方对这些精确相对路径“可公开展示”的声明，最多 12 项；不支持绝对路径、`..` 或隐式宽域扫描。实现仍会检查相对路径的每个组件并拒绝 secret-like 名称，同时拒绝二进制、非 UTF-8、超限、含凭据形态，或含任意 POSIX、Windows drive、UNC/双斜线及 Windows NT 绝对路径的正文，并对单文件、总读取量、文件数和 diff 长度设硬上限。任何安全条件无法证明时只保留 count，不宽松公开详情。
 
+为了让本机用户能直接定位文件，agent job 提交时会把已验证 canonical workspace 写入独立的 `.observer-local.json`。该文件只有 schema、job ID 和 canonical workspace，request spool 清理后仍保留；loopback job detail 会重新验证 workspace 身份和相对路径 containment，再动态添加可显示、复制的完整路径。元数据损坏、超限、身份不匹配、reparse 或越界时失败关闭。完整路径不会进入事件、状态、进度、结果、`job --result` 或 diff header。
+
 严禁进入事件投影的内容包括 prompt、隐藏 reasoning/thinking 正文、原始命令/argv、工具输入输出、环境变量、stdout/stderr、OCR/ASR 识别正文、绝对私密路径、PID 和 Broker lease token。
 
-Token 指标必须说明依据：
+Token/s 指标必须说明依据：
 
-- `eval_duration`：Ollama 最终 usage，精确；
-- `wall_clock_estimate`：AICLI agent 返回的安全真实完成 token 数除以整段执行墙钟时间，近似，不冒充模型 eval TPS；
-- `public_content_estimate`：运行中仅依据公开输出估算，近似；
+- `eval_duration`：Ollama 最终 `completion_tokens / eval_duration_ns`，精确表示模型评估时段的输出 token/秒，不把提示处理、排队或工具时间计入分母；
+- `wall_clock_estimate`：AICLI agent 返回的安全真实输出 token 数除以从 runner 启动到完成的整段执行墙钟，近似，不冒充模型 eval TPS；
+- `public_content_estimate`：运行中公开输出的估算 token 数除以该公开输出观察窗的墙钟时间，近似；
 - `unavailable` / `not_applicable`：无法可靠计算，OCR/ASR 不冒充 token TPS。
 
-Token 卡片的主值是总计，悬停说明会分列输入、输出和缓存；TPS 一律带“输出 token/秒”单位，并在正文中区分模型评估时段精确值、整段墙钟估算或公开内容估算。
+Token 卡片的主值是总计，悬停说明会分列输入、输出和缓存；Token/s 一律带“输出 token/秒”单位，并在卡片或说明中明确标出“模型评估时段精确值”“整段执行墙钟估算”或“公开输出观察窗估算”。
+
+“当前上下文”与累计 Token 严格分离：
+
+- 当前已用量只接受 Codex app-server 同一条 `thread/tokenUsage/updated` 运行时通知中的 `tokenUsage.last.totalTokens`；
+- 总上限只接受同一条通知同时提供的 `tokenUsage.modelContextWindow`；两者必须是完整非负/正整数配对，不能跨事件拼接；
+- GUI 主值采用“已用 202k / 共 258k”式紧凑显示，展开信息保留精确整数和占用比例；
+- 首个完整运行时配对尚未到达时固定显示“等待 Codex 运行时实测”；如果运行结束仍缺少配对，或字段、通知、生命周期不兼容，AICLI 必须返回明确协议错误，绝不使用 prompt token、累计 input token、`context_receipt.estimated_tokens_after`、backend registry 配置上限或最终结果回执伪装；
+- 高频 usage 通知只更新卡片，不灌满工作时间线；Codex app-server 实际完成 `contextCompaction` 时才写入“Codex 已自动压缩上下文”节点。
+
+Toolkit 自己的 `context.compaction.completed` 是模型调用前的确定性输入压缩，界面标为“已压缩调用输入”；它与 Codex agent 会话的原生自动压缩是两条独立事实链。
+
+## 2026-07-25 实机页面验收
+
+最终真实 job `d50a2cbd068b2fa0c4537e40` 在已打开的同一 Edge app 页面完成，全程没有手动刷新：
+
+- 历史数量从 21 自动增至 22，任务从“执行中”切换为“已完成”；时间线依次从 8、18、37 增至完成时的 63 个节点，Codex 取回结果后再增加 1 个 `handoff.collected` 节点。
+- 13:11:21 起出现中文公开进度；随后工具开始、失败、恢复成功、文件编辑、只读复核和最终公开消息均按发生顺序进入时间线。失败事件没有被吞掉，后续成功也没有覆盖历史。
+- 最终显示总计 9,399 token，其中输入 9,212、输出 187；当前上下文展开值为 9,399 / 258,400，二者都明确标记“Codex 运行时实测”；TPS 为约 4.1 输出 token/秒，口径为 45.884 秒整段执行墙钟估算。
+- 回执为 `codex-app-server`、`distinct-non-output-thread-item-v2`、11 个 action step、4 次工具调用、50 个 app-server 事件和 46 个安全 machine event。
+- `live-final-acceptance.md` 的 `+9/-1` diff 与经验证的本机完整路径均在页面可见、可复制；绝对值不写入公开文档或事件。扫描另观察到 1 个不在 opt-in 公开名单内的元数据变化，只保留计数；界面明确区分“未在本次公开名单”与安全/大小限制，不虚构其路径。
+- 最终中文结果完整列出编辑文件、状态变化、新增内容与复核结论；隐藏 reasoning 正文始终没有进入公开事件。
 
 ## 五条运行链
 
@@ -85,3 +112,5 @@ Toolkit 调用 OCR/ASR 时会把开始/完成阶段写入同一个模型 job。�
 `Start-LlmBackendObserver.ps1` 先确保 loopback 服务存活，再以 Edge `--app=<url>` 打开正式窗口。它用同用户互斥锁和精确窗口标题去重，不激活已有窗口。`Install-LlmBackendObserverShortcut.ps1` 使用 Windows Known Folder 同时创建当前用户桌面与开始菜单 Programs 快捷方式，不假设 OneDrive 或用户名路径，并绑定项目自带的白绿 ICO。安装、升级和 `-Remove` 都会验证 PowerShell 目标、完整 launcher/toolkit 参数、工作目录与描述；只有能证明属于本工具的链接才会修改或删除，旧 Edge 图标可安全迁移。首次全体预检会避免开始时已经存在的同名冲突导致半更新；每个目标在变更或确认 `unchanged` / `absent` 前还会按文件身份和链接契约最终复验。两个独立 Known Folder 不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，已经完成的本工具链接更新或删除可能保留，可在处理冲突后幂等重跑恢复。
 
 个人 skill wrapper 在模型 `submit` / `probe` 之前调用启动器，因此可见 job 会在 worker 启动前写入；GUI 失败时不得静默开始不可观察的模型调用。
+
+正式 wrapper 同时把 `LLM_TOOLKIT_AICLI_ENTRY` 固定为受管的当前源码入口；入口不存在时先失败，不搜索或回落到旧安装态。当前 Codex app-server 最低已验证基线是 `codex-cli 0.145.0`，`0.146.0-alpha.3.1` 曾通过兼容验收；未来版本默认尝试，但必要字段、通知、thread/turn、item 生命周期或清理协议漂移必须明确失败。官方与本地 Ollama Codex machine run 使用 Codex 原生 workspace sandbox；第三方 Codex 及其他适用引擎才使用 Windows 外层沙箱。

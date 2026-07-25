@@ -10,6 +10,8 @@
 
 协议失效安全默认保持：省略 backend 时解析到 `local-default`。任务质量采用相对默认：跨文件、工具循环、长对话降噪和严格结构任务优先显式选择 Spark；隐含现实目标/常识因果与额度回退优先本地。
 
+当前正式 skill 把 `LLM_TOOLKIT_AICLI_ENTRY` 固定为受管的当前源码入口，入口缺失时明确失败，不会静默调用旧安装态。Codex app-server 以 `codex-cli 0.145.0` 为当前最低已验证基线，`0.146.0-alpha.3.1` 曾通过兼容验收；后续版本默认尝试，但字段、通知、生命周期或清理协议漂移必须明确失败。
+
 ## 裁决
 
 Spark 值得作为 PersonalOS 与 `.agents` 的高速中档候选，但不是 Qwen 的全面替代：
@@ -68,7 +70,7 @@ Spark 额度剩余是外部动态状态，不能推断。quota、rate-limit 或 
 
 - 原 AICLI `codex-official` machine run 把桌面 `codex.exe` 当成机器入口，随后报 `Codex machine runtime could not locate codex.js`。
 - 修复为交互入口继续使用桌面 Codex，machine run 使用 npm Codex；一次性 `CODEX_HOME` 只复制 `auth.json`。
-- 第一版云端 machine run 仍套用断网外层沙箱，55.183 秒后出现 `stream disconnected ... /codex/responses`；修复为官方云端使用 Codex 原生 read-only/workspace-write 沙箱，本地/第三方仍用断网外层沙箱。
+- 第一版云端 machine run 仍套用断网外层沙箱，55.183 秒后出现 `stream disconnected ... /codex/responses`；当时先修复为官方云端使用 Codex 原生 read-only/workspace-write 沙箱，本地/第三方仍用断网外层沙箱。现行合同又将本地 Ollama Codex 迁到同一原生 workspace sandbox，使 app-server 可访问 LocalGpuBroker；第三方 Codex 及其他适用引擎才继续使用断网外层沙箱。
 - Qwen 工程题 20 步预算 exit 75；增加到 30 步后完成，说明本地模型工具任务应给更宽步骤预算。
 - 一次 Spark 结构化测试因夹具 JSON Schema 的 `const` 缺少显式 `type` 返回 HTTP 400；这是夹具错误，不计入模型能力。
 
@@ -97,4 +99,4 @@ Spark 额度剩余是外部动态状态，不能推断。quota、rate-limit 或 
 
 ## 复验门禁
 
-只有 Spark 模型 ID、AICLI/Codex CLI 主协议、沙箱合同、Toolkit route、Qwen digest、PersonalOS 语义合同或异常行为发生实质变化时才重跑完整对照。日常使用只读取 registry 和回执；不为证明可用反复消耗 Spark 额度。
+只有 Spark 模型 ID、AICLI/Codex CLI 主协议、沙箱合同、Toolkit route、Qwen digest、PersonalOS 语义合同或异常行为发生实质变化时才重跑完整对照。日常使用只读取 registry 和回执；不为证明可用反复消耗 Spark 额度。Codex CLI 更新本身先走运行时兼容门，兼容则继续，不兼容则明确失败；不得以旧安装态或静默降级掩盖协议漂移。

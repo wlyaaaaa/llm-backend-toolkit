@@ -111,6 +111,16 @@ class BackendRegistry:
             if not model:
                 raise ValueError(f"Backend {backend_id} requires a model")
             normalized = dict(raw)
+            if "context_window_tokens" in raw:
+                context_window_tokens = raw["context_window_tokens"]
+                if (
+                    type(context_window_tokens) is not int
+                    or not 1024 <= context_window_tokens <= 1_048_576
+                ):
+                    raise ValueError(
+                        f"Backend {backend_id} context_window_tokens must be "
+                        "an integer between 1024 and 1048576"
+                    )
             if "required_reasoning_mode" in raw:
                 required_reasoning_mode = raw["required_reasoning_mode"]
                 if type(required_reasoning_mode) is not str or required_reasoning_mode not in {
@@ -193,6 +203,7 @@ class BackendRegistry:
                     "adapter": config.get("adapter"),
                     "model": config.get("model"),
                     "supports_vision": bool(config.get("supports_vision")),
+                    "context_window_tokens": config.get("context_window_tokens"),
                     "data_destination": config.get("data_destination"),
                     "required_reasoning_mode": config.get("required_reasoning_mode"),
                     "agent_routes": sorted((config.get("agent_routes") or {}).keys()),

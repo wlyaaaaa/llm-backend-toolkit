@@ -6,6 +6,7 @@ import math
 import mimetypes
 import os
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -19,8 +20,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from .jobs import default_state_root
+from .jobs import OBSERVER_LOCAL_SCHEMA, default_state_root
 from .observability import file_lock, read_events, utc_now
+from .workspace_observer import (
+    is_safe_workspace_relative_path,
+    revalidate_workspace_root,
+    validate_workspace_root,
+)
 
 
 OBSERVER_HEALTH_SCHEMA = "llm-backend-toolkit.observer-health.v1"
@@ -28,6 +34,8 @@ OBSERVER_LIST_SCHEMA = "llm-backend-toolkit.observer-runs.v1"
 OBSERVER_RUNTIME_SCHEMA = "llm-backend-toolkit.observer-runtime.v1"
 OBSERVER_MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 OBSERVER_MAX_RESULT_BYTES = 2 * 1024 * 1024
+OBSERVER_MAX_REQUEST_BYTES = 2 * 1024 * 1024
+OBSERVER_MAX_LOCAL_METADATA_BYTES = 4 * 1024
 _DISPLAY_FIELDS = frozenset(
     {
         "task_label",
@@ -75,6 +83,8 @@ _USAGE_NUMBER_FIELDS = frozenset(
         "elapsed_seconds",
         "tps",
         "tokens_per_second",
+        "current_context_tokens",
+        "context_window_tokens",
     }
 )
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -483,6 +493,7 @@ def _project_result(result: dict[str, Any]) -> dict[str, Any]:
                 bool_fields=frozenset(
                     {"cloud", "default_applied", "alias_applied"}
                 ),
+                number_fields=frozenset({"context_window_tokens"}),
             )
             if value:
                 projected[key] = value
@@ -623,6 +634,8 @@ def _project_progress(progress: dict[str, Any]) -> dict[str, Any]:
                 "thinking_chars",
                 "token_events",
                 "estimated_output_tokens",
+                "current_context_tokens",
+                "context_window_tokens",
             }
         ),
         bool_fields=frozenset({"thinking_active"}),
@@ -638,6 +651,129 @@ def _project_progress(progress: dict[str, Any]) -> dict[str, Any]:
 def _state_root_id(root: Path | str) -> str:
     canonical = os.path.normcase(os.fspath(Path(root).expanduser().resolve()))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
+
+
+def _validated_local_workspace(
+    workspace: object,
+    *,
+    require_canonical_spelling: bool,
+) -> Path | None:
+    if not isinstance(workspace, str):
+        return None
+    try:
+        validated = validate_workspace_root(workspace)
+        canonical = revalidate_workspace_root(validated)
+        if require_canonical_spelling and os.path.normcase(
+            os.path.abspath(workspace)
+        ) != os.path.normcase(os.path.abspath(os.fspath(canonical))):
+            return None
+        return canonical
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _local_workspace_root(job_dir: Path) -> Path | None:
+    local_path = job_dir / ".observer-local.json"
+    if os.path.lexists(local_path):
+        try:
+            local_stat = os.lstat(local_path)
+        except OSError:
+            return None
+        if (
+            not stat.S_ISREG(local_stat.st_mode)
+            or stat.S_ISLNK(local_stat.st_mode)
+            or int(getattr(local_stat, "st_file_attributes", 0) or 0)
+            & int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+        ):
+            return None
+        local, _local_bytes, local_bounded = _read_bounded_json(
+            local_path,
+            max_bytes=OBSERVER_MAX_LOCAL_METADATA_BYTES,
+        )
+        if (
+            local_bounded
+            or not isinstance(local, dict)
+            or set(local) != {"schema", "job_id", "canonical_workspace"}
+            or local.get("schema") != OBSERVER_LOCAL_SCHEMA
+            or local.get("job_id") != job_dir.name
+        ):
+            return None
+        return _validated_local_workspace(
+            local.get("canonical_workspace"),
+            require_canonical_spelling=True,
+        )
+
+    request, _request_bytes, request_bounded = _read_bounded_json(
+        job_dir / "request.json",
+        max_bytes=OBSERVER_MAX_REQUEST_BYTES,
+    )
+    if request_bounded or not isinstance(request, dict):
+        return None
+    execution = request.get("execution")
+    if not isinstance(execution, dict) or execution.get("mode") != "agent":
+        return None
+    return _validated_local_workspace(
+        execution.get("workspace"),
+        require_canonical_spelling=False,
+    )
+
+
+def _local_absolute_path(
+    workspace_root: Path,
+    relative_path: object,
+) -> str | None:
+    if not is_safe_workspace_relative_path(relative_path):
+        return None
+    canonical_root = os.path.abspath(os.fspath(workspace_root))
+    candidate = os.path.abspath(
+        os.fspath(workspace_root.joinpath(*str(relative_path).split("/")))
+    )
+    try:
+        common = os.path.commonpath(
+            (os.path.normcase(canonical_root), os.path.normcase(candidate))
+        )
+    except (OSError, ValueError):
+        return None
+    if common != os.path.normcase(canonical_root):
+        return None
+    return candidate
+
+
+def _with_local_workspace_paths(
+    events: list[dict[str, Any]],
+    workspace_root: Path | None,
+) -> list[dict[str, Any]]:
+    if workspace_root is None:
+        return events
+    projected_events: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("kind") != "workspace.change.observed":
+            projected_events.append(event)
+            continue
+        projected_event = dict(event)
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            projected_events.append(projected_event)
+            continue
+        projected_payload = dict(payload)
+        projected_changes: list[dict[str, Any]] = []
+        changes = payload.get("changes")
+        if isinstance(changes, (list, tuple)):
+            for change in changes:
+                if not isinstance(change, dict):
+                    continue
+                projected_change = dict(change)
+                absolute_path = _local_absolute_path(
+                    workspace_root,
+                    change.get("relative_path"),
+                )
+                if absolute_path is not None:
+                    projected_change["absolute_path"] = absolute_path
+                projected_changes.append(projected_change)
+        projected_payload["changes"] = projected_changes
+        projected_event["payload"] = projected_payload
+        projected_events.append(projected_event)
+    return projected_events
 
 
 def _model_name(result: dict[str, Any], state: dict[str, Any]) -> str:
@@ -698,6 +834,67 @@ def _performance(
         "tokens_per_second": tokens_per_second,
         "tokens_per_second_source": tokens_per_second_source,
         "elapsed_seconds": elapsed_seconds,
+    }
+
+
+def _context_snapshot(
+    result: dict[str, Any],
+    events: list[dict[str, Any]] | None = None,
+    progress: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    current_tokens: int | None = None
+    usage = result.get("usage")
+    if isinstance(usage, dict):
+        value = usage.get("current_context_tokens")
+        if type(value) is int and value >= 0:
+            current_tokens = value
+    if current_tokens is None and isinstance(progress, dict):
+        metrics = progress.get("metrics")
+        if isinstance(metrics, dict):
+            value = metrics.get("current_context_tokens")
+            if type(value) is int and value >= 0:
+                current_tokens = value
+    latest_context_event: dict[str, Any] | None = None
+    for event in reversed(events or []):
+        if event.get("kind") == "agent.context.usage.updated":
+            latest_context_event = event
+            break
+    if current_tokens is None and isinstance(latest_context_event, dict):
+        payload = latest_context_event.get("payload")
+        if isinstance(payload, dict):
+            value = payload.get("current_tokens")
+            if type(value) is int and value >= 0:
+                current_tokens = value
+
+    window_tokens: int | None = None
+    window_source = "unavailable"
+    if isinstance(usage, dict):
+        value = usage.get("context_window_tokens")
+        if type(value) is int and value > 0:
+            window_tokens = value
+            window_source = "codex_runtime"
+    if window_tokens is None and isinstance(progress, dict):
+        metrics = progress.get("metrics")
+        if isinstance(metrics, dict):
+            value = metrics.get("context_window_tokens")
+            if type(value) is int and value > 0:
+                window_tokens = value
+                window_source = "codex_runtime"
+    if window_tokens is None and isinstance(latest_context_event, dict):
+        payload = latest_context_event.get("payload")
+        if isinstance(payload, dict):
+            value = payload.get("context_window_tokens")
+            if type(value) is int and value > 0:
+                window_tokens = value
+                window_source = "codex_runtime"
+
+    return {
+        "current_tokens": current_tokens,
+        "current_source": (
+            "codex_runtime" if current_tokens is not None else "unavailable"
+        ),
+        "context_window_tokens": window_tokens,
+        "window_source": window_source,
     }
 
 
@@ -910,8 +1107,16 @@ class ObserverStore:
             result = _project_result(result)
         else:
             result = {}
-        events = read_events(directory)
+        events = _with_local_workspace_paths(
+            read_events(directory),
+            _local_workspace_root(directory),
+        )
         elapsed = _elapsed_seconds(state, progress)
+        context = _context_snapshot(
+            result,
+            events,
+            progress,
+        )
         return {
             "schema": "llm-backend-toolkit.observer-run.v1",
             "job_id": job_id,
@@ -930,6 +1135,7 @@ class ObserverStore:
             },
             "progress": _project_progress(progress),
             "performance": _performance(result, progress, elapsed),
+            "context": context,
             "events": events,
             "handoff": self._handoff(events),
             "result": result,

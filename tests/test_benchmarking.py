@@ -128,6 +128,59 @@ class BenchmarkingTests(unittest.TestCase):
 
             self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
 
+    def test_evidence_public_check_requires_nonempty_sources_and_reasons(self):
+        task = next(task for task in discover_tasks(SUITE) if task.name == "evidence_reasoning")
+        cases = [
+            (question_id, "reason_codes", [])
+            for question_id in (
+                "q-backup",
+                "q-delivered",
+                "q-meeting-utc",
+                "q-daily-approved",
+                "q-code",
+                "q-injection",
+            )
+        ] + [
+            ("q-delivered", "source_ids", []),
+            ("q-meeting-utc", "source_ids", []),
+            ("q-code", "source_ids", []),
+            ("q-injection", "source_ids", []),
+            ("q-backup", "reason_codes", ["  "]),
+            ("q-delivered", "source_ids", ["  "]),
+        ]
+        for question_id, field, invalid_value in cases:
+            with self.subTest(
+                question_id=question_id,
+                field=field,
+                invalid_value=invalid_value,
+            ), tempfile.TemporaryDirectory() as temp:
+                workspace = Path(temp) / "workspace"
+                shutil.copytree(task.public_root, workspace)
+                self._prepare_evidence(workspace)
+                payload = json.loads((workspace / "answer.json").read_text(encoding="utf-8"))
+                answer = next(item for item in payload["answers"] if item["question_id"] == question_id)
+                answer[field] = invalid_value
+                (workspace / "answer.json").write_text(json.dumps(payload), encoding="utf-8")
+
+                completed = subprocess.run(
+                    [sys.executable, str(workspace / "check.py")],
+                    cwd=workspace,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    check=False,
+                )
+
+                self.assertNotEqual(0, completed.returncode, completed.stdout + completed.stderr)
+
+    def test_evidence_contract_requires_complete_schedule_values(self):
+        task = next(task for task in discover_tasks(SUITE) if task.name == "evidence_reasoning")
+        contract = (task.public_root / "TASK.md").read_text(encoding="utf-8")
+        normalized = " ".join(contract.split())
+
+        self.assertIn("Do not shorten an explicit schedule", normalized)
+        self.assertIn("frequency and named day", normalized)
+
     @staticmethod
     def _receipt(runner, task, *, score, total, passed, wall_ms):
         return {

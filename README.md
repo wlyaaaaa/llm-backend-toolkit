@@ -16,7 +16,7 @@
 - 异步 Smart Job：提交立即返回，顶级模型无需被长时间命令阻塞。
 - 欠费、额度、限流、权限、GPU 占用等错误只返回裁决选项，不自动调用另一个模型。
 - 任何云端调用都要求显式 `privacy.cloud_allowed=true`，包括 task 文本、source 片段与媒体。
-- agent mode 通过 aicli 调用原生 CLI：本地/第三方 Profile 使用网络关闭的 Windows 外层沙箱，官方 Codex Profile 使用原生 Codex 沙箱和一次性认证目录。`data_factory` 从 registry 解析精确 Profile 与模型，不做运行时猜测或 fallback。
+- agent mode 通过 aicli 调用原生 CLI：官方与本地 Ollama Codex machine run 使用 Codex 原生 `read-only` / `workspace-write` 沙箱；第三方 Codex 及其他适用引擎才使用网络关闭的 Windows 外层沙箱。正式 personal skill 会把 `LLM_TOOLKIT_AICLI_ENTRY` 钉到其受管的当前源码入口；该入口缺失时明确失败，不会静默改用可能过期的安装态。`data_factory` 从 registry 解析精确 Profile 与模型，不做运行时猜测或 fallback。
 
 ## 安装
 
@@ -90,9 +90,13 @@ python -m venv .venv
 
 - 多个模型调用和多轮 continuation，对话历史持久保留并可分页回看；
 - 中文工作时间线、AICLI 工具/文件编辑活动、OCR/ASR 阶段与公开输出；
+- AICLI 安全公开消息按增量通过 SSE 无刷新分段显示；`output.completed` 仍保留最终输出与时间线事件，但用完整公开文本 replacement 对齐草稿，不会把同一份完成文本再次追加；
 - 实际模型、执行方式、推理模式或 reasoning effort；
-- Token、耗时和 TPS；Ollama 完成后以 `completion_tokens / eval_duration_ns` 显示精确 TPS，AICLI agent 的安全真实 usage 只与整段墙钟耗时计算并明确标为估算，运行中公开输出同样只显示估算；
+- Token、耗时和 Token/s；Ollama 完成后以 `completion_tokens / eval_duration_ns` 显示模型评估时段的精确输出速度，AICLI agent 的安全真实输出 token 只除以从启动到完成的整段执行墙钟并明确标为估算，运行中公开输出同样只显示带时段说明的估算；
+- Codex agent 同一条运行时通知实际同时上报当前上下文占用与上限后，显示例如“已用 202k / 共 258k”并实时更新；在完整实测到达前显示“等待 Codex 运行时实测”，不会显示 registry 配置值或结果回执替代品；自动压缩完成后同步回落并写入时间线；
 - 最终结果、确定性校验和 Codex 是否已取回结果。
+
+2026-07-25 的最终真实页面验收中，同一个未刷新的窗口自动接收新 job，时间线从 8 个节点增长到 63 个节点，分段显示中文公开进度、工具失败与恢复、文件编辑、完整路径和 diff；最终卡片显示 9,399 / 258,400 的 Codex 运行时实测上下文与约 4.1 输出 token/秒的整段墙钟估算。完整证据见 [模型调用观察台设计](docs/model-observer.md#2026-07-25-实机页面验收)。
 
 启动本机服务：
 
@@ -109,11 +113,13 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 
 启动器只创建一个 loopback 服务和一个 Edge app 窗口。窗口打开后通过 SSE 自动接收后续调用，不需要手动刷新；重复调用不会抢焦点。安装器会同时创建当前用户桌面和开始菜单中的“模型调用观察台”快捷方式，并使用项目自带的白绿图标；它只升级或删除能由启动目标、完整参数、工作目录和描述共同证明属于本工具的链接，同名第三方文件会冲突失败而不会被覆盖。首次全体预检会拦截开始时已经存在的冲突；每个目标在最终变更或状态确认前还会复验。桌面和开始菜单是两个独立 Known Folder，不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，已经完成的本工具链接操作可能保留，可在处理冲突后幂等重跑。需要移除这两个精确入口时使用 `-Remove`。`Show-LlmBackendDashboard.ps1` 继续作为 PowerShell 降级视图。
 
-观察台显示的是经过净化的可验证工作过程，不是隐藏 chain-of-thought。prompt、隐藏 thinking/reasoning 正文、原始命令和参数、工具输入输出、环境变量、OCR/ASR 正文及绝对私密路径都不会进入公开事件日志。AICLI `0.3.2+` 可实时提供仅含活动类型、状态和公开 agent message 的安全事件；旧版会诚实降级为生命周期可见性，不会重跑模型任务。
+观察台显示的是经过净化的可验证工作过程，不是隐藏 chain-of-thought。prompt、隐藏 thinking/reasoning 正文、原始命令和参数、工具输入输出、环境变量、OCR/ASR 正文及绝对私密路径都不会进入公开事件日志。正式 skill 只使用上述 AICLI 源码入口，不会因旧安装态缺少事件能力而静默降级。其 Codex app-server 合同以 `codex-cli 0.145.0` 为当前已验证最低基线；`0.145.x` 较早公开 `agentMessage` 缺少 completed 的兼容只在后续存在非空 completed final 且没有其他未完成项时成立。`0.146.0-alpha.3.1` 曾通过同一兼容门，未来更新默认尝试，但必要字段、通知、生命周期或清理协议漂移会返回明确错误。
+
+“Token”卡片是本次运行累计输入、输出与缓存 usage；“当前上下文”是另一项指标，只接受 Codex app-server 在同一条 `thread/tokenUsage/updated` 运行时通知中同时提供的 `last.totalTokens` 与 `modelContextWindow`。首个完整实测尚未到达时固定显示“等待 Codex 运行时实测”；如果运行结束仍缺少完整配对，或字段、通知、生命周期不兼容，AICLI 会返回明确协议错误，不会用 prompt token、累计输入、Toolkit 压缩估算、backend registry 上限或最终结果回执补成估算值。时间线中的“已压缩调用输入”是 Toolkit 发起模型调用前的确定性输入整理；“Codex 已自动压缩上下文”才是原生 agent 会话实际完成的 context compaction。
 
 请求可选填 `observability.public_label` 作为持久历史中的非敏感短标题；观察台不会从私密任务正文自动生成标题。技能调用会在有合适公开名称时填写此字段。
 
-`workspace-write` 默认只持久化运行时窗内观察到的变更文件数，不读取或展示文件正文。只有调用方通过 `observability.file_changes={mode:"diff",include:[...]}` 明确声明精确相对路径可在本机历史中公开时，观察台才保存这些普通小文本文件的有界 `+/-` 与 unified diff；任何二进制、疑似秘密、绝对路径、reparse、大小或总量门禁失败都会退回 count-only。
+`workspace-write` 默认只持久化运行时窗内观察到的变更文件数，不读取或展示文件正文。只有调用方通过 `observability.file_changes={mode:"diff",include:[...]}` 明确声明精确相对路径可在本机历史中公开时，观察台才保存这些普通小文本文件的有界 `+/-` 与 unified diff；任何二进制、疑似秘密、绝对路径、reparse、大小或总量门禁失败都会退回 count-only。loopback GUI 会从独立的本机观察元数据安全合成并支持复制完整路径，但事件、状态、结果、公开进度和 diff header 始终只保留相对路径。
 
 完整产品与安全合同见 [模型调用观察台设计](docs/model-observer.md)。
 
@@ -124,7 +130,7 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 - `execution.mode=agent`
 - `execution.runner=data_factory`（可省略；从 backend registry 锁定精确 Profile/模型）
 - `execution.policy=workspace-write|read-only`
-- `execution.budget`（当前 `data_factory`/Codex 关闭 multi-agent，并通过版本化公开 JSON 事件投影硬执行预算：step 是不同的 ThreadItem 工作单元，tool-call 包括命令、文件、MCP 与 web 等工具项；意外 collab 会被计数并失败关闭，无法证明同等边界的 runner 也会失败关闭）
+- `execution.budget`（当前 `data_factory`/Codex 关闭 multi-agent，并通过版本化公开 JSON 事件投影硬执行预算：`distinct-non-output-thread-item-v2` 的 step 是不同的推理、计划、工具、压缩等非输出 ThreadItem，公开进度/最终消息只增加事件计数、不挤占行动预算；tool-call 包括命令、文件、MCP 与 web 等工具项；意外 collab 会被计数并失败关闭，无法证明同等边界的 runner 也会失败关闭）
 
 `workspace-write` 必须指向隔离 worktree 或暂存任务目录。canonical raw、唯一事实源和不可恢复数据应留在可写根之外；智能体只产生 derived、checkpoint 和 receipt。可变工作区默认不复用已完成 job；只有调用者提供绑定输入内容 hash 的 `execution.cache_key` 才允许 cache hit。
 
@@ -152,7 +158,7 @@ python scripts/run_general_agent_benchmark.py
 
 默认依次串行运行 Codex CLI、Claude Code、Qwen Code 与 OpenCode，均使用显式本地 `qwen-main-v1`。结果只对记录的 suite fingerprint、模型 digest、CLI 版本、沙箱合同和 Toolkit 提交有效；它比较的是“模型 + harness”的代理表现，不生成永久通用智商分。
 
-2026-07-22 的完整实测、耗时、能力边界和默认建议见 [四 harness 通用代理验收报告](docs/general-agent-benchmark-v1.md)。当前版本的建议是 `data_factory` 继续固定使用 Codex CLI；日常调用不重复跑四 harness。
+2026-07-22 的完整横向实测、耗时、能力边界和默认建议见 [四 harness 通用代理验收报告](docs/general-agent-benchmark-v1.md)。2026-07-25 又用当前 AICLI 源码入口、`codex-app-server` 与 `distinct-non-output-thread-item-v2` 完整复测 Codex 三题，最终 30/30、协议 3/3；数据工厂专项同链路复测 21/21。当前版本的建议仍是 `data_factory` 固定使用 Codex CLI；日常调用不重复跑四 harness。
 
 ## 通过 source 引用减少 Codex 上下文
 

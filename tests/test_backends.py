@@ -19,6 +19,7 @@ def registry_data(*, expected_digest="digest-v1", live_verified=True):
                 "model": "replacement-local-model",
                 "cloud": False,
                 "supports_vision": True,
+                "context_window_tokens": 262144,
                 "agent_routes": {
                     "data_factory": {
                         "runner": "codex-cli",
@@ -143,6 +144,15 @@ class BackendRegistryTests(unittest.TestCase):
         self.assertTrue(default.default_applied)
         self.assertEqual("local-default", legacy.backend_id)
         self.assertEqual("qwen-main-v1", legacy.requested)
+        self.assertEqual(262144, default.config["context_window_tokens"])
+
+    def test_registry_rejects_invalid_context_window_tokens(self):
+        for invalid_value in (True, 0, 1023, 1_048_577, "262144"):
+            with self.subTest(invalid_value=invalid_value):
+                data = registry_data()
+                data["backends"]["local-default"]["context_window_tokens"] = invalid_value
+                with self.assertRaisesRegex(ValueError, "context_window_tokens"):
+                    BackendRegistry.from_dict(data)
 
     def test_external_registry_can_be_loaded_from_a_json_file(self):
         with tempfile.TemporaryDirectory() as temp:

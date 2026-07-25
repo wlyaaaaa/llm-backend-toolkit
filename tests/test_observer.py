@@ -10,17 +10,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from llm_backend_toolkit.jobs import JobStore
+from llm_backend_toolkit.jobs import OBSERVER_LOCAL_SCHEMA, JobStore
 from llm_backend_toolkit.observer import (
+    OBSERVER_MAX_LOCAL_METADATA_BYTES,
     OBSERVER_MAX_OUTPUT_BYTES,
     ObserverStore,
     _runtime_health,
     _state_root_id,
     _stream_updates,
+    _with_local_workspace_paths,
     create_observer_server,
     observer_runtime_path,
 )
-from llm_backend_toolkit.observability import EVENT_SCHEMA, read_events
+from llm_backend_toolkit.observability import EVENT_SCHEMA, append_event, read_events
 
 
 def request() -> dict:
@@ -36,6 +38,32 @@ def request() -> dict:
 
 
 class VisibleRunEventTests(unittest.TestCase):
+    def test_agent_protocol_failure_persists_only_the_safe_error_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            job_dir = Path(temp) / "job-safe-error"
+
+            append_event(
+                job_dir,
+                "agent.run.failed",
+                "智能体协议验证失败。",
+                payload={
+                    "status": "failed",
+                    "error_category": "protocol_or_process_failure",
+                    "error_code": "codex_appserver.thread_start_failed",
+                    "raw_stderr": "PRIVATE_RAW_STDERR",
+                },
+            )
+
+            event = read_events(job_dir)[0]
+            self.assertEqual(
+                "codex_appserver.thread_start_failed",
+                event["payload"]["error_code"],
+            )
+            self.assertNotIn(
+                "PRIVATE_RAW_STDERR",
+                json.dumps(event, ensure_ascii=False),
+            )
+
     def test_sse_stream_survives_past_thirty_seconds_until_client_disconnect(self) -> None:
         class StaticStore:
             @staticmethod
@@ -155,6 +183,26 @@ class VisibleRunEventTests(unittest.TestCase):
             )
             progress(
                 {
+                    "phase": "preparing",
+                    "public_event": {
+                        "kind": "context.compaction.completed",
+                        "summary_zh": "已自动压缩调用前上下文。",
+                        "payload": {
+                            "mode": "compact",
+                            "applied": True,
+                            "lossy": False,
+                            "duplicates_removed": 1,
+                            "estimated_tokens_before": 4200,
+                            "estimated_tokens_after": 2048,
+                            "target_tokens": 2048,
+                            "context_window_tokens": 262144,
+                            "reasoning": "PRIVATE_CONTEXT_TRACE",
+                        },
+                    },
+                }
+            )
+            progress(
+                {
                     "phase": "generating",
                     "elapsed_seconds": 2.0,
                     "content_delta": "公开回复",
@@ -173,6 +221,14 @@ class VisibleRunEventTests(unittest.TestCase):
             )
             self.assertEqual("scan", media_event["payload"]["attachment_id"])
             self.assertNotIn("PRIVATE_MEDIA_TRACE", json.dumps(media_event))
+            context_event = next(
+                event
+                for event in events
+                if event["kind"] == "context.compaction.completed"
+            )
+            self.assertEqual(2048, context_event["payload"]["estimated_tokens_after"])
+            self.assertEqual(262144, context_event["payload"]["context_window_tokens"])
+            self.assertNotIn("PRIVATE_CONTEXT_TRACE", json.dumps(context_event))
 
     def test_cache_hit_is_a_visible_attempt_on_the_source_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -525,6 +581,269 @@ class ObserverStoreTests(unittest.TestCase):
             self.assertNotIn("raw_log", projected)
             self.assertIn("修复缓存身份回执", projected)
 
+    def test_run_detail_adds_local_absolute_paths_without_persisting_them(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as state_temp,
+            tempfile.TemporaryDirectory() as workspace_temp,
+        ):
+            submitted = request()
+            submitted["execution"] = {
+                "mode": "agent",
+                "runner": "data_factory",
+                "workspace": workspace_temp,
+                "policy": "workspace-write",
+            }
+            store = JobStore(Path(state_temp), spawner=lambda *_: None)
+            job_id = store.submit(submitted, force=True)["job_id"]
+            job_dir = Path(state_temp) / job_id
+            store.claim(job_id)
+            append_event(
+                job_dir,
+                "workspace.change.observed",
+                "检测到 1 个工作区文件变化。",
+                payload={
+                    "changed_files": 1,
+                    "scan_status": "scoped_complete",
+                    "provenance": "workspace_before_after",
+                    "attribution": "unverified_concurrent_window",
+                    "detail_policy": "caller_public_safe_include",
+                    "changes": [
+                        {
+                            "relative_path": "docs/acceptance.md",
+                            "change_kind": "modified",
+                            "lines_added": 2,
+                            "lines_deleted": 1,
+                            "diff_status": "available",
+                            "unified_diff": (
+                                "--- a/docs/acceptance.md\n"
+                                "+++ b/docs/acceptance.md\n"
+                                "@@ -1 +1,2 @@\n"
+                                "-待处理\n"
+                                "+已通过\n"
+                            ),
+                        }
+                    ],
+                },
+            )
+            store.complete(job_id, {"status": "ok", "output": "真实编辑已完成。"})
+
+            canonical_workspace = Path(workspace_temp).resolve()
+            persisted_events = (job_dir / "events.jsonl").read_text(encoding="utf-8")
+            local_metadata = json.loads(
+                (job_dir / ".observer-local.json").read_text(encoding="utf-8")
+            )
+            detail = ObserverStore(Path(state_temp)).get_run(job_id)
+            workspace_event = next(
+                event
+                for event in detail["events"]
+                if event["kind"] == "workspace.change.observed"
+            )
+            change = workspace_event["payload"]["changes"][0]
+
+            self.assertFalse((job_dir / "request.json").exists())
+            self.assertEqual(
+                {
+                    "schema": OBSERVER_LOCAL_SCHEMA,
+                    "job_id": job_id,
+                    "canonical_workspace": str(canonical_workspace),
+                },
+                local_metadata,
+            )
+            self.assertNotIn(str(canonical_workspace), persisted_events)
+            for name in ("state.json", "result.json", "progress.json"):
+                path = job_dir / name
+                if path.is_file():
+                    self.assertNotIn(
+                        str(canonical_workspace),
+                        path.read_text(encoding="utf-8"),
+                    )
+            self.assertNotIn(
+                str(canonical_workspace),
+                json.dumps(
+                    store.get(
+                        job_id,
+                        include_result=True,
+                        full_result=True,
+                    ),
+                    ensure_ascii=False,
+                ),
+            )
+            self.assertEqual("docs/acceptance.md", change["relative_path"])
+            self.assertEqual(
+                str(canonical_workspace / "docs" / "acceptance.md"),
+                change["absolute_path"],
+            )
+            self.assertTrue(
+                change["unified_diff"].startswith(
+                    "--- a/docs/acceptance.md\n+++ b/docs/acceptance.md\n"
+                )
+            )
+
+    def test_invalid_observer_local_metadata_fails_closed_after_request_cleanup(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as state_temp,
+            tempfile.TemporaryDirectory() as workspace_temp,
+        ):
+            submitted = request()
+            submitted["execution"] = {
+                "mode": "agent",
+                "runner": "data_factory",
+                "workspace": workspace_temp,
+                "policy": "workspace-write",
+            }
+            store = JobStore(Path(state_temp), spawner=lambda *_: None)
+            job_id = store.submit(submitted, force=True)["job_id"]
+            job_dir = Path(state_temp) / job_id
+            store.claim(job_id)
+            append_event(
+                job_dir,
+                "workspace.change.observed",
+                "检测到 1 个工作区文件变化。",
+                payload={
+                    "changed_files": 1,
+                    "scan_status": "scoped_complete",
+                    "provenance": "workspace_before_after",
+                    "attribution": "unverified_concurrent_window",
+                    "detail_policy": "caller_public_safe_include",
+                    "changes": [
+                        {
+                            "relative_path": "safe/inside.txt",
+                            "change_kind": "modified",
+                            "lines_added": 1,
+                            "lines_deleted": 0,
+                            "diff_status": "metadata_only",
+                        }
+                    ],
+                },
+            )
+            store.complete(job_id, {"status": "ok", "output": "done"})
+            self.assertFalse((job_dir / "request.json").exists())
+            local_path = job_dir / ".observer-local.json"
+            canonical_workspace = str(Path(workspace_temp).resolve())
+            invalid_values = (
+                {
+                    "schema": "wrong-schema",
+                    "job_id": job_id,
+                    "canonical_workspace": canonical_workspace,
+                },
+                {
+                    "schema": OBSERVER_LOCAL_SCHEMA,
+                    "job_id": "0" * 24,
+                    "canonical_workspace": canonical_workspace,
+                },
+                {
+                    "schema": OBSERVER_LOCAL_SCHEMA,
+                    "job_id": job_id,
+                    "canonical_workspace": canonical_workspace,
+                    "unexpected": True,
+                },
+            )
+            for invalid in invalid_values:
+                with self.subTest(invalid=invalid):
+                    local_path.write_text(
+                        json.dumps(invalid),
+                        encoding="utf-8",
+                    )
+                    detail = ObserverStore(Path(state_temp)).get_run(job_id)
+                    workspace_event = next(
+                        event
+                        for event in detail["events"]
+                        if event["kind"] == "workspace.change.observed"
+                    )
+                    self.assertNotIn(
+                        "absolute_path",
+                        workspace_event["payload"]["changes"][0],
+                    )
+
+            local_path.write_bytes(b" " * (OBSERVER_MAX_LOCAL_METADATA_BYTES + 1))
+            detail = ObserverStore(Path(state_temp)).get_run(job_id)
+            workspace_event = next(
+                event
+                for event in detail["events"]
+                if event["kind"] == "workspace.change.observed"
+            )
+            self.assertNotIn(
+                "absolute_path",
+                workspace_event["payload"]["changes"][0],
+            )
+
+    def test_request_spool_is_only_a_legacy_local_workspace_fallback(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as state_temp,
+            tempfile.TemporaryDirectory() as workspace_temp,
+        ):
+            submitted = request()
+            submitted["execution"] = {
+                "mode": "agent",
+                "runner": "data_factory",
+                "workspace": workspace_temp,
+                "policy": "workspace-write",
+            }
+            store = JobStore(Path(state_temp), spawner=lambda *_: None)
+            job_id = store.submit(submitted, force=True)["job_id"]
+            job_dir = Path(state_temp) / job_id
+            (job_dir / ".observer-local.json").unlink()
+            append_event(
+                job_dir,
+                "workspace.change.observed",
+                "检测到 1 个工作区文件变化。",
+                payload={
+                    "changed_files": 1,
+                    "scan_status": "scoped_complete",
+                    "provenance": "workspace_before_after",
+                    "attribution": "unverified_concurrent_window",
+                    "detail_policy": "caller_public_safe_include",
+                    "changes": [
+                        {
+                            "relative_path": "legacy.txt",
+                            "change_kind": "added",
+                            "lines_added": 1,
+                            "lines_deleted": 0,
+                            "diff_status": "metadata_only",
+                        }
+                    ],
+                },
+            )
+
+            detail = ObserverStore(Path(state_temp)).get_run(job_id)
+            workspace_event = next(
+                event
+                for event in detail["events"]
+                if event["kind"] == "workspace.change.observed"
+            )
+
+            self.assertEqual(
+                str(Path(workspace_temp).resolve() / "legacy.txt"),
+                workspace_event["payload"]["changes"][0]["absolute_path"],
+            )
+
+    def test_local_absolute_path_projection_rejects_unsafe_relative_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace_temp:
+            events = [
+                {
+                    "kind": "workspace.change.observed",
+                    "payload": {
+                        "changes": [
+                            {"relative_path": "../outside.txt"},
+                            {"relative_path": "safe/inside.txt"},
+                        ]
+                    },
+                }
+            ]
+
+            projected = _with_local_workspace_paths(
+                events,
+                Path(workspace_temp).resolve(),
+            )
+            changes = projected[0]["payload"]["changes"]
+
+            self.assertNotIn("absolute_path", changes[0])
+            self.assertEqual(
+                str(Path(workspace_temp).resolve() / "safe" / "inside.txt"),
+                changes[1]["absolute_path"],
+            )
+            self.assertNotIn("absolute_path", events[0]["payload"]["changes"][1])
+
     def test_public_label_is_bounded_and_never_falls_back_to_prompt_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             private_canary = "PRIVATE_PROMPT_MUST_NOT_BECOME_A_TITLE"
@@ -637,10 +956,25 @@ class ObserverStoreTests(unittest.TestCase):
                 {
                     "status": "ok",
                     "output": {"answer": 56},
-                    "backend": {"model": "qwen-main-v1"},
+                    "backend": {
+                        "model": "qwen-main-v1",
+                        "context_window_tokens": 262144,
+                    },
+                    "context_receipt": {
+                        "mode": "compact",
+                        "executed": True,
+                        "applied": False,
+                        "lossy": False,
+                        "duplicates_removed": 0,
+                        "estimated_tokens_before": 512,
+                        "estimated_tokens_after": 384,
+                        "target_tokens": 4096,
+                    },
                     "usage": {
                         "prompt_tokens": 80,
                         "completion_tokens": 40,
+                        "current_context_tokens": 202000,
+                        "context_window_tokens": 258400,
                         "eval_duration_ns": 2_000_000_000,
                     },
                     "checks": [{"id": "valid_json", "passed": True}],
@@ -662,11 +996,129 @@ class ObserverStoreTests(unittest.TestCase):
                 detail["performance"]["tokens_per_second_source"],
             )
             self.assertEqual({"answer": 56}, detail["result"]["output"])
+            self.assertEqual(
+                262144,
+                detail["result"]["backend"]["context_window_tokens"],
+            )
+            self.assertEqual(
+                384,
+                detail["result"]["context_receipt"]["estimated_tokens_after"],
+            )
+            self.assertEqual(202000, detail["context"]["current_tokens"])
+            self.assertEqual(258400, detail["context"]["context_window_tokens"])
+            self.assertEqual(
+                "codex_runtime",
+                detail["context"]["current_source"],
+            )
             self.assertTrue(detail["events"])
             poll_count_after = json.loads(
                 (Path(temp) / job_id / "state.json").read_text(encoding="utf-8")
             )["poll_count"]
             self.assertEqual(poll_count_before, poll_count_after)
+
+    def test_live_context_uses_only_codex_runtime_event_not_prompt_estimate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            job_id = store.submit(request(), force=True)["job_id"]
+            store.claim(job_id)
+            progress = store.progress_recorder(
+                job_id,
+                allow_public_preview=True,
+                write_interval_seconds=0.05,
+            )
+            progress(
+                {
+                    "phase": "waiting",
+                    "current_context_tokens": 202000,
+                    "context_window_tokens": 258400,
+                    "public_event": {
+                        "kind": "agent.context.usage.updated",
+                        "summary_zh": "Codex 已上报实时上下文占用。",
+                        "payload": {
+                            "current_tokens": 202000,
+                            "context_window_tokens": 258400,
+                            "private_trace": "PRIVATE_CONTEXT_TRACE",
+                        },
+                    },
+                }
+            )
+
+            detail = ObserverStore(Path(temp)).get_run(job_id)
+
+            self.assertEqual(202000, detail["context"]["current_tokens"])
+            self.assertEqual(258400, detail["context"]["context_window_tokens"])
+            self.assertEqual("codex_runtime", detail["context"]["current_source"])
+            self.assertNotIn(
+                "agent.context.usage.updated",
+                [event["kind"] for event in detail["events"]],
+            )
+            serialized = json.dumps(detail, ensure_ascii=False)
+            self.assertNotIn("PRIVATE_CONTEXT_TRACE", serialized)
+            self.assertNotIn("initial_task_estimate", serialized)
+
+    def test_context_receipt_and_backend_config_never_become_live_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            job_id = store.submit(request(), force=True)["job_id"]
+            store.claim(job_id)
+            store.complete(
+                job_id,
+                {
+                    "status": "ok",
+                    "output": "done",
+                    "backend": {
+                        "model": "qwen-main-v1",
+                        "context_window_tokens": 262144,
+                    },
+                    "context_receipt": {
+                        "estimated_tokens_before": 512,
+                        "estimated_tokens_after": 384,
+                    },
+                },
+            )
+
+            detail = ObserverStore(Path(temp)).get_run(job_id)
+
+            self.assertIsNone(detail["context"]["current_tokens"])
+            self.assertEqual("unavailable", detail["context"]["current_source"])
+            self.assertIsNone(detail["context"]["context_window_tokens"])
+            self.assertEqual("unavailable", detail["context"]["window_source"])
+
+    def test_context_usage_is_coalesced_and_latest_value_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            job_id = store.submit(request(), force=True)["job_id"]
+            store.claim(job_id)
+            progress = store.progress_recorder(
+                job_id,
+                allow_public_preview=False,
+                write_interval_seconds=60,
+            )
+            for index in range(1000):
+                progress(
+                    {
+                        "phase": "waiting",
+                        "current_context_tokens": 200000 + index,
+                        "context_window_tokens": 258400,
+                        "public_event": {
+                            "kind": "agent.context.usage.updated",
+                            "summary_zh": "Codex 已上报实时上下文占用。",
+                            "payload": {
+                                "current_tokens": 200000 + index,
+                                "context_window_tokens": 258400,
+                            },
+                        },
+                    }
+                )
+            progress({"phase": "validating"})
+
+            detail = ObserverStore(Path(temp)).get_run(job_id)
+            event_kinds = [event["kind"] for event in detail["events"]]
+
+            self.assertEqual(200999, detail["context"]["current_tokens"])
+            self.assertEqual(258400, detail["context"]["context_window_tokens"])
+            self.assertNotIn("agent.context.usage.updated", event_kinds)
+            self.assertLess(len(event_kinds), 12)
 
     def test_agent_tps_uses_reported_runner_wall_time_not_job_lifetime(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

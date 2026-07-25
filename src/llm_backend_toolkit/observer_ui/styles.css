@@ -684,6 +684,12 @@ summary:focus-visible,
   color: var(--danger);
 }
 
+.timeline-item[data-tone="warning"] .timeline-marker {
+  border-color: #eed6a4;
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
 .timeline-copy {
   min-width: 0;
   padding-top: 1px;
@@ -971,6 +977,78 @@ summary:focus-visible,
   white-space: nowrap;
 }
 
+.metric-tps-card {
+  grid-column: span 2;
+}
+
+#metric-tps {
+  overflow: visible;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.metric-context {
+  position: relative;
+  border-bottom: 2px solid var(--green);
+}
+
+.metric-context dd {
+  overflow: visible;
+}
+
+.context-disclosure {
+  position: relative;
+}
+
+.context-disclosure summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  cursor: pointer;
+  list-style: none;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.context-disclosure summary::-webkit-details-marker {
+  display: none;
+}
+
+.context-disclosure summary::after {
+  flex: 0 0 auto;
+  color: var(--green-deep);
+  content: "›";
+  font-size: 14px;
+  transform: rotate(90deg);
+  transition: transform 140ms ease;
+}
+
+.context-disclosure[open] summary::after {
+  transform: rotate(-90deg);
+}
+
+.context-detail {
+  position: absolute;
+  z-index: 8;
+  top: calc(100% + 8px);
+  right: -8px;
+  display: block;
+  width: min(300px, 62vw);
+  padding: 9px 10px;
+  border: 1px solid var(--green-strong);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 10px 30px rgb(15 75 31 / 14%);
+  color: var(--ink-soft);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.55;
+  white-space: pre-line;
+}
+
 .content-card {
   overflow: clip;
 }
@@ -1200,20 +1278,9 @@ summary:focus-visible,
   }
 
   .timeline {
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: minmax(190px, 1fr);
-    gap: 14px;
-    overflow-x: auto;
-  }
-
-  .timeline-item {
-    grid-template-columns: 21px minmax(0, 1fr);
-    padding-bottom: 8px;
-  }
-
-  .timeline-item:not(:last-child)::before {
-    display: none;
+    display: block;
+    overflow-x: hidden;
+    overflow-y: auto;
   }
 }
 
@@ -1269,7 +1336,7 @@ summary:focus-visible,
   }
 
   .timeline {
-    grid-auto-columns: minmax(210px, 78vw);
+    max-height: min(52vh, 480px);
   }
 
   .empty-state {

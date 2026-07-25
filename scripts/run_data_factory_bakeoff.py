@@ -76,7 +76,11 @@ def run_candidate(toolkit: Toolkit, runner: str, output_root: Path) -> dict:
             "workspace": str(workspace),
             "policy": "workspace-write",
             "model": "qwen-main-v1",
-            "budget": {"timeout_seconds": 900, "max_steps": 30, "max_tool_calls": 120},
+            # Public agent messages are excluded from steps by the v2 contract.
+            # This scenario still needs headroom for Qwen's post-write verification
+            # loop; keep the wider limit local to this benchmark instead of
+            # weakening the toolkit's global hard-budget semantics.
+            "budget": {"timeout_seconds": 900, "max_steps": 45, "max_tool_calls": 120},
         },
     }
     started = time.monotonic()

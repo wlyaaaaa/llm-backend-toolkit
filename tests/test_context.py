@@ -30,11 +30,20 @@ class ContextCompactorTests(unittest.TestCase):
 
         compacted = compact_task(request)
 
-        self.assertIn("Before and after each major action or tool call", compacted.prompt)
+        self.assertIn("at meaningful milestones", compacted.prompt)
+        self.assertIn("Do not emit a progress message for every command", compacted.prompt)
+        self.assertNotIn("Before and after each major action or tool call", compacted.prompt)
         self.assertIn("the same language as the user", compacted.prompt)
         self.assertIn("plan, action, or verified result", compacted.prompt)
         self.assertIn("Never expose or guess hidden chain-of-thought", compacted.prompt)
         self.assertIn("End with the complete final result", compacted.prompt)
+        self.assertIn("Prefer the built-in apply_patch tool for workspace file edits", compacted.prompt)
+        self.assertIn("If apply_patch is unavailable", compacted.prompt)
+        self.assertIn("Set-Content -LiteralPath", compacted.prompt)
+        self.assertIn("direct, non-elevated", compacted.prompt)
+        self.assertIn("never write outside the declared workspace", compacted.prompt)
+        self.assertIn("Never request elevated or out-of-sandbox execution", compacted.prompt)
+        self.assertIn("If a command is declined, do not retry it through alternate forms", compacted.prompt)
         self.assertNotIn("Return only the final result.", compacted.prompt)
 
     def test_cjk_estimate_is_conservative_and_compaction_honors_token_target(self):

@@ -21,7 +21,7 @@ const state = {
   activeTab: "draft",
   historyTotal: 0,
   nextOffset: null,
-  timelineSignature: null,
+  timelineJobId: null,
 };
 
 const elements = {
@@ -56,14 +56,17 @@ const elements = {
     execution: document.querySelector("#metric-execution"),
     reasoning: document.querySelector("#metric-reasoning"),
     tokens: document.querySelector("#metric-tokens"),
+    context: document.querySelector("#metric-context"),
     tps: document.querySelector("#metric-tps"),
     duration: document.querySelector("#metric-duration"),
     gpu: document.querySelector("#metric-gpu"),
     delivery: document.querySelector("#metric-delivery"),
   },
+  contextDetail: document.querySelector("#metric-context-detail"),
 };
 
 const runItemCache = new Map();
+const timelineItemCache = new Map();
 
 const STATUS_MAP = {
   accepted: { label: "已接收", tone: "neutral" },
@@ -173,6 +176,19 @@ function formatStructured(value, fallback = "—") {
 function formatNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? new Intl.NumberFormat("zh-CN").format(number) : "—";
+}
+
+function formatCompactTokens(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) {
+    return "—";
+  }
+  if (number < 1000) {
+    return formatNumber(number);
+  }
+  const thousands = number / 1000;
+  const precision = thousands < 10 && !Number.isInteger(thousands) ? 1 : 0;
+  return `${thousands.toFixed(precision)}k`;
 }
 
 function formatDuration(value, unitHint = "") {
@@ -348,6 +364,37 @@ function tokenSummary(detail) {
     };
   }
   return { label: "—", detail: "Token usage 不可用" };
+}
+
+function contextSummary(detail) {
+  const current = pick(detail, "context.current_tokens");
+  const contextWindow = pick(detail, "context.context_window_tokens");
+  const hasCurrent = Number.isFinite(Number(current)) && Number(current) >= 0;
+  const hasWindow =
+    Number.isFinite(Number(contextWindow)) && Number(contextWindow) > 0;
+  const label = hasCurrent && hasWindow
+    ? `已用 ${formatCompactTokens(current)} / 共 ${formatCompactTokens(contextWindow)}`
+    : hasCurrent || hasWindow
+      ? "Codex 运行时数据不完整"
+      : "等待 Codex 运行时实测";
+  const percentage =
+    hasCurrent && hasWindow
+      ? Math.min(100, (Number(current) / Number(contextWindow)) * 100)
+      : undefined;
+  const currentDetail = hasCurrent
+    ? `${formatNumber(current)} token（Codex 运行时实测）`
+    : "等待 Codex 运行时上报当前占用";
+  const windowDetail = hasWindow
+    ? `${formatNumber(contextWindow)} token（Codex 运行时实测）`
+    : "等待 Codex 运行时上报总上下文上限";
+  const percentageDetail =
+    percentage === undefined ? "" : `\n占用：${Math.round(percentage)}%。`;
+  return {
+    label,
+    detail:
+      `已用：${currentDetail}\n共：${windowDetail}${percentageDetail}\n` +
+      "说明：不把累计输入 Token 当成当前占用。",
+  };
 }
 
 function formatDateTime(value, style = "time") {
@@ -619,6 +666,23 @@ function renderRunList() {
   elements.runList.setAttribute("aria-busy", "false");
 }
 
+function timelineEventKey(item, sourceIndex) {
+  const explicitId = firstDefined(
+    item.event_id,
+    item.id,
+    item.sequence_id,
+    item.sequence,
+    item.seq,
+    pick(item, "payload.item_id"),
+    pick(item, "payload.call_id"),
+  );
+  if (explicitId !== undefined) {
+    return `event:${explicitId}`;
+  }
+  const kind = String(firstDefined(item.kind, item.type, "event"));
+  return `event:${sourceIndex}:${kind}`;
+}
+
 function timelineEvents(detail) {
   const provided = firstDefined(
     pick(detail, "events"),
@@ -651,14 +715,21 @@ function timelineEvents(detail) {
     "agent.observability": "AICLI 可观察性",
     "agent.reasoning.activity": "智能体分析活动",
     "agent.tool.activity": "智能体工具活动",
+    "agent.output.delta": "智能体公开进度",
     "agent.output.completed": "智能体公开输出",
+    "agent.context.usage.updated": "实时上下文更新",
+    "agent.context.compaction.completed": "Codex 已自动压缩上下文",
+    "context.compaction.completed": "已压缩调用输入",
     "workspace.change.observed": "检测到工作区变化",
     "media.ocr.started": "LocalOCR 开始",
     "media.ocr.completed": "LocalOCR 完成",
     "media.asr.started": "ChineseASR 开始",
     "media.asr.completed": "ChineseASR 完成",
   };
-  return provided.map((item) => {
+  return provided
+    .map((item, sourceIndex) => ({ item, sourceIndex }))
+    .filter(({ item }) => item?.kind !== "agent.context.usage.updated")
+    .map(({ item, sourceIndex }) => {
     const kind = String(firstDefined(item.kind, item.type, "event"));
     const metrics = item.metrics && typeof item.metrics === "object" ? item.metrics : undefined;
     const payload = item.payload && typeof item.payload === "object" ? item.payload : undefined;
@@ -669,6 +740,26 @@ function timelineEvents(detail) {
     let detailText = formatStructured(
       firstDefined(item.summary_zh, item.public_summary, item.summary, metrics, ""),
     );
+    const workspacePaths = [];
+    let tone = String(firstDefined(item.tone, item.status, kind)).toLowerCase();
+    if (kind === "context.compaction.completed") {
+      const before = Number(payload?.estimated_tokens_before);
+      const after = Number(payload?.estimated_tokens_after);
+      const lines = [detailText];
+      if (Number.isFinite(before) && Number.isFinite(after)) {
+        lines.push(`预计 ${formatNumber(before)} → ${formatNumber(after)} Token。`);
+      }
+      if (Number(payload?.duplicates_removed) > 0) {
+        lines.push(`移除 ${formatNumber(payload.duplicates_removed)} 个重复项。`);
+      }
+      if (payload?.lossy === true) {
+        lines.push("为满足目标，已裁剪过长输入。");
+        tone = "warning";
+      } else {
+        tone = "success";
+      }
+      detailText = lines.filter(Boolean).join("\n");
+    }
     if (kind === "workspace.change.observed") {
       const lines = [detailText];
       const changeLabels = {
@@ -682,17 +773,29 @@ function timelineEvents(detail) {
           `${change.relative_path} · ${changeLabels[change.change_kind] || "变化"} · ` +
             `+${change.lines_added ?? 0} -${change.lines_deleted ?? 0}`,
         );
+        const absolutePath =
+          typeof change.absolute_path === "string" ? change.absolute_path : "";
+        if (absolutePath) {
+          lines.push(`完整路径：${absolutePath}`);
+          workspacePaths.push({
+            relativePath: String(change.relative_path || "文件"),
+            absolutePath,
+          });
+        }
         if (change.unified_diff) {
           lines.push(String(change.unified_diff));
         }
       }
       if (Number(payload?.details_omitted) > 0) {
-        lines.push(`另有 ${payload.details_omitted} 个文件详情因安全或大小上限未展示。`);
+        lines.push(
+          `另有 ${payload.details_omitted} 个文件详情：未在本次公开名单内，或因安全、大小上限未展示。`,
+        );
       }
       lines.push("来源：工作区前后快照；归因：运行时窗观察，未验证由单一进程造成。");
       detailText = lines.filter(Boolean).join("\n");
     }
     return {
+      key: timelineEventKey(item, sourceIndex),
       kind,
       title,
       detail: detailText,
@@ -703,9 +806,10 @@ function timelineEvents(detail) {
         item.updated_utc,
         item.time,
       ),
-      tone: String(firstDefined(item.tone, item.status, kind)).toLowerCase(),
+      tone,
+      workspacePaths,
     };
-  });
+    });
 }
 
 function normalizedTone(value) {
@@ -714,6 +818,9 @@ function normalizedTone(value) {
   }
   if (["completed", "success", "succeeded", "ok", "passed"].includes(value)) {
     return "success";
+  }
+  if (["warning", "partial"].includes(value)) {
+    return "warning";
   }
   if (["failed", "error", "danger", "cancelled", "stale"].includes(value)) {
     return "danger";
@@ -738,44 +845,156 @@ function timelineIcon(tone) {
   return svg;
 }
 
+function timelineIconPath(tone) {
+  return tone === "success"
+    ? "m6 12 4 4 8-9"
+    : tone === "danger"
+      ? "M12 7v6m0 4h.01"
+      : "M12 7v5l3 2";
+}
+
+function createTimelineItem(eventKey) {
+  const item = createElement("li", "timeline-item");
+  item.dataset.eventKey = eventKey;
+  const marker = createElement("span", "timeline-marker");
+  const icon = timelineIcon("neutral");
+  marker.append(icon);
+  const copy = createElement("div", "timeline-copy");
+  const title = createElement("h3");
+  const time = createElement("time");
+  copy.append(title, time);
+  item.append(marker, copy);
+
+  const entry = {
+    item,
+    iconPath: icon.firstElementChild,
+    copy,
+    title,
+    detail: null,
+    pathButtons: [],
+    time,
+    signature: null,
+  };
+  timelineItemCache.set(eventKey, entry);
+  return entry;
+}
+
+function updateTimelineItem(entry, event) {
+  const tone = normalizedTone(event.tone);
+  const signature = JSON.stringify([
+    tone,
+    event.kind,
+    event.title,
+    event.detail,
+    event.time,
+    event.workspacePaths,
+  ]);
+  if (signature === entry.signature) {
+    return;
+  }
+
+  entry.signature = signature;
+  entry.item.dataset.tone = tone;
+  entry.iconPath?.setAttribute("d", timelineIconPath(tone));
+  entry.title.textContent = event.title;
+
+  if (event.detail) {
+    if (!entry.detail) {
+      entry.detail = createElement("p");
+      entry.copy.insertBefore(entry.detail, entry.time);
+    }
+    entry.detail.className =
+      event.kind === "workspace.change.observed" ? "workspace-change-detail" : "";
+    entry.detail.textContent = event.detail;
+  } else if (entry.detail) {
+    entry.detail.remove();
+    entry.detail = null;
+  }
+
+  for (const button of entry.pathButtons) {
+    button.remove();
+  }
+  entry.pathButtons = [];
+  for (const path of event.workspacePaths || []) {
+    const button = createElement(
+      "button",
+      "copy-button",
+      `复制完整路径：${path.relativePath}`,
+    );
+    button.type = "button";
+    button.setAttribute("aria-label", `复制 ${path.relativePath} 的完整路径`);
+    button.addEventListener("click", () =>
+      copyText(path.absolutePath, "完整路径已复制"),
+    );
+    entry.copy.insertBefore(button, entry.time);
+    entry.pathButtons.push(button);
+  }
+  entry.time.textContent = formatDateTime(event.time);
+}
+
+function clearTimelineItems() {
+  for (const entry of timelineItemCache.values()) {
+    entry.item.remove();
+  }
+  timelineItemCache.clear();
+}
+
+function shouldFollowTimelineEnd(runChanged) {
+  if (!window.matchMedia("(max-width: 980px)").matches) {
+    return false;
+  }
+  if (runChanged || timelineItemCache.size === 0) {
+    return true;
+  }
+  const distanceFromEnd =
+    elements.timeline.scrollHeight -
+    elements.timeline.clientHeight -
+    elements.timeline.scrollTop;
+  return distanceFromEnd <= 48;
+}
+
 function renderTimeline(detail) {
   const events = timelineEvents(detail);
   elements.timelineStatus.textContent = events.length ? `${events.length} 个节点` : "暂无事件";
-  const signature = JSON.stringify(events);
-  if (signature === state.timelineSignature) {
-    return;
-  }
-  state.timelineSignature = signature;
-  elements.timeline.replaceChildren();
+  const timelineJobId = String(firstDefined(detail.job_id, detail.id, state.selectedJobId, ""));
+  const runChanged = timelineJobId !== state.timelineJobId;
+  const followLatest = shouldFollowTimelineEnd(runChanged);
+  state.timelineJobId = timelineJobId;
+
   if (!events.length) {
-    const placeholder = createElement("li", "timeline-placeholder");
-    placeholder.append(
-      createElement("strong", "", "等待公开进展"),
-      createElement("span", "", "服务端尚未提供可展示的时间线事件"),
-    );
-    elements.timeline.append(placeholder);
+    clearTimelineItems();
+    if (!elements.timeline.querySelector(".timeline-placeholder")) {
+      const placeholder = createElement("li", "timeline-placeholder");
+      placeholder.append(
+        createElement("strong", "", "等待公开进展"),
+        createElement("span", "", "服务端尚未提供可展示的时间线事件"),
+      );
+      elements.timeline.append(placeholder);
+    }
     return;
   }
-  for (const event of events) {
-    const tone = normalizedTone(event.tone);
-    const item = createElement("li", "timeline-item");
-    item.dataset.tone = tone;
-    const marker = createElement("span", "timeline-marker");
-    marker.append(timelineIcon(tone));
-    const copy = createElement("div", "timeline-copy");
-    copy.append(createElement("h3", "", event.title));
-    if (event.detail) {
-      copy.append(
-        createElement(
-          "p",
-          event.kind === "workspace.change.observed" ? "workspace-change-detail" : "",
-          event.detail,
-        ),
-      );
+
+  elements.timeline.querySelector(".timeline-placeholder")?.remove();
+  const currentKeys = new Set(events.map((event) => event.key));
+  for (const [eventKey, entry] of timelineItemCache) {
+    if (!currentKeys.has(eventKey)) {
+      entry.item.remove();
+      timelineItemCache.delete(eventKey);
     }
-    copy.append(createElement("time", "", formatDateTime(event.time)));
-    item.append(marker, copy);
-    elements.timeline.append(item);
+  }
+
+  let cursor = elements.timeline.firstElementChild;
+  for (const event of events) {
+    const entry = timelineItemCache.get(event.key) || createTimelineItem(event.key);
+    updateTimelineItem(entry, event);
+    if (entry.item !== cursor) {
+      elements.timeline.insertBefore(entry.item, cursor);
+    }
+    cursor = entry.item.nextElementSibling;
+  }
+
+  if (followLatest) {
+    elements.timeline.scrollTop = elements.timeline.scrollHeight;
   }
 }
 
@@ -890,12 +1109,14 @@ function renderDetail(detail) {
   elements.runTitle.textContent = runTitle(detail);
 
   const tokens = tokenSummary(detail);
+  const context = contextSummary(detail);
   const tps = calculateTps(detail);
 
   elements.metrics.model.textContent = modelName(detail);
   elements.metrics.execution.textContent = executionMode(detail);
   elements.metrics.reasoning.textContent = reasoningLevel(detail);
   elements.metrics.tokens.textContent = tokens.label;
+  elements.metrics.context.textContent = context.label;
   elements.metrics.tps.textContent = tps;
   elements.metrics.duration.textContent = calculateDuration(detail);
   elements.metrics.gpu.textContent = gpuLabel(detail);
@@ -904,6 +1125,8 @@ function renderDetail(detail) {
     metric.title = metric.textContent;
   }
   elements.metrics.tokens.title = tokens.detail;
+  elements.metrics.context.title = context.detail;
+  elements.contextDetail.textContent = context.detail;
   elements.metrics.tps.title = tps;
 
   const draft = extractDraft(detail);
@@ -924,8 +1147,9 @@ function renderNoSelection() {
   state.selectedDetail = null;
   elements.emptyState.hidden = false;
   elements.detailContent.hidden = true;
-  elements.timeline.replaceChildren();
-  state.timelineSignature = null;
+  clearTimelineItems();
+  elements.timeline.querySelector(".timeline-placeholder")?.remove();
+  state.timelineJobId = null;
   elements.timelineStatus.textContent = "未选择";
 }
 

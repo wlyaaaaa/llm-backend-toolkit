@@ -323,6 +323,8 @@ def _safe_aicli_usage(value: Any) -> dict[str, int]:
         "input_tokens",
         "cached_input_tokens",
         "output_tokens",
+        "current_context_tokens",
+        "context_window_tokens",
     ):
         field_value = value.get(field_name)
         if type(field_value) is int and field_value >= 0:
@@ -538,12 +540,6 @@ class AiCliProfileRunner:
 
     def _prefix(self) -> list[str]:
         entry_value = self.entry
-        if not entry_value and os.name == "nt":
-            local = os.environ.get("LOCALAPPDATA")
-            if local:
-                installed = Path(local) / "aicli" / "bin" / "aicli.ps1"
-                if installed.is_file():
-                    entry_value = str(installed)
         if not entry_value:
             raise _runner_error("agent_runner_unavailable", "LLM_TOOLKIT_AICLI_ENTRY is not configured.")
         entry = Path(entry_value).expanduser().resolve()
@@ -554,9 +550,14 @@ class AiCliProfileRunner:
             raise _runner_error("agent_runner_unavailable", "PowerShell 7 is unavailable.")
         return [pwsh, "-NoProfile", "-File", str(entry)]
 
-    def _supports_machine_events(self, prefix: list[str], workspace: Path) -> bool:
-        if self._machine_events_supported is not None:
-            return self._machine_events_supported
+    def _require_machine_events(self, prefix: list[str], workspace: Path) -> None:
+        if self._machine_events_supported is True:
+            return
+        if self._machine_events_supported is False:
+            raise _runner_error(
+                "agent_runner_incompatible",
+                "Codex requires aicli machineEventProjection aicli.machine-event.v1.",
+            )
         try:
             code, stdout, _, _ = _bounded_process(
                 prefix + ["version", "--json"],
@@ -567,15 +568,24 @@ class AiCliProfileRunner:
             )
             values = _json_values(stdout)
             capabilities = values[-1].get("capabilities") if values else {}
-            self._machine_events_supported = bool(
+            supported = bool(
                 code == 0
                 and isinstance(capabilities, dict)
                 and capabilities.get("machineEventProjection")
                 == "aicli.machine-event.v1"
             )
-        except AgentRunnerError:
+        except AgentRunnerError as exc:
             self._machine_events_supported = False
-        return self._machine_events_supported
+            raise _runner_error(
+                "agent_runner_incompatible",
+                "Codex aicli capability probing failed closed.",
+            ) from exc
+        self._machine_events_supported = supported
+        if not supported:
+            raise _runner_error(
+                "agent_runner_incompatible",
+                "Codex requires aicli machineEventProjection aicli.machine-event.v1.",
+            )
 
     @staticmethod
     def _emit_machine_event(callback: Any, event: dict[str, Any]) -> None:
@@ -584,8 +594,33 @@ class AiCliProfileRunner:
         kind = str(event.get("kind") or "")
         status = str(event.get("status") or "")
         item_type = str(event.get("item_type") or "")
+        command_status = None
+        safe_exit_code = None
+        safe_duration_ms = None
+        if kind == "tool.activity" and item_type == "command_execution":
+            raw_command_status = event.get("command_status")
+            if raw_command_status is not None:
+                if (
+                    type(raw_command_status) is not str
+                    or raw_command_status
+                    not in {"in_progress", "succeeded", "failed", "declined"}
+                ):
+                    return
+                command_status = raw_command_status
+            raw_exit_code = event.get("exit_code")
+            if (
+                type(raw_exit_code) is int
+                and -(2**31) <= raw_exit_code <= (2**31) - 1
+            ):
+                safe_exit_code = raw_exit_code
+            raw_duration_ms = event.get("duration_ms")
+            if (
+                type(raw_duration_ms) is int
+                and 0 <= raw_duration_ms <= (2**63) - 1
+            ):
+                safe_duration_ms = raw_duration_ms
         public_text = ""
-        if kind == "output.completed":
+        if kind in {"output.delta", "output.completed"}:
             public_text = _bounded_public_text(event.get("public_text"))
             if not public_text:
                 return
@@ -596,25 +631,50 @@ class AiCliProfileRunner:
                 "智能体正在进行内部分析；只展示活动状态，不展示隐藏思维正文。"
             )
         elif kind == "tool.activity":
-            labels = {
-                "file_change": "编辑文件",
-                "command_execution": "执行命令",
-                "mcp_tool_call": "调用 MCP 工具",
-                "web_search": "查询公开资料",
-                "computer_use": "操作计算机",
-                "tool_call": "调用工具",
-                "dynamic_tool_call": "调用动态工具",
-            }
-            activity = labels.get(item_type, "调用工具")
-            summary = f"智能体正在{activity}。" if status != "completed" else f"智能体已完成{activity}。"
+            if item_type == "command_execution" and command_status:
+                summary = {
+                    "in_progress": "智能体正在执行命令。",
+                    "succeeded": "智能体执行命令成功。",
+                    "failed": "智能体执行命令失败。",
+                    "declined": "智能体的命令执行已被拒绝。",
+                }[command_status]
+                details = []
+                if command_status != "in_progress":
+                    if safe_exit_code is not None:
+                        details.append(f"退出码 {safe_exit_code}")
+                    if safe_duration_ms is not None:
+                        details.append(f"耗时 {safe_duration_ms} 毫秒")
+                if details:
+                    summary = f"{summary[:-1]}（{'，'.join(details)}）。"
+            else:
+                labels = {
+                    "file_change": "编辑文件",
+                    "command_execution": "执行命令",
+                    "mcp_tool_call": "调用 MCP 工具",
+                    "web_search": "查询公开资料",
+                    "computer_use": "操作计算机",
+                    "tool_call": "调用工具",
+                    "dynamic_tool_call": "调用动态工具",
+                }
+                activity = labels.get(item_type, "调用工具")
+                summary = (
+                    f"智能体正在{activity}。"
+                    if status != "completed"
+                    else f"智能体已完成{activity}。"
+                )
         elif kind == "planning.activity":
             summary = "智能体正在更新公开工作计划。"
-        elif kind == "output.completed":
+        elif kind in {"output.delta", "output.completed"}:
             phase = "generating"
             summary = public_text
         elif kind == "turn.completed":
             phase = "validating"
             summary = "智能体本轮工作完成，正在整理结果与回执。"
+        elif kind == "context.usage.updated":
+            summary = "Codex 已上报实时上下文占用。"
+        elif kind == "context.compaction.completed":
+            phase = "thinking"
+            summary = "Codex 已自动压缩上下文，继续执行当前任务。"
         elif kind in {"turn.failed", "run.failed", "limit.hit"}:
             phase = "failed"
             summary = "智能体运行未成功完成，安全失败状态已保留。"
@@ -633,10 +693,20 @@ class AiCliProfileRunner:
                 "tool_calls",
                 "events_seen",
                 "error_category",
+                "error_code",
                 "limit",
+                "current_tokens",
+                "context_window_tokens",
+                "compaction_count",
             )
             if event.get(key) is not None
         }
+        if command_status is not None:
+            allowed_payload["command_status"] = command_status
+        if safe_exit_code is not None:
+            allowed_payload["exit_code"] = safe_exit_code
+        if safe_duration_ms is not None:
+            allowed_payload["duration_ms"] = safe_duration_ms
         progress: dict[str, Any] = {
             "phase": phase,
             "public_event": {
@@ -645,8 +715,15 @@ class AiCliProfileRunner:
                 "payload": allowed_payload,
             },
         }
-        if kind == "output.completed":
+        if kind == "output.delta":
             progress["content_delta"] = public_text
+        elif kind == "output.completed":
+            progress["content_replace"] = public_text
+        if kind == "context.usage.updated":
+            progress["current_context_tokens"] = event.get("current_tokens")
+            progress["context_window_tokens"] = event.get(
+                "context_window_tokens"
+            )
         try:
             callback(progress)
         except Exception:
@@ -681,10 +758,10 @@ class AiCliProfileRunner:
             raise _runner_error("agent_runner_unavailable", f"Unsupported aicli agent engine: {self.engine}")
         prefix = self._prefix()
         progress_callback = execution.get("_progress_callback")
-        machine_events_supported = (
-            self.engine == "codex"
-            and self._supports_machine_events(prefix, workspace)
-        )
+        machine_events_supported = False
+        if self.engine == "codex":
+            self._require_machine_events(prefix, workspace)
+            machine_events_supported = True
         if callable(progress_callback):
             try:
                 progress_callback(
@@ -834,6 +911,7 @@ class AiCliProfileRunner:
             ),
             "machine_event_status": str(run.get("machineEventStatus") or ""),
             "machine_event_count": int(run.get("machineEventCount") or 0),
+            "error_code": str(run.get("errorCode") or ""),
             "observability_level": (
                 "live_safe_events"
                 if machine_events_supported

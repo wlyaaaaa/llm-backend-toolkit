@@ -26,6 +26,11 @@ from .input_integrity import (
 )
 from .input_lifecycle import JobInputLifecycle, JobNotRunnableError
 from .observability import append_event, append_event_once, notify_observer
+from .workspace_observer import (
+    WorkspaceRootError,
+    revalidate_workspace_root,
+    validate_workspace_root,
+)
 
 
 Spawner = Callable[[str, Path], None]
@@ -34,6 +39,7 @@ CACHE_INDEX_SCHEMA = "llm-backend-toolkit.cache-index.v1"
 CACHE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+/=-]{0,511}$")
 CACHEABLE_RESULT_STATUSES = frozenset({"ok", "partial"})
 REQUEST_DIGEST_CANONICALIZATION = "stdlib-json-sort-compact-utf8-v1"
+OBSERVER_LOCAL_SCHEMA = "llm-backend-toolkit.observer-local.v1"
 _CACHE_LOCK_TIMEOUT_SECONDS = 5.0
 _CACHE_LOCK_POLL_SECONDS = 0.01
 _PROCESS_CACHE_LOCKS_GUARD = threading.Lock()
@@ -140,6 +146,28 @@ def _observer_task_label(request: dict[str, Any]) -> str:
     if "image" in kinds:
         return "图像理解与文字提取任务"
     return "模型生成任务"
+
+
+def _observer_local_metadata(
+    job_id: str,
+    request: dict[str, Any],
+) -> dict[str, str] | None:
+    execution = request.get("execution")
+    if not isinstance(execution, dict) or execution.get("mode") != "agent":
+        return None
+    workspace = execution.get("workspace")
+    if not isinstance(workspace, str):
+        return None
+    try:
+        validated = validate_workspace_root(workspace)
+        canonical_workspace = revalidate_workspace_root(validated)
+    except (OSError, RuntimeError, WorkspaceRootError):
+        return None
+    return {
+        "schema": OBSERVER_LOCAL_SCHEMA,
+        "job_id": job_id,
+        "canonical_workspace": os.fspath(canonical_workspace),
+    }
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -479,6 +507,9 @@ class JobStore:
         job_dir = self._job_dir(job_id)
         job_dir.mkdir(parents=True, exist_ok=False)
         _atomic_json(job_dir / "request.json", request)
+        observer_local = _observer_local_metadata(job_id, request)
+        if observer_local is not None:
+            _atomic_json(job_dir / ".observer-local.json", observer_local)
         created_utc = _utc_now()
         _atomic_json(
             job_dir / "state.json",
@@ -849,6 +880,8 @@ class JobStore:
             "thinking_active": False,
             "thinking_chars": 0,
             "token_events": 0,
+            "current_context_tokens": None,
+            "context_window_tokens": None,
         }
 
         summaries = {
@@ -871,9 +904,16 @@ class JobStore:
             if phase not in allowed_phases:
                 phase = "waiting"
             delta = str(event.get("content_delta") or "")
-            if allow_public_preview and delta and len(public_preview) < preview_limit:
-                public_preview = (public_preview + delta)[:preview_limit]
-            if delta:
+            has_replacement = "content_replace" in event
+            replacement = str(event.get("content_replace") or "")
+            if allow_public_preview:
+                if has_replacement:
+                    public_preview = replacement[:preview_limit]
+                elif delta and len(public_preview) < preview_limit:
+                    public_preview = (public_preview + delta)[:preview_limit]
+            if has_replacement:
+                metrics["estimated_output_tokens"] = _estimate_tokens(replacement)
+            elif delta:
                 metrics["estimated_output_tokens"] += _estimate_tokens(delta)
             if "elapsed_seconds" in event:
                 metrics["elapsed_seconds"] = round(float(event.get("elapsed_seconds") or 0.0), 3)
@@ -885,6 +925,16 @@ class JobStore:
                 metrics["thinking_chars"] = max(0, int(event.get("thinking_chars") or 0))
             if "token_events" in event:
                 metrics["token_events"] = max(0, int(event.get("token_events") or 0))
+            if type(event.get("current_context_tokens")) is int:
+                metrics["current_context_tokens"] = max(
+                    0,
+                    int(event["current_context_tokens"]),
+                )
+            if type(event.get("context_window_tokens")) is int:
+                metrics["context_window_tokens"] = max(
+                    0,
+                    int(event["context_window_tokens"]),
+                )
 
             public_event = event.get("public_event")
             if isinstance(public_event, dict):
@@ -895,16 +945,17 @@ class JobStore:
                 )
                 if re.fullmatch(r"[a-z][a-z0-9_.-]{0,95}", kind) and summary:
                     payload_value = public_event.get("payload")
-                    append_event(
-                        job_dir,
-                        kind,
-                        summary,
-                        payload=(
-                            dict(payload_value)
-                            if isinstance(payload_value, dict)
-                            else {}
-                        ),
-                    )
+                    if kind != "agent.context.usage.updated":
+                        append_event(
+                            job_dir,
+                            kind,
+                            summary,
+                            payload=(
+                                dict(payload_value)
+                                if isinstance(payload_value, dict)
+                                else {}
+                            ),
+                        )
 
             now = time.monotonic()
             updated_utc = _utc_now()

@@ -64,11 +64,20 @@ def _render(
         sections.extend(["", "# Expected output", _canonical(expected_output)])
     if execution_mode == "agent":
         response_discipline = (
-            "Before and after each major action or tool call, publish a brief public progress update "
-            "in the same language as the user. Each update may state only a plan, action, or verified "
-            "result. Never expose or guess hidden chain-of-thought or private reasoning, and do not "
-            "include secrets, raw tool input/output, or file contents. Keep updates concise and useful. "
-            "End with the complete final result."
+            "Publish brief public progress updates in the same language as the user at meaningful "
+            "milestones: when work begins, after a material file or tool result, when blocked, and "
+            "before the final response. Do not emit a progress message for every command. Each update "
+            "may state only a plan, action, or verified result. Never expose or guess hidden "
+            "chain-of-thought or private reasoning, and do not include secrets, raw tool input/output, "
+            "or file contents. Prefer the built-in apply_patch tool for workspace file edits. If "
+            "apply_patch is unavailable, use one direct, non-elevated PowerShell "
+            "Set-Content -LiteralPath command for the declared workspace file, with UTF-8 encoding; "
+            "never write outside the declared workspace. Do not use shell redirection, heredocs, "
+            "encoded commands, or inline interpreter scripts. Use other shell commands only for "
+            "read-only inspection or validation. Never request elevated or out-of-sandbox "
+            "execution. If a command is declined, do not retry it through alternate forms; publish a "
+            "brief blocked update and stop. Keep updates concise and useful. End with the complete "
+            "final result."
         )
     else:
         response_discipline = (

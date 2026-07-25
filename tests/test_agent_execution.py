@@ -96,7 +96,210 @@ def agent_request(workspace):
     }
 
 
+def after_codex_machine_event_probe(run_result):
+    def bounded(command, **kwargs):
+        if command[-2:] == ["version", "--json"]:
+            return (
+                0,
+                json.dumps(
+                    {
+                        "capabilities": {
+                            "machineEventProjection": "aicli.machine-event.v1"
+                        }
+                    }
+                ),
+                "",
+                1,
+            )
+        return run_result
+
+    return bounded
+
+
 class AgentExecutionTests(unittest.TestCase):
+    def test_codex_runner_does_not_discover_a_legacy_localappdata_install(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            legacy_entry = root / "aicli" / "bin" / "aicli.ps1"
+            legacy_entry.parent.mkdir(parents=True)
+            legacy_entry.write_text("# legacy stub\n", encoding="utf-8")
+            execution = {
+                "workspace": str(root),
+                "model": "qwen-main-v1",
+                "policy": "workspace-write",
+                "native_images": [],
+                "budget": {
+                    "timeout_seconds": 30,
+                    "max_steps": 4,
+                    "max_tool_calls": 4,
+                },
+            }
+            with patch.dict(
+                os.environ,
+                {
+                    "LLM_TOOLKIT_AICLI_ENTRY": "",
+                    "LOCALAPPDATA": str(root),
+                },
+                clear=False,
+            ), patch(
+                "llm_backend_toolkit.agent_runners.shutil.which",
+                return_value="pwsh",
+            ), patch(
+                "llm_backend_toolkit.agent_runners._bounded_process",
+                return_value=(
+                    0,
+                    json.dumps(
+                        {
+                            "capabilities": {
+                                "machineEventProjection": "aicli.machine-event.v1"
+                            }
+                        }
+                    ),
+                    "",
+                    1,
+                ),
+            ) as bounded:
+                runner = AiCliProfileRunner(
+                    name="codex-cli",
+                    engine="codex",
+                    default_profile="codex-ollama-main",
+                )
+
+                with self.assertRaises(AgentRunnerError) as raised:
+                    runner.invoke("task", execution)
+
+            self.assertEqual(
+                "agent_runner_unavailable",
+                raised.exception.error.category,
+            )
+            bounded.assert_not_called()
+
+    def test_codex_runner_missing_or_wrong_machine_event_capability_fails_before_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = root / "aicli.ps1"
+            entry.write_text("# stub\n", encoding="utf-8")
+            for capabilities in (
+                {},
+                {"machineEventProjection": "aicli.machine-event.v0"},
+            ):
+                with self.subTest(capabilities=capabilities):
+                    runner = AiCliProfileRunner(
+                        name="codex-cli",
+                        engine="codex",
+                        default_profile="codex-ollama-main",
+                        entry=str(entry),
+                    )
+                    bounded_result = (
+                        0,
+                        json.dumps({"capabilities": capabilities}),
+                        "",
+                        1,
+                    )
+                    with patch(
+                        "llm_backend_toolkit.agent_runners.shutil.which",
+                        return_value="pwsh",
+                    ), patch(
+                        "llm_backend_toolkit.agent_runners._bounded_process",
+                        return_value=bounded_result,
+                    ) as bounded:
+                        with self.assertRaises(AgentRunnerError) as raised:
+                            runner.invoke("task", self._codex_execution(root))
+
+                    self.assertEqual(
+                        "agent_runner_incompatible",
+                        raised.exception.error.category,
+                    )
+                    self.assertEqual(1, bounded.call_count)
+                    self.assertEqual(
+                        ["version", "--json"],
+                        bounded.call_args.args[0][-2:],
+                    )
+
+    def test_codex_runner_failed_capability_probe_fails_before_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = root / "aicli.ps1"
+            entry.write_text("# stub\n", encoding="utf-8")
+            runner = AiCliProfileRunner(
+                name="codex-cli",
+                engine="codex",
+                default_profile="codex-ollama-main",
+                entry=str(entry),
+            )
+            with patch(
+                "llm_backend_toolkit.agent_runners.shutil.which",
+                return_value="pwsh",
+            ), patch(
+                "llm_backend_toolkit.agent_runners._bounded_process",
+                return_value=(1, "", "probe failed", 1),
+            ) as bounded:
+                with self.assertRaises(AgentRunnerError) as raised:
+                    runner.invoke("task", self._codex_execution(root))
+
+            self.assertEqual(
+                "agent_runner_incompatible",
+                raised.exception.error.category,
+            )
+            self.assertEqual(1, bounded.call_count)
+            self.assertEqual(
+                ["version", "--json"],
+                bounded.call_args.args[0][-2:],
+            )
+
+    def test_codex_runner_timed_out_capability_probe_fails_before_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = root / "aicli.ps1"
+            entry.write_text("# stub\n", encoding="utf-8")
+            runner = AiCliProfileRunner(
+                name="codex-cli",
+                engine="codex",
+                default_profile="codex-ollama-main",
+                entry=str(entry),
+            )
+            probe_timeout = AgentRunnerError(
+                ToolError(
+                    category="agent_timeout",
+                    summary="probe timed out",
+                    retryable=True,
+                    options=("handle-in-codex",),
+                )
+            )
+            with patch(
+                "llm_backend_toolkit.agent_runners.shutil.which",
+                return_value="pwsh",
+            ), patch(
+                "llm_backend_toolkit.agent_runners._bounded_process",
+                side_effect=probe_timeout,
+            ) as bounded:
+                with self.assertRaises(AgentRunnerError) as raised:
+                    runner.invoke("task", self._codex_execution(root))
+
+            self.assertEqual(
+                "agent_runner_incompatible",
+                raised.exception.error.category,
+            )
+            self.assertEqual(1, bounded.call_count)
+            self.assertEqual(
+                ["version", "--json"],
+                bounded.call_args.args[0][-2:],
+            )
+
+    @staticmethod
+    def _codex_execution(root):
+        return {
+            "workspace": str(root),
+            "model": "qwen-main-v1",
+            "policy": "workspace-write",
+            "native_images": [],
+            "budget": {
+                "timeout_seconds": 30,
+                "max_steps": 4,
+                "max_tool_calls": 4,
+            },
+        }
+
     def test_workspace_metadata_change_emits_safe_completed_file_event(self):
         class WritingRunner(FakeRunner):
             def invoke(self, prompt, execution):
@@ -1340,6 +1543,27 @@ class AgentExecutionTests(unittest.TestCase):
                         "public_text": "公开阶段结果",
                     }
                 )
+                callback(
+                    {
+                        "schema": "aicli.machine-event.v1",
+                        "sequence": 4,
+                        "kind": "context.usage.updated",
+                        "status": "updated",
+                        "current_tokens": 202000,
+                        "context_window_tokens": 258400,
+                        "private_trace": "PRIVATE_CONTEXT_TRACE",
+                    }
+                )
+                callback(
+                    {
+                        "schema": "aicli.machine-event.v1",
+                        "sequence": 5,
+                        "kind": "context.compaction.completed",
+                        "status": "completed",
+                        "compaction_count": 1,
+                        "replacement_history": "PRIVATE_COMPACTED_HISTORY",
+                    }
+                )
                 return 0, json.dumps(envelope, ensure_ascii=False), "", 50
 
             execution = {
@@ -1373,6 +1597,8 @@ class AgentExecutionTests(unittest.TestCase):
             self.assertIn("agent.reasoning.activity", kinds)
             self.assertIn("agent.tool.activity", kinds)
             self.assertIn("agent.output.completed", kinds)
+            self.assertIn("agent.context.usage.updated", kinds)
+            self.assertIn("agent.context.compaction.completed", kinds)
             output_event = next(
                 event
                 for event in progress
@@ -1383,11 +1609,216 @@ class AgentExecutionTests(unittest.TestCase):
                 "公开阶段结果",
                 output_event["public_event"]["summary_zh"],
             )
-            self.assertEqual("公开阶段结果", output_event["content_delta"])
+            self.assertEqual("公开阶段结果", output_event["content_replace"])
+            self.assertNotIn("content_delta", output_event)
             serialized = json.dumps(progress, ensure_ascii=False)
             self.assertNotIn("PRIVATE_REASONING", serialized)
             self.assertNotIn("PRIVATE_COMMAND", serialized)
+            self.assertNotIn("PRIVATE_CONTEXT_TRACE", serialized)
+            self.assertNotIn("PRIVATE_COMPACTED_HISTORY", serialized)
+            context_event = next(
+                event
+                for event in progress
+                if (event.get("public_event") or {}).get("kind")
+                == "agent.context.usage.updated"
+            )
+            self.assertEqual(
+                202000,
+                context_event["public_event"]["payload"]["current_tokens"],
+            )
+            self.assertEqual(
+                258400,
+                context_event["public_event"]["payload"][
+                    "context_window_tokens"
+                ],
+            )
             self.assertIn("公开阶段结果", serialized)
+
+    def test_aicli_command_execution_events_are_safe_and_specific(self):
+        progress = []
+        cases = (
+            (
+                {
+                    "kind": "tool.activity",
+                    "status": "started",
+                    "item_type": "command_execution",
+                    "command_status": "in_progress",
+                    "command": "PRIVATE_STARTED_COMMAND",
+                },
+                "智能体正在执行命令。",
+                {},
+            ),
+            (
+                {
+                    "kind": "tool.activity",
+                    "status": "completed",
+                    "item_type": "command_execution",
+                    "command_status": "succeeded",
+                    "exit_code": 0,
+                    "duration_ms": 617,
+                    "cwd": "PRIVATE_SUCCEEDED_CWD",
+                },
+                "智能体执行命令成功（退出码 0，耗时 617 毫秒）。",
+                {"exit_code": 0, "duration_ms": 617},
+            ),
+            (
+                {
+                    "kind": "tool.activity",
+                    "status": "completed",
+                    "item_type": "command_execution",
+                    "command_status": "failed",
+                    "exit_code": 9,
+                    "duration_ms": 731,
+                    "output": "PRIVATE_FAILED_OUTPUT",
+                },
+                "智能体执行命令失败（退出码 9，耗时 731 毫秒）。",
+                {"exit_code": 9, "duration_ms": 731},
+            ),
+            (
+                {
+                    "kind": "tool.activity",
+                    "status": "completed",
+                    "item_type": "command_execution",
+                    "command_status": "declined",
+                    "arguments": "PRIVATE_DECLINED_ARGUMENTS",
+                },
+                "智能体的命令执行已被拒绝。",
+                {},
+            ),
+        )
+
+        for event, expected_summary, expected_metrics in cases:
+            AiCliProfileRunner._emit_machine_event(progress.append, event)
+            public_event = progress[-1]["public_event"]
+            self.assertEqual(expected_summary, public_event["summary_zh"])
+            self.assertEqual(
+                event["command_status"],
+                public_event["payload"]["command_status"],
+            )
+            for key, expected in expected_metrics.items():
+                self.assertEqual(expected, public_event["payload"][key])
+
+        serialized = json.dumps(progress, ensure_ascii=False)
+        self.assertNotIn("PRIVATE_STARTED_COMMAND", serialized)
+        self.assertNotIn("PRIVATE_SUCCEEDED_CWD", serialized)
+        self.assertNotIn("PRIVATE_FAILED_OUTPUT", serialized)
+        self.assertNotIn("PRIVATE_DECLINED_ARGUMENTS", serialized)
+
+    def test_aicli_invalid_command_projection_is_not_emitted(self):
+        invalid_events = (
+            {
+                "kind": "tool.activity",
+                "status": "completed",
+                "item_type": "command_execution",
+                "command_status": "future_status",
+            },
+            {
+                "kind": "tool.activity",
+                "status": "completed",
+                "item_type": "command_execution",
+                "command_status": {"private": "PRIVATE_STATUS_OBJECT"},
+            },
+        )
+
+        for event in invalid_events:
+            with self.subTest(event=event):
+                progress = []
+                AiCliProfileRunner._emit_machine_event(progress.append, event)
+                self.assertEqual([], progress)
+
+    def test_aicli_protocol_failure_exposes_only_a_safe_static_code(self):
+        progress = []
+
+        AiCliProfileRunner._emit_machine_event(
+            progress.append,
+            {
+                "kind": "run.failed",
+                "status": "failed",
+                "error_category": "protocol_or_process_failure",
+                "error_code": "codex_appserver.thread_start_failed",
+                "raw_stderr": "PRIVATE_RAW_STDERR",
+                "prompt": "PRIVATE_PROMPT",
+            },
+        )
+
+        self.assertEqual(1, len(progress))
+        public_event = progress[0]["public_event"]
+        self.assertEqual("agent.run.failed", public_event["kind"])
+        self.assertEqual(
+            "codex_appserver.thread_start_failed",
+            public_event["payload"]["error_code"],
+        )
+        serialized = json.dumps(progress, ensure_ascii=False)
+        self.assertNotIn("PRIVATE_RAW_STDERR", serialized)
+        self.assertNotIn("PRIVATE_PROMPT", serialized)
+
+    def test_public_agent_output_delta_is_projected_as_generating_progress(self):
+        progress = []
+
+        AiCliProfileRunner._emit_machine_event(
+            progress.append,
+            {
+                "kind": "output.delta",
+                "status": "updated",
+                "item_type": "agent_message",
+                "public_text": "公开增量",
+                "steps": 3,
+                "tool_calls": 2,
+                "events_seen": 9,
+                "reasoning": "PRIVATE_HIDDEN_REASONING",
+            },
+        )
+
+        self.assertEqual(1, len(progress))
+        event = progress[0]
+        self.assertEqual("generating", event["phase"])
+        self.assertEqual(
+            "agent.output.delta",
+            event["public_event"]["kind"],
+        )
+        self.assertEqual(
+            "公开增量",
+            event["public_event"]["summary_zh"],
+        )
+        self.assertEqual("公开增量", event["content_delta"])
+        self.assertNotIn("content_replace", event)
+        self.assertEqual(
+            {
+                "status": "updated",
+                "item_type": "agent_message",
+                "steps": 3,
+                "tool_calls": 2,
+                "events_seen": 9,
+            },
+            event["public_event"]["payload"],
+        )
+        self.assertNotIn(
+            "PRIVATE_HIDDEN_REASONING",
+            json.dumps(event, ensure_ascii=False),
+        )
+
+    def test_empty_or_unsafe_public_agent_output_delta_is_not_emitted(self):
+        for label, public_text in {
+            "empty": " \x00\t\r\n\u202e ",
+            "unsafe": r"正在读取 C:\Users\alice\private.txt",
+        }.items():
+            with self.subTest(label=label):
+                progress = []
+
+                AiCliProfileRunner._emit_machine_event(
+                    progress.append,
+                    {
+                        "kind": "output.delta",
+                        "status": "updated",
+                        "item_type": "agent_message",
+                        "public_text": public_text,
+                        "steps": 3,
+                        "tool_calls": 2,
+                        "events_seen": 9,
+                    },
+                )
+
+                self.assertEqual([], progress)
 
     def test_public_agent_message_is_bounded_safe_and_used_as_timeline_summary(self):
         progress = []
@@ -1408,7 +1839,8 @@ class AgentExecutionTests(unittest.TestCase):
         self.assertEqual(1, len(progress))
         event = progress[0]
         summary = event["public_event"]["summary_zh"]
-        self.assertEqual(summary, event["content_delta"])
+        self.assertEqual(summary, event["content_replace"])
+        self.assertNotIn("content_delta", event)
         self.assertLessEqual(len(summary), 500)
         self.assertTrue(summary.startswith("＜script＞alert(1)＜/script＞ 公开进度"))
         self.assertNotIn("<script>", summary)
@@ -1502,7 +1934,8 @@ class AgentExecutionTests(unittest.TestCase):
                     expected,
                     event["public_event"]["summary_zh"],
                 )
-                self.assertEqual(expected, event["content_delta"])
+                self.assertEqual(expected, event["content_replace"])
+                self.assertNotIn("content_delta", event)
 
     def test_qwen_json_array_is_parsed_without_returning_event_trace(self):
         values = _json_values('[{"type":"tool","content":"hidden"},{"result":"FINAL_ONLY","stats":{"tools":{"totalCalls":3}}}]')
@@ -1573,11 +2006,11 @@ class AgentExecutionTests(unittest.TestCase):
                         "maxToolCalls": "hard",
                     },
                     "limitUsage": {
-                        "steps": 1,
+                        "steps": 0,
                         "toolCalls": 0,
                         "eventsSeen": 3,
                         "protocol": "codex-jsonl",
-                        "stepDefinition": "distinct-thread-item-v1",
+                        "stepDefinition": "distinct-non-output-thread-item-v2",
                         "cleanupConfirmed": True,
                         "cleanupMethod": "none",
                     },
@@ -1585,13 +2018,17 @@ class AgentExecutionTests(unittest.TestCase):
                         "input_tokens": 120,
                         "cached_input_tokens": 32,
                         "output_tokens": 8,
+                        "current_context_tokens": 202000,
+                        "context_window_tokens": 258400,
                     },
                     "eventProjection": "codex-public-v1",
                 }
             }
             with patch("llm_backend_toolkit.agent_runners.shutil.which", return_value="pwsh"), patch(
                 "llm_backend_toolkit.agent_runners._bounded_process",
-                return_value=(0, __import__("json").dumps(envelope), "", 12),
+                side_effect=after_codex_machine_event_probe(
+                    (0, json.dumps(envelope), "", 12)
+                ),
             ) as bounded:
                 response = runner.invoke("task", execution)
 
@@ -1604,10 +2041,13 @@ class AgentExecutionTests(unittest.TestCase):
             self.assertEqual("hard", response.limit_enforcement["timeout"])
             self.assertEqual("hard", response.limit_enforcement["maxSteps"])
             self.assertEqual("hard", response.limit_enforcement["maxToolCalls"])
-            self.assertEqual(1, response.steps)
+            self.assertEqual(0, response.steps)
             self.assertEqual(0, response.tool_calls)
             self.assertEqual("codex-jsonl", response.limit_usage["protocol"])
-            self.assertEqual("distinct-thread-item-v1", response.limit_usage["step_definition"])
+            self.assertEqual(
+                "distinct-non-output-thread-item-v2",
+                response.limit_usage["step_definition"],
+            )
             self.assertTrue(response.limit_usage["cleanup_confirmed"])
             self.assertEqual("", response.limit_hit)
             self.assertEqual("codex-public-v1", response.event_projection)
@@ -1616,6 +2056,8 @@ class AgentExecutionTests(unittest.TestCase):
                     "input_tokens": 120,
                     "cached_input_tokens": 32,
                     "output_tokens": 8,
+                    "current_context_tokens": 202000,
+                    "context_window_tokens": 258400,
                 },
                 response.usage,
             )
@@ -1658,7 +2100,9 @@ class AgentExecutionTests(unittest.TestCase):
                 return_value="pwsh",
             ), patch(
                 "llm_backend_toolkit.agent_runners._bounded_process",
-                return_value=(0, json.dumps(envelope), "", 1000),
+                side_effect=after_codex_machine_event_probe(
+                    (0, json.dumps(envelope), "", 1000)
+                ),
             ):
                 response = runner.invoke(
                     "task",
@@ -1699,7 +2143,9 @@ class AgentExecutionTests(unittest.TestCase):
             }
             with patch("llm_backend_toolkit.agent_runners.shutil.which", return_value="pwsh"), patch(
                 "llm_backend_toolkit.agent_runners._bounded_process",
-                return_value=(0, __import__("json").dumps(envelope), "", 12),
+                side_effect=after_codex_machine_event_probe(
+                    (0, json.dumps(envelope), "", 12)
+                ),
             ):
                 with self.assertRaises(AgentRunnerError) as raised:
                     runner.invoke(
@@ -1751,7 +2197,9 @@ class AgentExecutionTests(unittest.TestCase):
             }
             with patch("llm_backend_toolkit.agent_runners.shutil.which", return_value="pwsh"), patch(
                 "llm_backend_toolkit.agent_runners._bounded_process",
-                return_value=(1, __import__("json").dumps(envelope), "", 22),
+                side_effect=after_codex_machine_event_probe(
+                    (1, json.dumps(envelope), "", 22)
+                ),
             ):
                 with self.assertRaises(AgentRunnerError) as raised:
                     runner.invoke(
@@ -1794,7 +2242,9 @@ class AgentExecutionTests(unittest.TestCase):
             }
             with patch("llm_backend_toolkit.agent_runners.shutil.which", return_value="pwsh"), patch(
                 "llm_backend_toolkit.agent_runners._bounded_process",
-                return_value=(1, __import__("json").dumps(envelope), "", 8),
+                side_effect=after_codex_machine_event_probe(
+                    (1, json.dumps(envelope), "", 8)
+                ),
             ):
                 with self.assertRaises(AgentRunnerError) as raised:
                     runner.invoke(
@@ -1836,7 +2286,9 @@ class AgentExecutionTests(unittest.TestCase):
             }
             with patch("llm_backend_toolkit.agent_runners.shutil.which", return_value="pwsh"), patch(
                 "llm_backend_toolkit.agent_runners._bounded_process",
-                return_value=(1, __import__("json").dumps(envelope), "", 30000),
+                side_effect=after_codex_machine_event_probe(
+                    (1, json.dumps(envelope), "", 30000)
+                ),
             ):
                 with self.assertRaises(AgentRunnerError) as raised:
                     runner.invoke(
@@ -2064,6 +2516,8 @@ class AgentExecutionTests(unittest.TestCase):
                         "input_tokens": 120,
                         "cached_input_tokens": 32,
                         "output_tokens": 40,
+                        "current_context_tokens": 202000,
+                        "context_window_tokens": 258400,
                     },
                 )
             )
@@ -2079,6 +2533,8 @@ class AgentExecutionTests(unittest.TestCase):
                     "prompt_tokens": 120,
                     "cached_tokens": 32,
                     "completion_tokens": 40,
+                    "current_context_tokens": 202000,
+                    "context_window_tokens": 258400,
                     "total_tokens": 160,
                     "elapsed_seconds": 2.0,
                     "tps": 20.0,
@@ -2170,7 +2626,9 @@ class AgentExecutionTests(unittest.TestCase):
             }
             with patch("llm_backend_toolkit.agent_runners.shutil.which", return_value="pwsh"), patch(
                 "llm_backend_toolkit.agent_runners._bounded_process",
-                return_value=(1, __import__("json").dumps(envelope), "", 12),
+                side_effect=after_codex_machine_event_probe(
+                    (1, json.dumps(envelope), "", 12)
+                ),
             ):
                 with self.assertRaises(AgentRunnerError) as raised:
                     runner.invoke("task", execution)

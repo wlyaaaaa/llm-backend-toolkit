@@ -11,6 +11,8 @@
 
 版本锚点：`qwen-main-v1:latest` digest `46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a`，父模型 `qwen3.6:35b`，`Q4_K_M`，262144 context；Toolkit `628e25c`，aicli `9674a94`。模型 alias/digest、CLI 版本、沙箱合同或任务提交发生实质变化后，本报告只能作为历史基线。
 
+当前正式 skill 不依赖旧安装态：它把 `LLM_TOOLKIT_AICLI_ENTRY` 固定到受管的当前源码入口，该入口缺失就明确失败。当前 Codex app-server 最低已验证基线是 `codex-cli 0.145.0`，`0.146.0-alpha.3.1` 曾通过兼容门；未来更新默认尝试，但协议漂移必须明确失败。该现行调用合同不会追溯改写本报告的历史 benchmark 锚点。
+
 ## 结论
 
 在本专项任务内默认只选 Codex CLI。它是四个 harness 中唯一同时满足“进程正常退出”和“确定性验收 21/21”的候选，并且比同样生成 21/21 产物但最终 exit 1 的 Claude Code 快约 53.4%。这证明当前 Codex CLI harness 最适合承载该任务，不证明 Codex、Claude、Qwen Code 或 OpenCode 的通用智能高低。
@@ -19,7 +21,7 @@
 
 ## 同题实测
 
-四个 CLI 均在测试前升级到当时最新版本，使用同一个 `qwen-main-v1`、同一 9 行 JSONL、同一任务说明、30 step / 120 tool-call 请求预算和 900 秒墙钟上限。验收器检查：raw 不变、逐行流式处理、去重 lineage、冲突不覆盖、时间不确定性、验证码脱敏、损坏 Unicode 不臆修、hash、原子写、幂等、checkpoint 与 receipt。
+四个 CLI 的原始横向测试均在测试前升级到当时最新版本，使用同一个 `qwen-main-v1`、同一 9 行 JSONL、同一任务说明、30 step / 120 tool-call 请求预算和 900 秒墙钟上限。当前 Codex 回归使用 `distinct-non-output-thread-item-v2`：公开进度与最终消息不计行动 step；由于真实复测证明模型在完成 21/21 产物后还会继续执行验证，本场景单独保留 45 step / 120 tool-call 的硬上限，不改变 Toolkit 的全局预算语义。验收器检查：raw 不变、逐行流式处理、去重 lineage、冲突不覆盖、时间不确定性、验证码脱敏、损坏 Unicode 不臆修、hash、原子写、幂等、checkpoint 与 receipt。
 
 排名规则：先要求进程 exit 0 且 21/21；合格者再按墙钟时间、工具调用数排序。
 
@@ -31,6 +33,12 @@
 | OpenCode | 1.18.4 | 0/21（未生成 cleaner） | exit 0，但只返回计划 | 417.289 秒 | 20 | 不通过 |
 
 这是 harness + 本机模型 + 当前任务的结果，不是四个上游项目的通用质量排名。时间已进入决策：Claude 虽生成正确文件，但比 Codex 慢约 2.15 倍且退出失败；因此没有理由把它设为默认。
+
+## 2026-07-25 当前源码链复测
+
+现行回归固定使用当前 AICLI 源码入口和 Codex app-server 协议。数据工厂专项再次通过 **21/21**：exit 0、36 个 action step、17 次工具调用、118 个安全 machine event / 126 个 app-server event、当前上下文 31,155 / 258,400、执行 164.815 秒。回执明确为 `codex-app-server`、`distinct-non-output-thread-item-v2`，45 step / 120 tool-call / 900 秒硬预算均未命中，进程树清理已确认。
+
+同日完整通用代理回归也在最终任务合同下通过 30/30、协议 3/3；详情见 [四 harness 通用代理验收报告](general-agent-benchmark-v1.md#2026-07-25-当前源码链回归)。这两项分别证明数据清洗专项和通用小型代理任务，不能互相替代，也不外推到没有 verifier 的开放式长期任务。
 
 ## 本专项能够证明的能力边界
 
@@ -63,10 +71,10 @@
 
 ## 沙箱与预算
 
-- aicli 强制使用 Codex Windows 外层沙箱并关闭网络；无法建立沙箱时 fail closed。
-- 内层 CLI 可自动批准，但只在外层允许的工作区/一次性运行目录内生效。
+- 本报告 2026-07-22 的历史验收使用当时的 Codex Windows 外层沙箱；因此 21/21 只证明上方版本锚点，不冒充现行沙箱合同的重复验收。
+- 当前官方与本地 Ollama Codex machine run 已改用 Codex 原生 `read-only` / `workspace-write` sandbox，使 app-server 可访问官方服务或固定本机模型网关；模型生成的动作仍受 workspace policy 限制。第三方 Codex 及其他适用引擎才继续使用网络关闭的 Windows 外层沙箱。
 - `read-only` 运行把 CLI 状态放在临时可写根，来源工作区只读；`workspace-write` 应只指向隔离 worktree/暂存目录。
-- 墙钟 timeout 是四个 harness 的统一硬上限。Qwen Code 还支持 turns/tool calls，Claude 支持 max turns；Codex/OpenCode 当前没有被本工具证明可硬限制 step/tool-call，因此回执中的相应数字只是请求预算或结果侧观测，不冒充强制门禁。
+- 历史四 harness 的统一硬上限只有墙钟 timeout；当时 Qwen Code 另有 turns/tool calls、Claude 有 max turns，Codex/OpenCode 未被该版本证明可硬限制 step/tool-call。现行 AICLI Codex app-server 路径新增版本化安全事件投影与硬限制，但新的验收仍必须以该次结果回执为准，不能用现行能力追溯改写历史测试。
 
 ## Qwen3.7 Plus：不实测，只做官方资料判断
 

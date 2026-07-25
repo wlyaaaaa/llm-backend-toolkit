@@ -92,6 +92,7 @@ class ObserverUiTests(unittest.TestCase):
             "执行方式",
             "推理等级",
             "Token",
+            "当前上下文",
             "TPS",
             "耗时",
             "GPU",
@@ -134,7 +135,19 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("captureRunListViewport", self.js)
         self.assertIn("focused.focus({ preventScroll: true })", self.js)
         self.assertNotIn("elements.runList.replaceChildren()", self.js)
-        self.assertIn("timelineSignature", self.js)
+
+    def test_timeline_refresh_updates_stable_keyed_rows(self) -> None:
+        self.assertIn("const timelineItemCache = new Map()", self.js)
+        self.assertIn("function timelineEventKey", self.js)
+        self.assertIn("function createTimelineItem", self.js)
+        self.assertIn("function updateTimelineItem", self.js)
+        timeline_render = self.js.split("function renderTimeline(detail)", 1)[1].split(
+            "function extractDraft", 1
+        )[0]
+        self.assertIn("timelineItemCache.get(event.key)", timeline_render)
+        self.assertIn("elements.timeline.insertBefore(entry.item, cursor)", timeline_render)
+        self.assertNotIn("replaceChildren", timeline_render)
+        self.assertNotIn("JSON.stringify(events)", timeline_render)
 
     def test_result_status_overrides_completed_job_status(self) -> None:
         normalized = self.js.split("function normalizedStatus(run)", 1)[1].split(
@@ -174,15 +187,45 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("summary_zh", self.js)
         self.assertIn("occurred_utc", self.js)
         self.assertIn("编辑文件", self.js)
+        self.assertIn('"agent.output.delta": "智能体公开进度"', self.js)
         self.assertIn('"workspace.change.observed": "检测到工作区变化"', self.js)
         self.assertIn("workspace-change-detail", self.js)
+        self.assertIn("完整路径：${absolutePath}", self.js)
+        self.assertIn("复制完整路径：${path.relativePath}", self.js)
+        self.assertIn('typeof change.absolute_path === "string"', self.js)
+        self.assertIn('copyText(path.absolutePath, "完整路径已复制")', self.js)
         self.assertIn("未验证由单一进程造成", self.js)
+        self.assertIn("未在本次公开名单内，或因安全、大小上限未展示", self.js)
         self.assertIn("总计 ${formatNumber(totalTokens)}", self.js)
         self.assertIn("输入 ${formatNumber(promptTokens)}", self.js)
         self.assertIn("输出 ${formatNumber(completionTokens)}", self.js)
         self.assertIn("缓存 ${formatNumber(cachedTokens)}", self.js)
         self.assertIn("输出 token/秒（整段墙钟估算）", self.js)
         self.assertIn("输出 token/秒（模型评估时段精确）", self.js)
+        self.assertIn("function contextSummary(detail)", self.js)
+        self.assertIn('"agent.context.usage.updated"', self.js)
+        self.assertIn("Codex 运行时实测", self.js)
+        self.assertIn("等待 Codex 运行时实测", self.js)
+        self.assertIn("已用", self.js)
+        self.assertIn("共", self.js)
+        context_body = self.js.split("function contextSummary(detail)", 1)[1].split(
+            "function formatDateTime", 1
+        )[0]
+        self.assertNotIn("当前后端配置", context_body)
+        self.assertNotIn("运行回执", context_body)
+        self.assertNotIn("estimated_tokens_after", context_body)
+        self.assertNotIn("prompt_tokens", context_body)
+        self.assertNotIn("result.usage", context_body)
+        self.assertNotIn("progress.metrics", context_body)
+        self.assertNotIn("detail, \"events\"", context_body)
+        self.assertIn(
+            '"context.compaction.completed": "已压缩调用输入"',
+            self.js,
+        )
+        self.assertIn(
+            '"agent.context.compaction.completed": "Codex 已自动压缩上下文"',
+            self.js,
+        )
         timeline_body = self.js.split("function timelineEvents(detail)", 1)[1].split(
             "function renderTimeline", 1
         )[0]
@@ -230,6 +273,13 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("--quiet: #657169", self.css)
         self.assertIn("outline: 2px solid var(--green-deep)", self.css)
         self.assertIn("repeat(auto-fit, minmax(96px, 1fr))", self.css)
+        narrow_timeline = self.css.split("@media (max-width: 980px)", 1)[1].split(
+            "@media (max-width: 680px)", 1
+        )[0]
+        self.assertIn("overflow-y: auto", narrow_timeline)
+        self.assertIn("overflow-x: hidden", narrow_timeline)
+        self.assertNotIn("grid-auto-flow: column", narrow_timeline)
+        self.assertNotIn("grid-auto-columns", narrow_timeline)
 
 
 if __name__ == "__main__":
