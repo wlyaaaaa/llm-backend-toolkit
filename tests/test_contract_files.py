@@ -32,7 +32,11 @@ class ContractFileTests(unittest.TestCase):
         self.assertEqual(["direct", "agent"], execution["properties"]["mode"]["enum"])
         self.assertNotIn("enum", execution["properties"]["runner"])
         self.assertIn("pattern", execution["properties"]["runner"])
+        cache_key = execution["properties"]["cache_key"]
+        self.assertEqual(512, cache_key["maxLength"])
+        self.assertIn("pattern", cache_key)
         self.assertIn("execution_receipt", response_schema["properties"])
+        self.assertIn("cache_identity", response_schema["properties"])
         self.assertIn("accepted", response_schema["properties"]["status"]["enum"])
         self.assertEqual("local-default", example["backend"])
         self.assertEqual("off", example["reasoning"]["mode"])

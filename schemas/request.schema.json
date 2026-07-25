@@ -105,7 +105,13 @@
         },
         "workspace": {"type": "string", "minLength": 1},
         "policy": {"enum": ["read-only", "workspace-write"], "default": "read-only"},
-        "cache_key": {"type": "string", "minLength": 1},
+        "cache_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@+/=-]{0,511}$",
+          "description": "Caller-owned semantic identity. When present and valid, cache reuse ignores scheduling metadata but remains isolated by backend/model/route, privacy, reasoning, media, and output protocol."
+        },
         "budget": {
           "type": "object",
           "properties": {

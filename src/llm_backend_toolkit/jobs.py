@@ -3,16 +3,24 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .backends import BackendRegistry
+
 
 Spawner = Callable[[str, Path], None]
+EXPLICIT_CACHE_IDENTITY_SCHEMA = "llm-backend-toolkit.explicit-cache-identity.v1"
+CACHE_INDEX_SCHEMA = "llm-backend-toolkit.cache-index.v1"
+CACHE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+/=-]{0,511}$")
+CACHEABLE_RESULT_STATUSES = frozenset({"ok", "partial"})
 
 
 def default_state_root() -> Path:
@@ -88,11 +96,13 @@ class JobStore:
         *,
         spawner: Spawner | None = None,
         result_preview_chars: int | None = None,
+        registry: BackendRegistry | None = None,
     ) -> None:
         self.root = Path(root or default_state_root()).expanduser().resolve()
         self.spawner = spawner or _default_spawner
         configured_preview = int(os.environ.get("LLM_TOOLKIT_RESULT_PREVIEW_CHARS", "2000"))
         self.result_preview_chars = max(32, result_preview_chars or configured_preview)
+        self.registry = registry
 
     @staticmethod
     def request_digest(request: dict[str, Any]) -> str:
@@ -101,74 +111,67 @@ class JobStore:
 
     def submit(self, request: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
         request, conversation = self._prepare_continuation(request)
-        digest = self.request_digest(request)
+        request_digest = self.request_digest(request)
         execution = request.get("execution") or {}
         is_agent = str(execution.get("mode") or "direct") == "agent"
         task = request.get("task") or {}
         media = request.get("media") or {}
         has_mutable_references = bool(task.get("sources") or media.get("attachments"))
-        explicit_cache_key = str(execution.get("cache_key") or request.get("cache_key") or "").strip()
+        explicit_cache_key = self._validated_explicit_cache_key(request)
         cacheable = (not is_agent and not has_mutable_references) or bool(explicit_cache_key)
-        initial_poll_ms = self._initial_poll_ms(request)
-        job_id = self._new_attempt_id(digest) if force or not cacheable else digest[:24]
-        job_dir = self._job_dir(job_id)
-        state_path = job_dir / "state.json"
-        if state_path.is_file():
-            state = self.get(job_id)
-            if state["job_status"] == "completed":
-                return {
-                    "status": "cache_hit",
-                    "job_id": job_id,
-                    "job_status": "completed",
-                    "poll_after_ms": 0,
-                }
-            if state["job_status"] == "stale":
-                return {
-                    "status": "blocked",
-                    "job_id": job_id,
-                    "job_status": "stale",
-                    "poll_after_ms": 0,
-                    "error": state["error"],
-                    "decision": state["decision"],
-                }
-            return {
-                "status": "running" if state["job_status"] == "running" else "accepted",
-                "job_id": job_id,
-                "job_status": state["job_status"],
-                "poll_after_ms": initial_poll_ms,
-                "recommended_check_utc": _utc_after(initial_poll_ms // 1000),
-                "monitor_until_utc": state.get("monitor_until_utc"),
+        if explicit_cache_key:
+            cache_identity, cache_digest = self._explicit_cache_identity(
+                request, explicit_cache_key
+            )
+        else:
+            cache_digest = request_digest
+            cache_identity = {
+                "schema": EXPLICIT_CACHE_IDENTITY_SCHEMA,
+                "mode": "request_digest",
+                "digest": f"sha256:{cache_digest}",
             }
-
-        job_dir.mkdir(parents=True, exist_ok=False)
-        _atomic_json(job_dir / "request.json", request)
-        _atomic_json(
-            state_path,
-            {
-                "schema": "llm-backend-toolkit.job-state.v1",
-                "job_id": job_id,
-                "request_digest": digest,
-                "job_status": "queued",
-                "backend": str(request.get("backend") or request.get("provider") or "local-default"),
-                "provider": str(request.get("provider") or ""),
-                "created_utc": _utc_now(),
-                "updated_utc": _utc_now(),
-                "monitor_until_utc": _utc_after(self._timeout_seconds(request)),
-                "cacheable": cacheable,
-                "poll_count": 0,
-                "initial_poll_ms": initial_poll_ms,
-                "conversation_root": (conversation or {}).get("root_job_id") or job_id,
-                "conversation_turn": (conversation or {}).get("turn") or 1,
-                "conversation_max_turns": (conversation or {}).get("max_turns"),
-                "display": {
-                    "task_goal": _display_text(task.get("goal")),
-                    "execution_mode": "agent" if is_agent else "direct",
-                    "reasoning_mode": str(
-                        (request.get("reasoning") or {}).get("mode") or "off"
-                    ),
-                },
-            },
-        )
+        initial_poll_ms = self._initial_poll_ms(request)
+        if force or not cacheable:
+            job_id = self._new_attempt_id(cache_digest)
+            self._create_job(
+                job_id=job_id,
+                request=request,
+                request_digest=request_digest,
+                cache_identity=cache_identity,
+                cacheable=cacheable,
+                conversation=conversation,
+                initial_poll_ms=initial_poll_ms,
+            )
+        else:
+            with self._cache_lock(cache_digest):
+                existing = self._find_cached_submission(
+                    cache_digest=cache_digest,
+                    cache_identity=cache_identity,
+                    request_digest=request_digest,
+                    initial_poll_ms=initial_poll_ms,
+                )
+                if existing is not None:
+                    return existing
+                primary_job_id = cache_digest[:24]
+                if self._job_dir(primary_job_id).exists():
+                    job_id = self._new_attempt_id(cache_digest)
+                else:
+                    job_id = primary_job_id
+                self._create_job(
+                    job_id=job_id,
+                    request=request,
+                    request_digest=request_digest,
+                    cache_identity=cache_identity,
+                    cacheable=True,
+                    conversation=conversation,
+                    initial_poll_ms=initial_poll_ms,
+                )
+                self._write_cache_index(
+                    cache_digest,
+                    job_id,
+                    cache_identity,
+                    status="active",
+                )
         try:
             self.spawner(job_id, self.root)
         except Exception:
@@ -182,9 +185,374 @@ class JobStore:
             "recommended_check_utc": _utc_after(initial_poll_ms // 1000),
             "forced": force,
             "cacheable": cacheable,
+            "cache_identity": cache_identity,
             "monitor_until_utc": self._read_state(job_id).get("monitor_until_utc"),
             **({"conversation": conversation} if conversation else {}),
         }
+
+    @staticmethod
+    def _validated_explicit_cache_key(request: dict[str, Any]) -> str | None:
+        execution = request.get("execution")
+        if not isinstance(execution, dict) or "cache_key" not in execution:
+            return None
+        value = execution.get("cache_key")
+        if not isinstance(value, str) or not CACHE_KEY_PATTERN.fullmatch(value):
+            raise ValueError(
+                "execution.cache_key must be 1-512 safe identity characters "
+                "without whitespace"
+            )
+        return value
+
+    def _explicit_cache_identity(
+        self,
+        request: dict[str, Any],
+        cache_key: str,
+    ) -> tuple[dict[str, Any], str]:
+        registry = self.registry or BackendRegistry.load()
+        requested_backend = str(
+            request.get("backend") or request.get("provider") or ""
+        ).strip()
+        resolved = registry.resolve(requested_backend or None)
+        config = dict(resolved.config)
+        execution = request.get("execution") or {}
+        execution_mode = str(execution.get("mode") or "direct")
+        route_id = ""
+        route: dict[str, Any] = {}
+        if execution_mode == "agent":
+            route_id = str(execution.get("runner") or "data_factory")
+            selected = (config.get("agent_routes") or {}).get(route_id)
+            if isinstance(selected, dict):
+                route = dict(selected)
+        privacy = request.get("privacy")
+        privacy_value = dict(privacy) if isinstance(privacy, dict) else {}
+        privacy_value["cloud_allowed"] = bool(privacy_value.get("cloud_allowed"))
+        expected = ((request.get("task") or {}).get("expected_output") or {})
+        expected_value = dict(expected) if isinstance(expected, dict) else {}
+        expected_value.setdefault("format", "text")
+        media = request.get("media")
+        media_value = media if isinstance(media, dict) else {}
+        attachment_protocol = []
+        for attachment in media_value.get("attachments") or []:
+            if not isinstance(attachment, dict):
+                continue
+            attachment_protocol.append(
+                {
+                    "kind": str(attachment.get("kind") or ""),
+                    "route": str(
+                        attachment.get("route")
+                        or media_value.get("mode")
+                        or "auto"
+                    ),
+                    "purpose": str(attachment.get("purpose") or ""),
+                }
+            )
+        config_fingerprint = self.request_digest(config)
+        route_fingerprint = self.request_digest(route) if route else ""
+        scope = {
+            "schema": EXPLICIT_CACHE_IDENTITY_SCHEMA,
+            "request_protocol": "llm-backend-toolkit.request.v1",
+            "caller_cache_key": cache_key,
+            "backend": {
+                "id": resolved.backend_id,
+                "adapter": str(config.get("adapter") or ""),
+                "model": str(config.get("model") or ""),
+                "cloud": bool(config.get("cloud")),
+                "config_fingerprint": f"sha256:{config_fingerprint}",
+            },
+            "execution": {
+                "mode": execution_mode,
+                "policy": str(execution.get("policy") or "read-only"),
+                "route_id": route_id or None,
+                "runner": str(route.get("runner") or "") or None,
+                "profile": str(route.get("profile") or "") or None,
+                "model": str(route.get("model") or "") or None,
+                "route_fingerprint": (
+                    f"sha256:{route_fingerprint}" if route_fingerprint else None
+                ),
+            },
+            "privacy": privacy_value,
+            "reasoning": {
+                "mode": str((request.get("reasoning") or {}).get("mode") or "off")
+            },
+            "task_protocol": {
+                "type": str((request.get("task") or {}).get("type") or "generation"),
+                "expected_output": expected_value,
+            },
+            "media_protocol": {
+                "mode": str(media_value.get("mode") or "auto"),
+                "attachments": attachment_protocol,
+            },
+        }
+        digest = self.request_digest(scope)
+        receipt = {
+            "schema": EXPLICIT_CACHE_IDENTITY_SCHEMA,
+            "mode": "explicit",
+            "digest": f"sha256:{digest}",
+            "backend": resolved.backend_id,
+            "model": str(config.get("model") or ""),
+            "route": route_id or None,
+            "profile": str(route.get("profile") or "") or None,
+        }
+        return receipt, digest
+
+    def _create_job(
+        self,
+        *,
+        job_id: str,
+        request: dict[str, Any],
+        request_digest: str,
+        cache_identity: dict[str, Any],
+        cacheable: bool,
+        conversation: dict[str, Any] | None,
+        initial_poll_ms: int,
+    ) -> None:
+        execution = request.get("execution") or {}
+        is_agent = str(execution.get("mode") or "direct") == "agent"
+        task = request.get("task") or {}
+        job_dir = self._job_dir(job_id)
+        job_dir.mkdir(parents=True, exist_ok=False)
+        _atomic_json(job_dir / "request.json", request)
+        _atomic_json(
+            job_dir / "state.json",
+            {
+                "schema": "llm-backend-toolkit.job-state.v1",
+                "job_id": job_id,
+                "request_digest": request_digest,
+                "cache_identity": cache_identity,
+                "job_status": "queued",
+                "backend": str(
+                    request.get("backend")
+                    or request.get("provider")
+                    or "local-default"
+                ),
+                "provider": str(request.get("provider") or ""),
+                "created_utc": _utc_now(),
+                "updated_utc": _utc_now(),
+                "monitor_until_utc": _utc_after(self._timeout_seconds(request)),
+                "cacheable": cacheable,
+                "cache_result_eligible": False,
+                "poll_count": 0,
+                "initial_poll_ms": initial_poll_ms,
+                "conversation_root": (conversation or {}).get("root_job_id")
+                or job_id,
+                "conversation_turn": (conversation or {}).get("turn") or 1,
+                "conversation_max_turns": (conversation or {}).get("max_turns"),
+                "display": {
+                    "task_goal": _display_text(task.get("goal")),
+                    "execution_mode": "agent" if is_agent else "direct",
+                    "reasoning_mode": str(
+                        (request.get("reasoning") or {}).get("mode") or "off"
+                    ),
+                },
+            },
+        )
+
+    def _find_cached_submission(
+        self,
+        *,
+        cache_digest: str,
+        cache_identity: dict[str, Any],
+        request_digest: str,
+        initial_poll_ms: int,
+    ) -> dict[str, Any] | None:
+        indexed = self._read_cache_index(cache_digest)
+        if indexed is not None:
+            indexed_job_id = str(indexed.get("job_id") or "")
+            try:
+                indexed_state = self._read_state(indexed_job_id)
+            except (FileNotFoundError, ValueError):
+                indexed_state = None
+            if indexed_state is not None and self._state_matches_cache(
+                indexed_state,
+                cache_identity=cache_identity,
+                request_digest=request_digest,
+            ):
+                receipt = self._existing_submission_receipt(
+                    indexed_job_id,
+                    indexed_state,
+                    initial_poll_ms=initial_poll_ms,
+                )
+                if receipt is not None:
+                    return receipt
+
+        primary_job_id = cache_digest[:24]
+        try:
+            primary_state = self._read_state(primary_job_id)
+        except (FileNotFoundError, ValueError):
+            return None
+        if not self._state_matches_cache(
+            primary_state,
+            cache_identity=cache_identity,
+            request_digest=request_digest,
+        ):
+            return None
+        return self._existing_submission_receipt(
+            primary_job_id,
+            primary_state,
+            initial_poll_ms=initial_poll_ms,
+        )
+
+    @staticmethod
+    def _state_matches_cache(
+        state: dict[str, Any],
+        *,
+        cache_identity: dict[str, Any],
+        request_digest: str,
+    ) -> bool:
+        stored = state.get("cache_identity")
+        if isinstance(stored, dict):
+            return (
+                stored.get("mode") == cache_identity.get("mode")
+                and stored.get("digest") == cache_identity.get("digest")
+            )
+        return (
+            cache_identity.get("mode") == "request_digest"
+            and state.get("request_digest") == request_digest
+        )
+
+    def _existing_submission_receipt(
+        self,
+        job_id: str,
+        state: dict[str, Any],
+        *,
+        initial_poll_ms: int,
+    ) -> dict[str, Any] | None:
+        effective = self.get(job_id)
+        job_status = str(effective.get("job_status") or "")
+        cache_identity = dict(state.get("cache_identity") or {})
+        if job_status == "completed":
+            if not self._cache_result_is_eligible(job_id, state):
+                return None
+            receipt = {
+                "status": "cache_hit",
+                "job_id": job_id,
+                "job_status": "completed",
+                "poll_after_ms": 0,
+            }
+            if cache_identity:
+                receipt["cache_identity"] = cache_identity
+            return receipt
+        if job_status == "stale":
+            receipt = {
+                "status": "blocked",
+                "job_id": job_id,
+                "job_status": "stale",
+                "poll_after_ms": 0,
+                "error": effective["error"],
+                "decision": effective["decision"],
+            }
+            if cache_identity:
+                receipt["cache_identity"] = cache_identity
+            return receipt
+        if job_status not in {"queued", "running"}:
+            return None
+        poll_after_ms = max(
+            initial_poll_ms,
+            int(state.get("initial_poll_ms") or initial_poll_ms),
+        )
+        receipt = {
+            "status": "running" if job_status == "running" else "accepted",
+            "job_id": job_id,
+            "job_status": job_status,
+            "poll_after_ms": poll_after_ms,
+            "recommended_check_utc": _utc_after(poll_after_ms // 1000),
+            "monitor_until_utc": state.get("monitor_until_utc"),
+        }
+        if cache_identity:
+            receipt["cache_identity"] = cache_identity
+        return receipt
+
+    def _cache_result_is_eligible(
+        self,
+        job_id: str,
+        state: dict[str, Any],
+    ) -> bool:
+        if not bool(state.get("cacheable", True)):
+            return False
+        if "cache_result_eligible" in state:
+            return bool(state.get("cache_result_eligible"))
+        result_status = str(state.get("result_status") or "")
+        if result_status:
+            return result_status in CACHEABLE_RESULT_STATUSES
+        result_path = self._job_dir(job_id) / "result.json"
+        if not result_path.is_file():
+            return False
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        return (
+            isinstance(result, dict)
+            and str(result.get("status") or "") in CACHEABLE_RESULT_STATUSES
+        )
+
+    @contextmanager
+    def _cache_lock(self, cache_digest: str):
+        lock_root = self.root / ".cache-locks"
+        lock_root.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_root / cache_digest
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                lock_path.mkdir()
+                break
+            except FileExistsError:
+                try:
+                    age = time.time() - lock_path.stat().st_mtime
+                    if age >= 30.0:
+                        lock_path.rmdir()
+                        continue
+                except (FileNotFoundError, OSError):
+                    pass
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Timed out acquiring the cache identity lock")
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            try:
+                lock_path.rmdir()
+            except FileNotFoundError:
+                pass
+
+    def _cache_index_path(self, cache_digest: str) -> Path:
+        return self.root / ".cache-index" / f"{cache_digest}.json"
+
+    def _read_cache_index(self, cache_digest: str) -> dict[str, Any] | None:
+        path = self._cache_index_path(cache_digest)
+        if not path.is_file():
+            return None
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        if (
+            not isinstance(value, dict)
+            or value.get("schema") != CACHE_INDEX_SCHEMA
+            or value.get("cache_digest") != f"sha256:{cache_digest}"
+        ):
+            return None
+        return value
+
+    def _write_cache_index(
+        self,
+        cache_digest: str,
+        job_id: str,
+        cache_identity: dict[str, Any],
+        *,
+        status: str,
+    ) -> None:
+        _atomic_json(
+            self._cache_index_path(cache_digest),
+            {
+                "schema": CACHE_INDEX_SCHEMA,
+                "cache_digest": f"sha256:{cache_digest}",
+                "cache_identity": cache_identity,
+                "job_id": job_id,
+                "status": status,
+                "updated_utc": _utc_now(),
+            },
+        )
 
     def claim(self, job_id: str) -> dict[str, Any]:
         job_dir = self._job_dir(job_id)
@@ -302,8 +670,30 @@ class JobStore:
         state = self._read_state(job_id)
         state["job_status"] = "completed"
         state["result_status"] = str(result.get("status") or "unknown")
+        state["cache_result_eligible"] = bool(state.get("cacheable")) and (
+            state["result_status"] in CACHEABLE_RESULT_STATUSES
+        )
         state["updated_utc"] = _utc_now()
         _atomic_json(job_dir / "state.json", state)
+        cache_identity = state.get("cache_identity")
+        if bool(state.get("cacheable")) and isinstance(cache_identity, dict):
+            digest_value = str(cache_identity.get("digest") or "")
+            if digest_value.startswith("sha256:"):
+                cache_digest = digest_value.removeprefix("sha256:")
+                if len(cache_digest) == 64 and all(
+                    char in "0123456789abcdef" for char in cache_digest
+                ):
+                    with self._cache_lock(cache_digest):
+                        self._write_cache_index(
+                            cache_digest,
+                            job_id,
+                            cache_identity,
+                            status=(
+                                "completed"
+                                if state["cache_result_eligible"]
+                                else "ineligible"
+                            ),
+                        )
         request_path = job_dir / "request.json"
         if request_path.exists():
             request_path.unlink()
@@ -359,6 +749,8 @@ class JobStore:
             },
             "display": dict(state.get("display") or {}),
         }
+        if isinstance(state.get("cache_identity"), dict):
+            output["cache_identity"] = dict(state["cache_identity"])
         if poll_after_ms:
             output["recommended_check_utc"] = _utc_after(poll_after_ms // 1000)
         if stale:

@@ -1,10 +1,71 @@
 import json
 import tempfile
+import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from llm_backend_toolkit.backends import BackendRegistry
 from llm_backend_toolkit.jobs import JobStore
+
+
+def _registry(
+    *,
+    model: str = "model-v1",
+    profile: str = "profile-v1",
+    backend_id: str = "local-a",
+) -> BackendRegistry:
+    return BackendRegistry.from_dict(
+        {
+            "schema": "llm-backend-toolkit.backends.v1",
+            "default_backend": backend_id,
+            "aliases": {},
+            "backends": {
+                backend_id: {
+                    "adapter": "ollama",
+                    "model": model,
+                    "cloud": False,
+                    "supports_vision": True,
+                    "agent_routes": {
+                        "data_factory": {
+                            "runner": "codex-cli",
+                            "profile": profile,
+                            "model": model,
+                            "evidence": {
+                                "basis": "synthetic-test",
+                                "live_verified": True,
+                                "model_digest": f"digest-{model}",
+                            },
+                        }
+                    },
+                }
+            },
+        }
+    )
+
+
+def _explicit_agent_request(
+    cache_key: str = "personalos-model-batch:raw-a:extractor-v1:schema-v1:model-v1:prompt-v1",
+) -> dict:
+    return {
+        "backend": "local-a",
+        "task": {
+            "goal": "derive",
+            "expected_output": {"format": "json", "required_keys": ["facts"]},
+        },
+        "context": {"mode": "compact", "target_tokens": 4096},
+        "reasoning": {"mode": "off"},
+        "privacy": {"cloud_allowed": False},
+        "execution": {
+            "mode": "agent",
+            "runner": "data_factory",
+            "workspace": "C:/staging/one",
+            "policy": "read-only",
+            "cache_key": cache_key,
+            "budget": {"timeout_seconds": 900, "max_steps": 20, "max_tool_calls": 80},
+        },
+    }
 
 
 class JobStoreTests(unittest.TestCase):
@@ -282,6 +343,174 @@ class JobStoreTests(unittest.TestCase):
             self.assertTrue(first["cacheable"])
             self.assertEqual("cache_hit", second["status"])
             self.assertEqual(1, len(spawned))
+
+    def test_explicit_cache_key_ignores_budget_target_tokens_and_workspace_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            spawned = []
+            store = JobStore(
+                Path(temp),
+                spawner=lambda job_id, _root: spawned.append(job_id),
+                registry=_registry(),
+            )
+            first_request = _explicit_agent_request()
+            first = store.submit(first_request)
+            store.complete(first["job_id"], {"status": "ok", "output": {"facts": []}})
+
+            second_request = _explicit_agent_request()
+            second_request["context"]["target_tokens"] = 16_384
+            second_request["execution"]["workspace"] = "D:/different-work-metadata"
+            second_request["execution"]["budget"] = {
+                "timeout_seconds": 3600,
+                "max_steps": 100,
+                "max_tool_calls": 500,
+            }
+            second = store.submit(second_request)
+
+            self.assertEqual("cache_hit", second["status"])
+            self.assertEqual(first["job_id"], second["job_id"])
+            self.assertEqual("explicit", second["cache_identity"]["mode"])
+            self.assertEqual(1, len(spawned))
+            state = store.get(first["job_id"])
+            self.assertEqual("explicit", state["cache_identity"]["mode"])
+
+    def test_explicit_cache_key_change_invalidates_raw_extractor_schema_model_or_prompt_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            spawned = []
+            store = JobStore(
+                Path(temp),
+                spawner=lambda job_id, _root: spawned.append(job_id),
+                registry=_registry(),
+            )
+            base = store.submit(_explicit_agent_request())
+            store.complete(base["job_id"], {"status": "ok", "output": {"facts": []}})
+
+            changed_keys = (
+                "personalos-model-batch:raw-b:extractor-v1:schema-v1:model-v1:prompt-v1",
+                "personalos-model-batch:raw-a:extractor-v2:schema-v1:model-v1:prompt-v1",
+                "personalos-model-batch:raw-a:extractor-v1:schema-v2:model-v1:prompt-v1",
+                "personalos-model-batch:raw-a:extractor-v1:schema-v1:model-v2:prompt-v1",
+                "personalos-model-batch:raw-a:extractor-v1:schema-v1:model-v1:prompt-v2",
+            )
+            for cache_key in changed_keys:
+                receipt = store.submit(_explicit_agent_request(cache_key))
+                self.assertEqual("accepted", receipt["status"])
+                self.assertNotEqual(base["job_id"], receipt["job_id"])
+
+            self.assertEqual(1 + len(changed_keys), len(spawned))
+
+    def test_explicit_cache_key_is_still_isolated_by_backend_profile_and_model_fingerprint(self):
+        variants = (
+            (_registry(backend_id="local-b"), "local-b"),
+            (_registry(profile="profile-v2"), "local-a"),
+            (_registry(model="model-v2"), "local-a"),
+        )
+        for changed_registry, changed_backend in variants:
+            with self.subTest(
+                changed_backend=changed_backend,
+                changed_model=changed_registry.backends[changed_backend]["model"],
+                changed_profile=changed_registry.backends[changed_backend]["agent_routes"][
+                    "data_factory"
+                ]["profile"],
+            ):
+                with tempfile.TemporaryDirectory() as temp:
+                    first_store = JobStore(Path(temp), spawner=lambda *_: None, registry=_registry())
+                    first_request = _explicit_agent_request()
+                    first = first_store.submit(first_request)
+                    first_store.complete(first["job_id"], {"status": "ok", "output": {"facts": []}})
+
+                    changed_store = JobStore(
+                        Path(temp), spawner=lambda *_: None, registry=changed_registry
+                    )
+                    changed_request = _explicit_agent_request()
+                    changed_request["backend"] = changed_backend
+                    second = changed_store.submit(changed_request)
+
+                    self.assertEqual("accepted", second["status"])
+                    self.assertNotEqual(first["job_id"], second["job_id"])
+
+    def test_explicit_cache_key_is_isolated_by_privacy_and_output_protocol(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None, registry=_registry())
+            first = store.submit(_explicit_agent_request())
+            store.complete(first["job_id"], {"status": "ok", "output": {"facts": []}})
+
+            privacy_request = _explicit_agent_request()
+            privacy_request["privacy"]["cloud_allowed"] = True
+            privacy = store.submit(privacy_request)
+
+            protocol_request = _explicit_agent_request()
+            protocol_request["task"]["expected_output"] = {"format": "text"}
+            protocol = store.submit(protocol_request)
+
+            self.assertNotEqual(first["job_id"], privacy["job_id"])
+            self.assertNotEqual(first["job_id"], protocol["job_id"])
+
+    def test_explicit_cache_key_must_be_in_execution_and_pass_validation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None, registry=_registry())
+            misplaced = _explicit_agent_request()
+            misplaced["cache_key"] = misplaced["execution"].pop("cache_key")
+            first = store.submit(misplaced)
+            store.complete(first["job_id"], {"status": "ok", "output": {"facts": []}})
+            second = store.submit(misplaced)
+
+            self.assertFalse(first["cacheable"])
+            self.assertNotEqual(first["job_id"], second["job_id"])
+
+            for invalid in ("", " leading-space", "trailing-space ", "contains space", "x" * 513):
+                invalid_request = _explicit_agent_request(invalid)
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                    ValueError, "execution.cache_key"
+                ):
+                    store.submit(invalid_request)
+
+    def test_failed_cancelled_and_non_cacheable_jobs_never_hit_cache(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None, registry=_registry())
+            request = _explicit_agent_request()
+            failed = store.submit(request)
+            store.complete(failed["job_id"], {"status": "failed", "output": None})
+            retried = store.submit(request)
+
+            self.assertEqual("accepted", retried["status"])
+            self.assertNotEqual(failed["job_id"], retried["job_id"])
+            store.complete(retried["job_id"], {"status": "ok", "output": {"facts": []}})
+            recovered_hit = store.submit(request)
+            self.assertEqual("cache_hit", recovered_hit["status"])
+            self.assertEqual(retried["job_id"], recovered_hit["job_id"])
+
+            cancelled_request = _explicit_agent_request(
+                "personalos-model-batch:cancelled-attempt"
+            )
+            cancelled = store.submit(cancelled_request)
+            state_path = Path(temp) / cancelled["job_id"] / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["job_status"] = "cancelled"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            after_cancel = store.submit(cancelled_request)
+
+            self.assertEqual("accepted", after_cancel["status"])
+            self.assertNotEqual(cancelled["job_id"], after_cancel["job_id"])
+
+    def test_concurrent_submit_with_same_explicit_key_spawns_one_stable_job(self):
+        with tempfile.TemporaryDirectory() as temp:
+            spawned = []
+            spawned_lock = threading.Lock()
+
+            def spawn(job_id, _root):
+                with spawned_lock:
+                    spawned.append(job_id)
+
+            store = JobStore(Path(temp), spawner=spawn, registry=_registry())
+            request = _explicit_agent_request()
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                receipts = list(pool.map(lambda _: store.submit(request), range(16)))
+
+            self.assertEqual(1, len(spawned))
+            self.assertEqual({spawned[0]}, {receipt["job_id"] for receipt in receipts})
+            self.assertTrue(
+                all(receipt["status"] in {"accepted", "running"} for receipt in receipts)
+            )
 
     def test_mutable_file_references_are_not_cached_without_a_content_fingerprint(self):
         with tempfile.TemporaryDirectory() as temp:

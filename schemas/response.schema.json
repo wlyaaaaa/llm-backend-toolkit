@@ -22,6 +22,7 @@
     "artifacts": {"type": "array"},
     "media_routes": {"type": "array"},
     "execution_receipt": {"type": "object"},
+    "cache_identity": {"type": "object"},
     "error": {"type": "object"},
     "decision": {},
     "job_id": {"type": "string"},
