@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -98,6 +99,33 @@ class BenchmarkingTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertNotEqual(0, completed.returncode)
+
+    def test_general_runner_fails_before_creating_output_without_aicli_entry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "must-not-exist"
+            env = os.environ.copy()
+            env.pop("LLM_TOOLKIT_AICLI_ENTRY", None)
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "run_general_agent_benchmark.py"),
+                    "--runner",
+                    "codex-cli",
+                    "--output-root",
+                    str(output),
+                ],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+
+            self.assertEqual(2, completed.returncode)
+            self.assertIn("--aicli-entry", completed.stderr)
+            self.assertFalse(output.exists())
 
     def test_evidence_verifier_accepts_semantic_values_and_reason_labels(self):
         task = next(task for task in discover_tasks(SUITE) if task.name == "evidence_reasoning")

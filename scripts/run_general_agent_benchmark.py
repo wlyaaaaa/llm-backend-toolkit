@@ -118,6 +118,11 @@ def run_task(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", default="local-default")
+    parser.add_argument(
+        "--aicli-entry",
+        type=Path,
+        help="Exact aicli.ps1 source entry used by all agent runners.",
+    )
     parser.add_argument("--runner", action="append", choices=CANDIDATES)
     parser.add_argument("--task", action="append")
     parser.add_argument("--output-root", type=Path, default=default_output_root())
@@ -150,6 +155,16 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--max-steps must be between 1 and 200")
     if not 0 <= args.max_tool_calls <= 10_000:
         parser.error("--max-tool-calls must be between 0 and 10000")
+    entry_value = args.aicli_entry or os.environ.get("LLM_TOOLKIT_AICLI_ENTRY")
+    if not entry_value:
+        parser.error(
+            "--aicli-entry or LLM_TOOLKIT_AICLI_ENTRY is required; "
+            "refusing an empty benchmark run"
+        )
+    aicli_entry = Path(entry_value).expanduser().resolve()
+    if not aicli_entry.is_file() or aicli_entry.suffix.lower() != ".ps1":
+        parser.error("--aicli-entry must name an existing PowerShell script")
+    os.environ["LLM_TOOLKIT_AICLI_ENTRY"] = str(aicli_entry)
 
     output_root = args.output_root.expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=False)
