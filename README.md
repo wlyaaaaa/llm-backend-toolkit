@@ -136,12 +136,12 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 
 显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或 chain-of-thought。有限预算任务只有在回执同时证明 `timeout/maxSteps/maxToolCalls=hard` 时才会被接受；未知事件、持续流墙钟或无法确认完整进程树清理均返回失败关闭，越限返回 `blocked` 与 `limit_hit`，不会把未执行的约束写成成功。
 
-当前 `local-default` 解析到 `codex-ollama-main + qwen-main-v1`，已经过本机版本绑定验收。`cloud-qwen-flash` 与 `cloud-qwen-plus` 是显式 direct API backend；Flash 的加入没有改变本地默认，也不会发生静默 fallback。2026-07-28 的 Codex 云端 Agent 复测暴露 `workspace-write` 沙箱故障：模型可以返回文本，但无法写入验收 workspace，因此 4/30 记录作废且两款云模型的 Agent routes 均已禁用。将来只有连接合同经无付费本地测试和有界真实验收重新通过后才可恢复；历史报告不会自动继承到新指纹。
+当前 `local-default` 解析到 `codex-ollama-main + qwen-main-v1`，已经过本机版本绑定验收。省略 backend 永远只走这个免费本地默认；任何付费 API 都必须显式选择 exact backend 并同时允许云端传输。`cloud-qwen-flash` 是唯一内置 Qwen direct API backend，不会自动 fallback。`qwen3.7-plus` 已于 2026-07-29 从别名、内置 backend 和专用 provider 退役，只保留历史评测证据。2026-07-28 的 Codex 云端 Agent 复测暴露 `workspace-write` 沙箱故障：模型可以返回文本，但无法写入验收 workspace，因此 4/30 记录作废且 Flash Agent route 继续禁用。将来只有连接合同经无付费本地测试和有界真实验收重新通过后才可恢复；历史报告不会自动继承到新指纹。
 `status` 会在不发模型生成请求的情况下返回当前 backend、模型指纹、agent 默认路由、证据状态和支持的 runner；实际任务回执同时记录精确 Profile、模型与是否采用默认。
 
 `fast-middle-agent` 是显式 opt-in 的文本型 Agent 角色：`codex-spark-xhigh + gpt-5.3-codex-spark + xhigh`。它只通过官方 Codex CLI/ChatGPT 登录链调用，不伪装成 OpenAI API，也不支持原生图片输入。选择它必须显式写 `backend=fast-middle-agent` 和 `privacy.cloud_allowed=true`；省略 backend 仍只走本地 Qwen。协议默认与任务推荐相互独立：跨文件、工具循环、长对话降噪和严格结构任务可优先显式选择 Spark，隐含现实目标/常识因果与额度回退优先本地。额度、限流或资格失败会返回 `rate_limited` 等规范错误和 `invoke:local-default` 裁决选项，但不会自动重提；调用方如选择本地回退，必须保留两次独立回执和实际模型身份。
 
-云端示例见 [examples/cloud-agent-request.json](examples/cloud-agent-request.json)。普通单次摘要、抽取和结构化生成继续使用 `execution.mode=direct`，避免为不需要文件/命令循环的任务增加 Agent 调用成本。
+云端示例见 [examples/cloud-direct-request.json](examples/cloud-direct-request.json)。普通单次摘要、抽取和结构化生成继续使用 `execution.mode=direct`，避免为不需要文件/命令循环的任务增加 Agent 调用成本。
 
 本机 35B 的 PersonalOS 风格小型清洗专项、选择理由和严格适用范围见 [数据工厂智能体验收报告](docs/agent-data-factory.md)。该报告不代表通用智能排名。
 
@@ -222,9 +222,9 @@ DASHSCOPE_API_KEY
 LLM_TOOLKIT_QWEN_BASE_URL
 ```
 
-当前内置的直接云端 backend 是 `cloud-qwen-flash` 与 `cloud-qwen-plus`，但 `openai-chat` adapter 也可通过外部注册表接入其他兼容平台；只有全新协议才需要新增 adapter。API key 只写环境变量名，远程云端地址必须是 HTTPS。自动测试套件不会发起真实云端调用；云端请求格式和错误分类使用 mock 验证。
+当前唯一内置的 Qwen 直接云端 backend 是 `cloud-qwen-flash`，但 `openai-chat` adapter 也可通过外部注册表接入其他兼容平台；只有全新协议才需要新增 adapter。API key 只写环境变量名，远程云端地址必须是 HTTPS。自动测试套件不会发起真实云端调用；云端请求格式和错误分类使用 mock 验证。
 选择任何云端 backend 仍不等于授权传输；请求必须同时设置 `privacy.cloud_allowed=true`。云端 probe 还需显式传入 `--cloud-allowed`。
-Flash 与 Plus 当前仅支持显式 direct API；Agent 模式会因没有已验收 route 而失败关闭，不会调用云端或自动改投其他模型。欠费会归一化为 `billing_unavailable` 并把本地调用、顶级模型接管或账务处理选项返回调用者，不会自动降级。
+Flash 当前仅支持显式 direct API；Agent 模式会因没有已验收 route 而失败关闭，不会调用云端或自动改投其他模型。欠费会归一化为 `billing_unavailable` 并把本地调用、顶级模型接管或账务处理选项返回调用者，不会自动降级。Plus 名称在内置 registry 中会返回 unknown backend。
 
 百炼官方资料：
 

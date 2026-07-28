@@ -4,7 +4,6 @@
   "aliases": {
     "qwen-main-v1": "local-default",
     "qwen3.7-flash": "cloud-qwen-flash",
-    "qwen3.7-plus": "cloud-qwen-plus",
     "gpt-5.3-codex-spark": "fast-middle-agent"
   },
   "backends": {
@@ -119,18 +118,6 @@
       "cloud": true,
       "supports_vision": true,
       "context_window_tokens": 1000000,
-      "base_url_env": "LLM_TOOLKIT_QWEN_BASE_URL",
-      "base_url_default": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      "api_key_env": "DASHSCOPE_API_KEY",
-      "thinking_field": "enable_thinking",
-      "data_destination": "Alibaba Cloud Model Studio",
-      "agent_routes": {}
-    },
-    "cloud-qwen-plus": {
-      "adapter": "openai-chat",
-      "model": "qwen3.7-plus",
-      "cloud": true,
-      "supports_vision": true,
       "base_url_env": "LLM_TOOLKIT_QWEN_BASE_URL",
       "base_url_default": "https://dashscope.aliyuncs.com/compatible-mode/v1",
       "api_key_env": "DASHSCOPE_API_KEY",

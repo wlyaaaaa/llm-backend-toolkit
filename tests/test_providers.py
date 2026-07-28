@@ -3,7 +3,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from llm_backend_toolkit.providers import OllamaProvider, OpenAIChatProvider, Qwen37PlusProvider, provider_from_config
+from llm_backend_toolkit.providers import OllamaProvider, OpenAIChatProvider, provider_from_config
 
 
 class FakeHttpResponse:
@@ -85,14 +85,14 @@ class ProviderContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "managed public endpoint"):
             OllamaProvider(base_url="http://127.0.0.1:32101")
 
-    def test_qwen_adapter_disables_thinking_and_uses_only_qwen37plus(self):
+    def test_generic_openai_adapter_disables_thinking_when_configured(self):
         seen = []
 
         def fake_urlopen(request, timeout):
             seen.append((request, timeout))
             return FakeHttpResponse(
                 {
-                    "model": "qwen3.7-plus",
+                    "model": "remote-model-v1",
                     "choices": [
                         {
                             "message": {
@@ -106,12 +106,17 @@ class ProviderContractTests(unittest.TestCase):
                 }
             )
 
-        provider = Qwen37PlusProvider(api_key="fixture-key", base_url="https://example.invalid/v1")
+        provider = OpenAIChatProvider(
+            model="remote-model-v1",
+            api_key="fixture-key",
+            base_url="https://example.invalid/v1",
+            thinking_field="enable_thinking",
+        )
         with patch("urllib.request.urlopen", side_effect=fake_urlopen):
             response = provider.invoke("task", [], "off")
 
         payload = json.loads(seen[0][0].data.decode("utf-8"))
-        self.assertEqual("qwen3.7-plus", payload["model"])
+        self.assertEqual("remote-model-v1", payload["model"])
         self.assertFalse(payload["enable_thinking"])
         self.assertEqual("done", response.content)
         self.assertEqual("", response.reasoning)

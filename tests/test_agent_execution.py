@@ -18,7 +18,7 @@ from llm_backend_toolkit.agent_runners import (
     _json_values,
     default_runners,
 )
-from llm_backend_toolkit.providers import ProviderResponse, Qwen37PlusProvider
+from llm_backend_toolkit.providers import OpenAIChatProvider, ProviderResponse
 from llm_backend_toolkit.toolkit import Toolkit
 from llm_backend_toolkit.errors import ToolError
 from llm_backend_toolkit.observability import append_event
@@ -1950,11 +1950,18 @@ class AgentExecutionTests(unittest.TestCase):
 
     def test_cloud_status_exposes_direct_only_backend_without_a_provider_call(self):
         toolkit = Toolkit(
-            providers={"qwen3.7-plus": Qwen37PlusProvider(api_key="configured-for-status")},
+            providers={
+                "qwen3.7-flash": OpenAIChatProvider(
+                    model="qwen3.7-flash",
+                    base_url="https://example.invalid/v1",
+                    api_key="configured-for-status",
+                    thinking_field="enable_thinking",
+                )
+            },
             runners={},
         )
 
-        result = toolkit.status("qwen3.7-plus")
+        result = toolkit.status("qwen3.7-flash")
 
         self.assertEqual("ok", result["status"])
         status = result["provider_status"]
@@ -2473,17 +2480,17 @@ class AgentExecutionTests(unittest.TestCase):
                 AgentResponse(
                     content='{"answer": 56}',
                     runner="codex-cli",
-                    model="qwen3.7-plus",
+                    model="qwen3.7-flash",
                     exit_code=0,
                     duration_ms=456,
                 )
             )
             toolkit = Toolkit(
-                providers={"qwen3.7-plus": FakeCloudProvider()},
+                providers={"qwen3.7-flash": FakeCloudProvider()},
                 runners={"data_factory": runner},
             )
             request = agent_request(Path(temp))
-            request["provider"] = "qwen3.7-plus"
+            request["provider"] = "qwen3.7-flash"
             request["privacy"] = {"cloud_allowed": True}
             del request["execution"]["runner"]
 
@@ -2530,11 +2537,11 @@ class AgentExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             runner = FakeRunner()
             toolkit = Toolkit(
-                providers={"qwen3.7-plus": FakeCloudProvider()},
+                providers={"qwen3.7-flash": FakeCloudProvider()},
                 runners={"qwen-code": runner},
             )
             request = agent_request(Path(temp))
-            request["provider"] = "qwen3.7-plus"
+            request["provider"] = "qwen3.7-flash"
             request["privacy"] = {"cloud_allowed": True}
             request["execution"]["runner"] = "qwen-code"
 
@@ -2669,12 +2676,12 @@ class AgentExecutionTests(unittest.TestCase):
             entry = root / "aicli.ps1"
             entry.write_text("# stub\n", encoding="utf-8")
             runner = AiCliProfileRunner(
-                name="codex-cli", engine="codex", default_profile="codex-qwen-paygo", entry=str(entry)
+                name="codex-cli", engine="codex", default_profile="codex-cloud-paygo", entry=str(entry)
             )
             execution = {
                 "workspace": str(root),
-                "model": "qwen3.7-plus",
-                "profile": "codex-qwen-paygo",
+                "model": "remote-model-v1",
+                "profile": "codex-cloud-paygo",
                 "policy": "workspace-write",
                 "native_images": [],
                 "budget": {"timeout_seconds": 30, "max_steps": 4, "max_tool_calls": 4},

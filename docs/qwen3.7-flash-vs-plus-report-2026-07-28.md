@@ -18,13 +18,13 @@
 
 三者唯一共同答错的是“把车送去 50 米外洗车店”的现实意图题，均选择了步行。Plus 少 1 个格式分，是因为它把正确排程 JSON 包在 Markdown 代码块内；若只看语义正确，三者完全同分。能力证据不支持为 Plus 支付约 6 倍单价。
 
-但本轮新增 8 题的调用可用性为：本地 8/8、Flash 5/8、Plus 7/8。4 次失败全部是约 21 秒后的 `WinError 10060` 连接超时，没有收到模型回答；它们不计能力 0 分，也没有重试。单批次不足以证明长期可靠性，但足以阻止现在彻底删除 Plus。
+本轮新增 8 题的调用可用性为：本地 8/8、Flash 5/8、Plus 7/8。4 次失败全部是约 21 秒后的 `WinError 10060` 连接超时，没有收到模型回答；它们不计能力 0 分，也没有重试。单批次不足以证明长期可靠性。用户在审阅准确口径后接受这项可用性不确定性，并于 2026-07-29 明确授权退役 Plus。
 
 最终建议：
 
-- 常规任务关闭 Plus：不做默认、不走 Agent、不自动 fallback；优先免费本地，确需云端速度时选 Flash。
-- 不彻底删除 Plus backend：只保留显式人工选择的应急直连入口。原因不是能力更强，而是本轮 Flash 的连接失败更多。
-- 如果目标是绝对避免误付费，下一步应加“Plus 必须显式确认/预算门”，而不是用模型能力理由保留自动路由。当前 registry 已无 Plus/Flash Agent routes，也没有自动 fallback。
+- Plus 已从内置 alias、backend、专用 provider 和 wrapper 凭据注入识别中退役；历史评测数据保留，不再构成可调用入口。
+- 默认只走免费本地 `local-default`；确需云端速度时才显式选择 Flash，并同时设置 `privacy.cloud_allowed=true`。
+- Flash 仍仅支持 direct API，无 Agent route、无自动 fallback。对 Plus 名称的请求按 unknown backend 失败关闭。
 
 Codex Agent 的旧 4/30 不是 Flash 或 Plus 的有效能力分。2026-07-28 的账单控制台与代码复核证明，这批 Agent 任务实际落到了共享 Profile 的主模型 `qwen3.7-max-2026-06-08`。因此本报告只把真实直连结果用于三款模型能力判断；本轮遵照要求没有调用任何模型智能体。
 
@@ -139,7 +139,7 @@ Codex Agent 的旧 4/30 不是 Flash 或 Plus 的有效能力分。2026-07-28 �
 - 默认模型：仍为 `local-default`
 - 失败策略：不自动切换 Plus、本地模型或其他 Provider
 
-`qwen3.7-plus` 同样保留显式 direct API，Agent routes 同样禁用。
+`qwen3.7-plus` 已退役；本节以上的 Plus 数据只用于解释历史决策，不代表当前可调用能力。
 
 ## 证据
 

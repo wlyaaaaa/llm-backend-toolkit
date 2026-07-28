@@ -53,7 +53,7 @@ def base_request(provider="qwen-main-v1"):
             "inputs": ["7 multiplied by 8"],
             "expected_output": {"format": "json", "required_keys": ["answer"]},
         },
-        "privacy": {"cloud_allowed": provider == "qwen3.7-plus"},
+        "privacy": {"cloud_allowed": provider == "qwen3.7-flash"},
     }
 
 
@@ -148,9 +148,9 @@ class ToolkitTests(unittest.TestCase):
             cloud=True,
         )
         local = FakeProvider(ProviderResponse(content="local", model="qwen-main-v1"))
-        toolkit = Toolkit(providers={"qwen3.7-plus": primary, "qwen-main-v1": local})
+        toolkit = Toolkit(providers={"qwen3.7-flash": primary, "qwen-main-v1": local})
 
-        result = toolkit.invoke(base_request("qwen3.7-plus"))
+        result = toolkit.invoke(base_request("qwen3.7-flash"))
 
         self.assertEqual("failed", result["status"])
         self.assertEqual("billing_unavailable", result["error"]["category"])
@@ -158,9 +158,9 @@ class ToolkitTests(unittest.TestCase):
         self.assertEqual([], local.calls)
 
     def test_cloud_media_requires_explicit_permission(self):
-        provider = FakeProvider(ProviderResponse(content="ok", model="qwen3.7-plus"), cloud=True)
-        toolkit = Toolkit(providers={"qwen3.7-plus": provider})
-        request = base_request("qwen3.7-plus")
+        provider = FakeProvider(ProviderResponse(content="ok", model="qwen3.7-flash"), cloud=True)
+        toolkit = Toolkit(providers={"qwen3.7-flash": provider})
+        request = base_request("qwen3.7-flash")
         request["privacy"]["cloud_allowed"] = False
         request["media"] = {
             "mode": "native",
@@ -174,9 +174,9 @@ class ToolkitTests(unittest.TestCase):
         self.assertEqual([], provider.calls)
 
     def test_cloud_text_and_source_refs_require_explicit_permission_before_local_reads(self):
-        provider = FakeProvider(ProviderResponse(content="ok", model="qwen3.7-plus"), cloud=True)
-        toolkit = Toolkit(providers={"qwen3.7-plus": provider})
-        request = base_request("qwen3.7-plus")
+        provider = FakeProvider(ProviderResponse(content="ok", model="qwen3.7-flash"), cloud=True)
+        toolkit = Toolkit(providers={"qwen3.7-flash": provider})
+        request = base_request("qwen3.7-flash")
         request["privacy"]["cloud_allowed"] = False
         request["task"]["sources"] = [{"id": "private", "path": "missing-private-source.txt"}]
 

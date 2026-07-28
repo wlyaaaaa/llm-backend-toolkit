@@ -138,22 +138,6 @@ class OpenAIChatProvider:
         }
 
 
-class Qwen37PlusProvider(OpenAIChatProvider):
-    def __init__(self, *, base_url: str | None = None, api_key: str | None = None, timeout: int = 120) -> None:
-        super().__init__(
-            model="qwen3.7-plus",
-            base_url=base_url
-            or os.environ.get("LLM_TOOLKIT_QWEN_BASE_URL")
-            or "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            api_key=api_key,
-            api_key_env="DASHSCOPE_API_KEY",
-            timeout=timeout,
-            cloud=True,
-            supports_vision=True,
-            thinking_field="enable_thinking",
-        )
-
-
 class OllamaProvider:
     cloud = False
     supports_vision = True

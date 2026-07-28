@@ -1,7 +1,7 @@
 {
-  "backend": "cloud-qwen-plus",
+  "backend": "cloud-qwen-flash",
   "task": {
-    "goal": "Clean the staged records and write derived output only",
+    "goal": "Return a concise strict-JSON summary",
     "instructions": [
       "Preserve source identifiers",
       "Return strict JSON"
@@ -26,14 +26,6 @@
     "cloud_allowed": true
   },
   "execution": {
-    "mode": "agent",
-    "workspace": "C:/staging/job-001",
-    "policy": "workspace-write",
-    "cache_key": "raw-sha256:replace-with-real-input-hash",
-    "budget": {
-      "timeout_seconds": 900,
-      "max_steps": 30,
-      "max_tool_calls": 120
-    }
+    "mode": "direct"
   }
 }

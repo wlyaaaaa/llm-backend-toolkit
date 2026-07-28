@@ -97,7 +97,10 @@ class BackendRegistryTests(unittest.TestCase):
         self.assertTrue(flash.config["supports_vision"])
         self.assertEqual(1_000_000, flash.config["context_window_tokens"])
         self.assertEqual({}, flash.config["agent_routes"])
-        self.assertEqual({}, registry.resolve("qwen3.7-plus").config["agent_routes"])
+        with self.assertRaisesRegex(ValueError, "Unknown backend"):
+            registry.resolve("qwen3.7-plus")
+        with self.assertRaisesRegex(ValueError, "Unknown backend"):
+            registry.resolve("cloud-qwen-plus")
 
     def test_fast_middle_spark_is_opt_in_agent_only_and_does_not_change_the_local_default(self):
         registry = BackendRegistry.load()

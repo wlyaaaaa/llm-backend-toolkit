@@ -91,10 +91,10 @@ Toolkit：`0.3.1`
 
 ## 尚未覆盖的验收
 
-本报告不覆盖真实海量数据吞吐、数小时恢复、多模态图片质量、LocalOCR/ChineseASR 精度、云端 `qwen3.7-plus` 或 PersonalOS 当前阶段的真实业务 schema。后续只有对应场景进入使用时才做小型专项：
+本报告不覆盖真实海量数据吞吐、数小时恢复、多模态图片质量、LocalOCR/ChineseASR 精度、付费云端直连模型或 PersonalOS 当前阶段的真实业务 schema。后续只有对应场景进入使用时才做小型专项：
 
 - PersonalOS owner 提供真实阶段合同、匿名/合成边界样本和确定性 verifier，再测一批成功、一批冲突、一批中断恢复。
 - 原生视觉、OCR、ASR 分开验收并统一走 LocalGpuBroker；不同时加载本地模型和 OCR/ASR 重型模型。
 - 长批次只测 checkpoint、幂等、断点续跑、吞吐和失败隔离，不重复四 harness 通用排名。
 
-本报告只适用于上述版本与模型 digest，不能外推为永久通用智商排名，也不推断未经实测的 Qwen3.7 Plus 表现。
+本报告只适用于上述版本与模型 digest，不能外推为永久通用智商排名。Qwen3.7 Plus 后续专项直连结果与退役决定见 `qwen3.7-flash-vs-plus-report-2026-07-28.md`。

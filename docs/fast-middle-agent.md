@@ -54,7 +54,7 @@ PersonalOS 已有冻结的本地模型能力回执 `receipt:model-calibration-20
 - PersonalOS 的业务门禁仍要求 unknown 存活、来源闭包、角色/语义约束和高影响升级。
 - canonical raw 不交给中档或本地模型无验证改写；两者只在 staged/derived 工作区产出。
 - Qwen 的 Ollama/GPU/alias/digest/stability 事实继续由本地模型调优项目维护；Toolkit 只拥有“选哪个角色、如何调用、回执如何表达”的事实。
-- `qwen3.7-plus` 未做 Live；保留静态、未实测的云端更高档候选，不参与本报告排名。
+- `qwen3.7-plus` 后续直连复核未显示能力优势，并于 2026-07-29 从内置 registry 退役；本报告中的静态候选判断仅是历史背景。
 
 ## 额度回退
 
