@@ -1989,6 +1989,7 @@ class AgentExecutionTests(unittest.TestCase):
                 "run": {
                     "exitCode": 0,
                     "durationMs": 12,
+                    "model": "qwen-main-v1",
                     "stdout": "\n".join(
                         [
                             '{"type":"thread.started","thread_id":"thread-1"}',
@@ -2056,6 +2057,78 @@ class AgentExecutionTests(unittest.TestCase):
                     "context_window_tokens": 258400,
                 },
                 response.usage,
+            )
+
+    def test_codex_agent_fails_closed_when_aicli_reports_a_different_model(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = root / "aicli.ps1"
+            entry.write_text("# stub\n", encoding="utf-8")
+            runner = AiCliProfileRunner(
+                name="codex-cli",
+                engine="codex",
+                default_profile="codex-qwen-paygo",
+                entry=str(entry),
+            )
+            execution = {
+                "workspace": str(root),
+                "model": "qwen3.7-flash",
+                "profile": "codex-qwen-paygo",
+                "policy": "read-only",
+                "native_images": [],
+                "budget": {
+                    "timeout_seconds": 30,
+                    "max_steps": 4,
+                    "max_tool_calls": 4,
+                },
+            }
+            envelope = {
+                "run": {
+                    "exitCode": 0,
+                    "durationMs": 12,
+                    "model": "qwen3.7-max-2026-06-08",
+                    "stdout": "\n".join(
+                        [
+                            '{"type":"thread.started","thread_id":"thread-1"}',
+                            '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}',
+                        ]
+                    ),
+                    "limitEnforcement": {
+                        "timeout": "hard",
+                        "maxSteps": "hard",
+                        "maxToolCalls": "hard",
+                    },
+                    "limitUsage": {
+                        "steps": 0,
+                        "toolCalls": 0,
+                        "eventsSeen": 2,
+                        "protocol": "codex-app-server",
+                        "stepDefinition": "distinct-non-output-thread-item-v2",
+                        "cleanupConfirmed": True,
+                        "cleanupMethod": "none",
+                    },
+                }
+            }
+            with patch(
+                "llm_backend_toolkit.agent_runners.shutil.which",
+                return_value="pwsh",
+            ), patch(
+                "llm_backend_toolkit.agent_runners._bounded_process",
+                side_effect=after_codex_machine_event_probe(
+                    (0, json.dumps(envelope), "", 12)
+                ),
+            ):
+                with self.assertRaises(AgentRunnerError) as raised:
+                    runner.invoke("task", execution)
+
+            self.assertEqual("agent_model_mismatch", raised.exception.error.category)
+            self.assertEqual(
+                "qwen3.7-flash",
+                raised.exception.receipt["requested_model"],
+            )
+            self.assertEqual(
+                "qwen3.7-max-2026-06-08",
+                raised.exception.receipt["effective_model"],
             )
 
     def test_aicli_agent_usage_ignores_non_integer_or_negative_fields(self):

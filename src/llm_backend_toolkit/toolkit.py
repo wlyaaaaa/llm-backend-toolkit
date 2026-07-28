@@ -436,6 +436,7 @@ class Toolkit:
                 "native_images": list(media.native_images),
                 "profile": route["profile"],
                 "model": route["model"],
+                "cloud": bool(resolved.config.get("cloud")),
                 "_progress_callback": progress_callback,
             }
         )

@@ -828,6 +828,23 @@ class AiCliProfileRunner:
             raise _runner_error("agent_failed", f"aicli returned no JSON envelope: {stderr.strip()[:500]}", retryable=True)
         envelope = envelopes[-1]
         run = envelope.get("run") or {}
+        effective_model = str(run.get("model") or "")
+        if execution.get("cloud") and not effective_model:
+            raise _runner_error(
+                "agent_model_unverified",
+                "aicli did not report the effective model for this cloud agent run.",
+                receipt={"requested_model": model},
+            )
+        if effective_model and effective_model != model:
+            raise _runner_error(
+                "agent_model_mismatch",
+                "aicli reported a different effective model than the requested agent model.",
+                receipt={
+                    "requested_model": model,
+                    "effective_model": effective_model,
+                },
+            )
+        routed_model = effective_model or model
         child_stdout = str(run.get("stdout") or "")
         child_values = _json_values(child_stdout)
         usage = _safe_aicli_usage(run.get("usage"))
@@ -887,7 +904,7 @@ class AiCliProfileRunner:
         child_code = int(run.get("exitCode") if run.get("exitCode") is not None else code)
         receipt = {
             "runner": self.name,
-            "model": model,
+            "model": routed_model,
             "exit_code": child_code,
             "duration_ms": int(run.get("durationMs") or duration_ms),
             "steps": steps,
@@ -962,7 +979,7 @@ class AiCliProfileRunner:
         return AgentResponse(
             content=final,
             runner=self.name,
-            model=model,
+            model=routed_model,
             exit_code=child_code,
             duration_ms=int(run.get("durationMs") or duration_ms),
             usage=usage,

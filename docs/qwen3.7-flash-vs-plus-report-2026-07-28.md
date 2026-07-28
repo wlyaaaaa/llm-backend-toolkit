@@ -10,12 +10,12 @@
 
 在目前唯一有效的同条件能力对测——不连接智能体的直接 API 测试——Flash 与 Plus 大体同级，Flash 本轮略高 1 分、延迟明显更低。没有观察到 Plus 更强。
 
-Codex Agent 的 4/30 不是有效能力分。两款云模型都遇到同一个 AICLI/Codex `workspace-write` 沙箱故障；模型能读取、推理和给出目标内容，却不能把内容写进验收文件。Flash 扩到 56 步仍明确报告所有写操作被策略拒绝，证明继续加步数只会继续付费，不能修复连接层。
+Codex Agent 的 4/30 不是 Flash 或 Plus 的有效能力分。2026-07-28 的账单控制台与代码复核证明，这批 Agent 任务实际落到了共享 Profile 的主模型 `qwen3.7-max-2026-06-08`：评测器虽传入 `--model qwen3.7-flash/plus`，AICLI 的 app-server 桥却从 Profile `primary` 重建 `thread/start`，丢失了子命令模型覆盖。Max 随后还遇到 `workspace-write` 沙箱故障。步数扩到 56 仍不能写入，只增加了错误模型的付费调用。
 
 因此当前建议是：
 
 - 普通文本、结构化生成和一次性推理：优先 Flash。它与 Plus 本轮能力相当，但速度和用户给定价格更有优势。
-- Codex 文件/命令智能体：Flash 与 Plus 的路由均已禁用；不能用本轮 Agent 结果给两者排序。
+- Codex 文件/命令智能体：Flash 与 Plus 的路由均已禁用；本轮 Agent 记录既不能证明两者的能力，也不能证明两者存在相同的写入故障。
 - `local-default` 保持不变；不静默 fallback，不再自动调用云端 Agent。
 
 ## 有效对测：直接 API
@@ -39,21 +39,27 @@ Codex Agent 的 4/30 不是有效能力分。两款云模型都遇到同一个 A
 
 链路为：
 
-`llm-backend-toolkit → AICLI → Codex CLI 0.145.0 app-server → qwen3.7-flash / qwen3.7-plus`
+请求链记录为：
+
+`llm-backend-toolkit → AICLI → Codex CLI 0.145.0 app-server → 请求 qwen3.7-flash / qwen3.7-plus`
+
+但当时的实际路由为：
+
+`AICLI app-server bridge → Profile primary → qwen3.7-max-2026-06-08`
 
 使用的 `general_agent_v1` suite fingerprint 为：
 
 `7f46548f9aa914584e998c1f00df1db2a72b25061782dde5610ded4e3ce2b88e`
 
-24 步记录中 Flash 与 Plus 都是 4/30、三题均触发步骤上限。这些记录一度看起来像模型执行效率低，但 56 步 Flash 记录给出了决定性反证：
+24 步记录被错误标记为 Flash 与 Plus，均为 4/30、三题均触发步骤上限；56 步记录也被错误标记为 Flash。它们只能说明实际调用的 Max 在该连接层中出现以下行为：
 
 - 证据题在第 33 步完成了正确方向的 JSON，却明确说所有文件写入被策略阻止，只能把 JSON 放在最终文本。
 - 规划题在第 42 步给出了计划内容，也明确说无法写入要求的产物。
 - 代码题到第 57 步仍不能修改目标源码。
 
-隐藏 verifier 只检查 workspace 中的最终文件，因此连接层禁止写入必然得到接近空工作区的最低分。这个故障同时影响 Flash 和 Plus，4/30 不能用于能力比较。
+隐藏 verifier 只检查 workspace 中的最终文件，因此连接层禁止写入必然得到接近空工作区的最低分。由于实际模型是 Max，这批记录不能用于 Flash/Plus 能力比较，也不能把写入故障归因给 Flash 或 Plus。
 
-先前修复了两个真实连接问题：远程 Provider 被外层禁网沙箱阻断，以及 Node 启动器提前退出导致进程树清理无法确认。修复后 API 传输和 app-server 生命周期可以工作，但云端 `workspace-write` 仍未达到可用门槛。按“查不清不继续付费”的约束，不再发起云端复测，直接禁用两款模型的 Agent routes。
+先前修复了两个真实连接问题：远程 Provider 被外层禁网沙箱阻断，以及 Node 启动器提前退出导致进程树清理无法确认。2026-07-28 的后续调查又修复了模型覆盖丢失：AICLI 现在把原生 `--model` 解析为 machine plan 的有效模型，同时写入 Provider override、app-server `thread/start` 和公开运行回执；Toolkit 会在回执缺少云端有效模型或与请求不一致时失败关闭。该修复只做本地确定性测试，没有再次调用付费 API。按“查不清不继续付费”的约束，两款模型的 Agent routes 继续禁用。
 
 ## 旧 30/30 为什么可信
 
@@ -72,7 +78,7 @@ Codex Agent 的 4/30 不是有效能力分。两款云模型都遇到同一个 A
 - direct adapter：`openai-chat`
 - 登记上下文：1,000,000 Token
 - 直接 API：已接入并通过真实调用
-- Agent routes：已禁用
+- Agent routes：已禁用；模型路由修复已通过本地回归测试，未做付费 Live 复验
 - 默认模型：仍为 `local-default`
 - 失败策略：不自动切换 Plus、本地模型或其他 Provider
 
@@ -82,9 +88,9 @@ Codex Agent 的 4/30 不是有效能力分。两款云模型都遇到同一个 A
 
 - 直接 API 原始结果：`outputs/qwen37-flash-vs-plus-20260728.json`（Git 忽略）
 - 直接 API SHA-256：`d2d86538c82eba1c4508a653120e2dbf563c1fb33f84e88919cfd88c9e5cbdef`
-- Flash 24 步 summary SHA-256：`eb618c60c4e1d834baec82f79ce803cb1e315a6887ef8be1cc2122ad00986f54`
-- Plus 24 步 summary SHA-256：`2a064644e21b4974ab6638c5edeedb15b7e0bc9a46986d2556b601d5f0434edd`
-- Flash 56 步 summary SHA-256：`08d81f9729ee2606ea4c8ab47c0e49dd7ba44e39b818bd05a4a84bd9d70cf897`
+- 错标为 Flash 的 24 步 summary SHA-256：`eb618c60c4e1d834baec82f79ce803cb1e315a6887ef8be1cc2122ad00986f54`
+- 错标为 Plus 的 24 步 summary SHA-256：`2a064644e21b4974ab6638c5edeedb15b7e0bc9a46986d2556b601d5f0434edd`
+- 错标为 Flash 的 56 步 summary SHA-256：`08d81f9729ee2606ea4c8ab47c0e49dd7ba44e39b818bd05a4a84bd9d70cf897`
 - 当前本地复查 summary SHA-256：`43d8102b4a6f688dd988ed48cf4545be95bcbd31235187eda916da30a781866b`
 
-价格比例来自本轮用户给出的“不高于 Plus 的约 1/6”。56 步只用于当时的预算设计；由于实际失败来自写入沙箱，不能作为等成本能力结论，也不应继续扩大步数。
+价格比例来自本轮用户给出的“不高于 Plus 的约 1/6”。56 步只用于当时的预算设计；由于记录的模型身份错误且连接层禁止写入，不能作为等成本能力结论，也不应继续扩大步数。
