@@ -1948,7 +1948,7 @@ class AgentExecutionTests(unittest.TestCase):
             self.assertIsInstance(runners[name], AiCliProfileRunner)
         self.assertIs(runners["data_factory"], runners["codex-cli"])
 
-    def test_cloud_status_exposes_the_unverified_codex_default_without_a_live_call(self):
+    def test_cloud_status_exposes_direct_only_backend_without_a_provider_call(self):
         toolkit = Toolkit(
             providers={"qwen3.7-plus": Qwen37PlusProvider(api_key="configured-for-status")},
             runners={},
@@ -1959,12 +1959,8 @@ class AgentExecutionTests(unittest.TestCase):
         self.assertEqual("ok", result["status"])
         status = result["provider_status"]
         self.assertFalse(status["live_call_performed"])
-        route = status["agent_default"]
-        self.assertEqual("data_factory", route["runner_alias"])
-        self.assertEqual("codex-cli", route["runner"])
-        self.assertEqual("codex-qwen-paygo", route["profile"])
-        self.assertEqual("qwen3.7-plus", route["model"])
-        self.assertFalse(route["live_verified"])
+        self.assertNotIn("agent_default", status)
+        self.assertNotIn("agent_supported_runners", status)
 
     def test_legacy_direct_agent_runners_are_fail_closed(self):
         for runner in (QwenCodeRunner(executable="qwen"), OpenCodeRunner(executable="opencode")):
@@ -2398,7 +2394,7 @@ class AgentExecutionTests(unittest.TestCase):
         self.assertEqual("agent_budget_unenforced", raised.exception.error.category)
         self.assertFalse(raised.exception.receipt["cleanup_confirmed"])
 
-    def test_cloud_agent_defaults_to_codex_and_pins_exact_plus_model(self):
+    def test_cloud_agent_is_blocked_when_no_validated_route_is_registered(self):
         with tempfile.TemporaryDirectory() as temp:
             runner = FakeRunner(
                 AgentResponse(
@@ -2420,16 +2416,10 @@ class AgentExecutionTests(unittest.TestCase):
 
             result = toolkit.invoke(request)
 
-            self.assertEqual("ok", result["status"])
-            execution = runner.calls[0]["execution"]
-            self.assertEqual("codex-qwen-paygo", execution["profile"])
-            self.assertEqual("qwen3.7-plus", execution["model"])
-            receipt = result["execution_receipt"]
-            self.assertEqual("data_factory", receipt["requested_runner"])
-            self.assertEqual("codex-qwen-paygo", receipt["profile"])
-            self.assertTrue(receipt["default_applied"])
-            self.assertFalse(receipt["route_live_verified"])
-            self.assertEqual("official_codex_responses_plus_local_sibling_bakeoff", receipt["route_basis"])
+            self.assertEqual("blocked", result["status"])
+            self.assertEqual("agent_runner_incompatible", result["error"]["category"])
+            self.assertEqual([], runner.calls)
+            self.assertEqual("top_model", result["decision"]["owner"])
 
     def test_fast_middle_spark_pins_its_exact_profile_model_and_xhigh_receipt(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -82,6 +82,23 @@ class ReplacementRunner:
 
 
 class BackendRegistryTests(unittest.TestCase):
+    def test_qwen_flash_is_direct_only_and_does_not_change_the_local_default(self):
+        registry = BackendRegistry.load()
+
+        default = registry.resolve(None)
+        flash = registry.resolve("qwen3.7-flash")
+
+        self.assertEqual("local-default", default.backend_id)
+        self.assertEqual("cloud-qwen-flash", flash.backend_id)
+        self.assertTrue(flash.alias_applied)
+        self.assertEqual("openai-chat", flash.config["adapter"])
+        self.assertEqual("qwen3.7-flash", flash.config["model"])
+        self.assertTrue(flash.config["cloud"])
+        self.assertTrue(flash.config["supports_vision"])
+        self.assertEqual(1_000_000, flash.config["context_window_tokens"])
+        self.assertEqual({}, flash.config["agent_routes"])
+        self.assertEqual({}, registry.resolve("qwen3.7-plus").config["agent_routes"])
+
     def test_fast_middle_spark_is_opt_in_agent_only_and_does_not_change_the_local_default(self):
         registry = BackendRegistry.load()
 

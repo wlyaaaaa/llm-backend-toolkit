@@ -16,7 +16,7 @@
 - 异步 Smart Job：提交立即返回，顶级模型无需被长时间命令阻塞。
 - 欠费、额度、限流、权限、GPU 占用等错误只返回裁决选项，不自动调用另一个模型。
 - 任何云端调用都要求显式 `privacy.cloud_allowed=true`，包括 task 文本、source 片段与媒体。
-- agent mode 通过 aicli 调用原生 CLI：官方与本地 Ollama Codex machine run 使用 Codex 原生 `read-only` / `workspace-write` 沙箱；第三方 Codex 及其他适用引擎才使用网络关闭的 Windows 外层沙箱。正式 personal skill 会把 `LLM_TOOLKIT_AICLI_ENTRY` 钉到其受管的当前源码入口；该入口缺失时明确失败，不会静默改用可能过期的安装态。`data_factory` 从 registry 解析精确 Profile 与模型，不做运行时猜测或 fallback。
+- agent mode 通过 aicli 调用原生 CLI：官方与远程 Responses Codex machine run 使用 Codex 原生 `read-only` / `workspace-write` 命令沙箱，使模型传输保持联网而模型生成的命令仍受限；本地 Ollama Codex 及其他适用本地引擎使用网络关闭的 Windows 外层沙箱。正式 personal skill 会把 `LLM_TOOLKIT_AICLI_ENTRY` 钉到其受管的当前源码入口；该入口缺失时明确失败，不会静默改用可能过期的安装态。`data_factory` 从 registry 解析精确 Profile 与模型，不做运行时猜测或 fallback。
 
 ## 安装
 
@@ -113,7 +113,7 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 
 启动器只创建一个 loopback 服务和一个 Edge app 窗口。窗口打开后通过 SSE 自动接收后续调用，不需要手动刷新；重复调用不会抢焦点。安装器会同时创建当前用户桌面和开始菜单中的“模型调用观察台”快捷方式，并使用项目自带的白绿图标；它只升级或删除能由启动目标、完整参数、工作目录和描述共同证明属于本工具的链接，同名第三方文件会冲突失败而不会被覆盖。首次全体预检会拦截开始时已经存在的冲突；每个目标在最终变更或状态确认前还会复验。桌面和开始菜单是两个独立 Known Folder，不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，已经完成的本工具链接操作可能保留，可在处理冲突后幂等重跑。需要移除这两个精确入口时使用 `-Remove`。`Show-LlmBackendDashboard.ps1` 继续作为 PowerShell 降级视图。
 
-观察台显示的是经过净化的可验证工作过程，不是隐藏 chain-of-thought。prompt、隐藏 thinking/reasoning 正文、原始命令和参数、工具输入输出、环境变量、OCR/ASR 正文及绝对私密路径都不会进入公开事件日志。正式 skill 只使用上述 AICLI 源码入口，不会因旧安装态缺少事件能力而静默降级。其 Codex app-server 合同以 `codex-cli 0.145.0` 为当前已验证最低基线；`0.145.x` 较早公开 `agentMessage` 缺少 completed 的兼容只在后续存在非空 completed final 且没有其他未完成项时成立。`0.146.0-alpha.3.1` 曾通过同一兼容门，未来更新默认尝试，但必要字段、通知、生命周期或清理协议漂移会返回明确错误。
+观察台显示的是经过净化的可验证工作过程，不是隐藏 chain-of-thought。prompt、隐藏 thinking/reasoning 正文、原始命令和参数、工具输入输出、环境变量、OCR/ASR 正文及绝对私密路径都不会进入公开事件日志。正式 skill 只使用上述 AICLI 源码入口，不会因旧安装态缺少事件能力而静默降级。其 Codex app-server 合同以当前实装的 `codex-cli 0.145.0` 为已验证基线；`0.145.x` 较早公开 `agentMessage` 缺少 completed 的兼容只在后续存在非空 completed final 且没有其他未完成项时成立。未来更新默认尝试，但必要字段、通知、生命周期或清理协议漂移会返回明确错误。
 
 “Token”卡片是本次运行累计输入、输出与缓存 usage；“当前上下文”是另一项指标，只接受 Codex app-server 在同一条 `thread/tokenUsage/updated` 运行时通知中同时提供的 `last.totalTokens` 与 `modelContextWindow`。首个完整实测尚未到达时固定显示“等待 Codex 运行时实测”；如果运行结束仍缺少完整配对，或字段、通知、生命周期不兼容，AICLI 会返回明确协议错误，不会用 prompt token、累计输入、Toolkit 压缩估算、backend registry 上限或最终结果回执补成估算值。时间线中的“已压缩调用输入”是 Toolkit 发起模型调用前的确定性输入整理；“Codex 已自动压缩上下文”才是原生 agent 会话实际完成的 context compaction。
 
@@ -136,7 +136,7 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 
 显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或 chain-of-thought。有限预算任务只有在回执同时证明 `timeout/maxSteps/maxToolCalls=hard` 时才会被接受；未知事件、持续流墙钟或无法确认完整进程树清理均返回失败关闭，越限返回 `blocked` 与 `limit_hit`，不会把未执行的约束写成成功。
 
-当前 `local-default` 解析到 `codex-ollama-main + qwen-main-v1`，已经过本机版本绑定验收。当前 `cloud-qwen-plus` 解析到 `codex-qwen-paygo + qwen3.7-plus`；这是**未实测推荐**。将来注册表可以替换两者，而历史报告不会自动继承到新指纹。
+当前 `local-default` 解析到 `codex-ollama-main + qwen-main-v1`，已经过本机版本绑定验收。`cloud-qwen-flash` 与 `cloud-qwen-plus` 是显式 direct API backend；Flash 的加入没有改变本地默认，也不会发生静默 fallback。2026-07-28 的 Codex 云端 Agent 复测暴露 `workspace-write` 沙箱故障：模型可以返回文本，但无法写入验收 workspace，因此 4/30 记录作废且两款云模型的 Agent routes 均已禁用。将来只有连接合同经无付费本地测试和有界真实验收重新通过后才可恢复；历史报告不会自动继承到新指纹。
 `status` 会在不发模型生成请求的情况下返回当前 backend、模型指纹、agent 默认路由、证据状态和支持的 runner；实际任务回执同时记录精确 Profile、模型与是否采用默认。
 
 `fast-middle-agent` 是显式 opt-in 的文本型 Agent 角色：`codex-spark-xhigh + gpt-5.3-codex-spark + xhigh`。它只通过官方 Codex CLI/ChatGPT 登录链调用，不伪装成 OpenAI API，也不支持原生图片输入。选择它必须显式写 `backend=fast-middle-agent` 和 `privacy.cloud_allowed=true`；省略 backend 仍只走本地 Qwen。协议默认与任务推荐相互独立：跨文件、工具循环、长对话降噪和严格结构任务可优先显式选择 Spark，隐含现实目标/常识因果与额度回退优先本地。额度、限流或资格失败会返回 `rate_limited` 等规范错误和 `invoke:local-default` 裁决选项，但不会自动重提；调用方如选择本地回退，必须保留两次独立回执和实际模型身份。
@@ -156,7 +156,7 @@ python scripts/run_general_agent_benchmark.py --list
 python scripts/run_general_agent_benchmark.py
 ```
 
-默认依次串行运行 Codex CLI、Claude Code、Qwen Code 与 OpenCode，均使用显式本地 `qwen-main-v1`。结果只对记录的 suite fingerprint、模型 digest、CLI 版本、沙箱合同和 Toolkit 提交有效；它比较的是“模型 + harness”的代理表现，不生成永久通用智商分。
+默认依次串行运行 Codex CLI、Claude Code、Qwen Code 与 OpenCode，并使用 `local-default`。`--backend` 可选择注册表中的其他精确后端；默认行动预算为 24 步、80 次工具调用，`--max-steps` / `--max-tool-calls` 可显式调整并写入新格式 summary。扩大步数不会改变题目、workspace 或隐藏 verifier。若按模型价格比较，应同时保留同步数结果，并说明上下文累积使总 Token 成本通常不是步数的线性倍数。结果只对记录的 suite fingerprint、模型身份、CLI 版本、沙箱合同和 Toolkit 提交有效；它比较的是“模型 + harness”的代理表现，不生成永久通用智商分。
 
 2026-07-22 的完整横向实测、耗时、能力边界和默认建议见 [四 harness 通用代理验收报告](docs/general-agent-benchmark-v1.md)。2026-07-25 又用当前 AICLI 源码入口、`codex-app-server` 与 `distinct-non-output-thread-item-v2` 完整复测 Codex 三题，最终 30/30、协议 3/3；数据工厂专项同链路复测 21/21。当前版本的建议仍是 `data_factory` 固定使用 Codex CLI；日常调用不重复跑四 harness。
 
@@ -222,9 +222,9 @@ DASHSCOPE_API_KEY
 LLM_TOOLKIT_QWEN_BASE_URL
 ```
 
-当前公开示例是 `cloud-qwen-plus`，但 `openai-chat` adapter 可通过外部注册表接入其他兼容平台；只有全新协议才需要新增 adapter。API key 只写环境变量名，远程云端地址必须是 HTTPS。测试套件不会发起真实云端调用；云端请求格式和错误分类使用 mock 验证。
+当前内置的直接云端 backend 是 `cloud-qwen-flash` 与 `cloud-qwen-plus`，但 `openai-chat` adapter 也可通过外部注册表接入其他兼容平台；只有全新协议才需要新增 adapter。API key 只写环境变量名，远程云端地址必须是 HTTPS。自动测试套件不会发起真实云端调用；云端请求格式和错误分类使用 mock 验证。
 选择任何云端 backend 仍不等于授权传输；请求必须同时设置 `privacy.cloud_allowed=true`。云端 probe 还需显式传入 `--cloud-allowed`。
-Agent 模式下 Toolkit 会把 Codex 原生参数显式锁定为 `--model qwen3.7-plus`，不会继承 AICLI 通用千问 Profile 的 Max 默认值。欠费会归一化为 `billing_unavailable` 并把本地调用、顶级模型接管或账务处理选项返回调用者，不会自动降级。
+Flash 与 Plus 当前仅支持显式 direct API；Agent 模式会因没有已验收 route 而失败关闭，不会调用云端或自动改投其他模型。欠费会归一化为 `billing_unavailable` 并把本地调用、顶级模型接管或账务处理选项返回调用者，不会自动降级。
 
 百炼官方资料：
 
