@@ -113,9 +113,13 @@ def _validate_tool_call(response: dict[str, Any]) -> tuple[int, str]:
     function = calls[0].get("function") or {}
     if function.get("name") != "lookup_inventory":
         return 0, "wrong_tool"
-    try:
-        arguments = json.loads(str(function.get("arguments") or ""))
-    except Exception:
+    arguments = function.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except Exception:
+            return 0, "invalid_arguments_json"
+    elif not isinstance(arguments, dict):
         return 0, "invalid_arguments_json"
     expected = {"sku": "A-17", "warehouse": "HZ-2", "include_reserved": False}
     if arguments != expected:
@@ -128,7 +132,7 @@ def _validate_summary(response: dict[str, Any]) -> tuple[int, str]:
     required = (
         ("17",),
         ("杭州",),
-        ("可能", "尚未", "不确定", "待确认"),
+        ("可能", "尚未", "不确定", "待确认", "未确认", "未明"),
         ("退款",),
     )
     if any(not any(token in text for token in group) for group in required):

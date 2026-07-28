@@ -48,6 +48,35 @@ class Qwen37PairwiseHarnessTests(unittest.TestCase):
         self.assertEqual((2, "correct"), case.validator(response("开车")))
         self.assertEqual(0, case.validator(response("步行"))[0])
 
+    def test_function_call_accepts_native_object_arguments_from_ollama(self):
+        case = self.cases["function_call"]
+        tool_calls = [
+            {
+                "function": {
+                    "name": "lookup_inventory",
+                    "arguments": {
+                        "sku": "A-17",
+                        "warehouse": "HZ-2",
+                        "include_reserved": False,
+                    },
+                }
+            }
+        ]
+
+        self.assertEqual(
+            (2, "exact_tool_call"),
+            case.validator(response(tool_calls=tool_calls)),
+        )
+
+    def test_summary_accepts_equivalent_explicit_uncertainty_phrasing(self):
+        case = self.cases["summary_fidelity"]
+        content = (
+            "杭州17人反馈升级后偶发白屏。工程师称或与缓存有关但未确认。"
+            "客服已提退款方案，未明是否全退。暂无修复日期。"
+        )
+
+        self.assertEqual((2, "faithful_and_bounded"), case.validator(response(content)))
+
 
 if __name__ == "__main__":
     unittest.main()
