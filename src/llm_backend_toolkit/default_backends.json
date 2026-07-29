@@ -13,6 +13,17 @@
       "cloud": false,
       "supports_vision": true,
       "context_window_tokens": 262144,
+      "default_reasoning_mode": "on",
+      "ollama_options": {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "repeat_penalty": 1.0,
+        "num_ctx": 262144,
+        "num_predict": 32768
+      },
       "base_url_env": "LLM_TOOLKIT_OLLAMA_BASE_URL",
       "base_url_default": "http://127.0.0.1:32100",
       "data_destination": "LocalGpuBroker Ollama endpoint",
@@ -72,11 +83,11 @@
       "data_destination": "LocalGpuBroker Ollama endpoint",
       "required_reasoning_mode": "on",
       "ollama_options": {
-        "temperature": 1.0,
+        "temperature": 0.6,
         "top_p": 0.95,
         "top_k": 20,
         "min_p": 0.0,
-        "presence_penalty": 1.5,
+        "presence_penalty": 0.0,
         "repeat_penalty": 1.0,
         "num_ctx": 262144,
         "num_predict": 32768
@@ -96,8 +107,10 @@
           "model": "gpt-5.3-codex-spark",
           "reasoning_effort": "xhigh",
           "evidence": {
-            "basis": "aicli_0.3.1_toolkit_live_and_synthetic_acceptance_2026-07-24",
-            "live_verified": true
+            "basis": "aicli_source_codex_0.145_workspace_rootfix_live_2026-07-29",
+            "live_verified": true,
+            "capability_acceptance": "failed_max_steps_80",
+            "capability_score": "2/9"
           }
         },
         "codex-cli": {
@@ -106,8 +119,10 @@
           "model": "gpt-5.3-codex-spark",
           "reasoning_effort": "xhigh",
           "evidence": {
-            "basis": "aicli_0.3.1_toolkit_live_and_synthetic_acceptance_2026-07-24",
-            "live_verified": true
+            "basis": "aicli_source_codex_0.145_workspace_rootfix_live_2026-07-29",
+            "live_verified": true,
+            "capability_acceptance": "failed_max_steps_80",
+            "capability_score": "2/9"
           }
         }
       }

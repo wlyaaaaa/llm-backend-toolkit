@@ -132,8 +132,21 @@ class ToolkitTests(unittest.TestCase):
         self.assertEqual({"answer": 56}, result["output"])
         self.assertNotIn("reasoning", result)
         self.assertTrue(all(check["passed"] for check in result["checks"]))
-        self.assertEqual("off", provider.calls[0]["reasoning_mode"])
+        self.assertEqual("on", provider.calls[0]["reasoning_mode"])
         self.assertEqual("compact", result["context_receipt"]["mode"])
+
+    def test_explicit_reasoning_off_overrides_the_local_quality_default(self):
+        provider = FakeProvider(
+            ProviderResponse(content='{"answer": 56}', model="qwen-main-v1")
+        )
+        toolkit = Toolkit(providers={"qwen-main-v1": provider})
+        request = base_request()
+        request["reasoning"] = {"mode": "off"}
+
+        result = toolkit.invoke(request)
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual("off", provider.calls[0]["reasoning_mode"])
 
     def test_failed_primary_never_calls_an_unrequested_local_provider(self):
         primary = FakeProvider(

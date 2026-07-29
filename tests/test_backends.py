@@ -125,24 +125,37 @@ class BackendRegistryTests(unittest.TestCase):
         self.assertEqual("gpt-5.3-codex-spark", route["model"])
         self.assertEqual("xhigh", route["reasoning_effort"])
 
-    def test_default_registry_adds_explicit_hard_reasoning_role_without_changing_default(self):
+    def test_default_registry_uses_the_frozen_quality_profile_and_keeps_hard_role(self):
         registry = BackendRegistry.load()
 
         default = registry.resolve(None)
         hard = registry.resolve("local-hard-reasoning")
 
         self.assertEqual("local-default", default.backend_id)
-        self.assertNotIn("ollama_options", default.config)
+        self.assertEqual("on", default.config["default_reasoning_mode"])
+        self.assertEqual(
+            {
+                "temperature": 0.6,
+                "top_p": 0.95,
+                "top_k": 20,
+                "min_p": 0.0,
+                "presence_penalty": 0.0,
+                "repeat_penalty": 1.0,
+                "num_ctx": 262144,
+                "num_predict": 32768,
+            },
+            default.config["ollama_options"],
+        )
         self.assertEqual("qwen-main-v1", hard.config["model"])
         self.assertFalse(hard.config["cloud"])
         self.assertEqual("on", hard.config["required_reasoning_mode"])
         self.assertEqual(
             {
-                "temperature": 1.0,
+                "temperature": 0.6,
                 "top_p": 0.95,
                 "top_k": 20,
                 "min_p": 0.0,
-                "presence_penalty": 1.5,
+                "presence_penalty": 0.0,
                 "repeat_penalty": 1.0,
                 "num_ctx": 262144,
                 "num_predict": 32768,

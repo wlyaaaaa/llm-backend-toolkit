@@ -1,0 +1,59 @@
+{
+  "schema": "llm-backend-toolkit.backends.v1",
+  "default_backend": "local-default",
+  "aliases": {
+    "qwen-main-v1": "local-default",
+    "qwen-review-v1": "local-dense-27b-candidate"
+  },
+  "backends": {
+    "local-default": {
+      "adapter": "ollama",
+      "model": "qwen-main-v1",
+      "cloud": false,
+      "supports_vision": true,
+      "context_window_tokens": 262144,
+      "base_url_env": "LLM_TOOLKIT_OLLAMA_BASE_URL",
+      "base_url_default": "http://127.0.0.1:32100",
+      "data_destination": "LocalGpuBroker Ollama endpoint",
+      "agent_routes": {
+        "data_factory": {
+          "runner": "codex-cli",
+          "profile": "codex-ollama-main",
+          "model": "qwen-main-v1",
+          "reasoning_effort": "max",
+          "evidence": {
+            "basis": "accepted_local_bakeoff",
+            "live_verified": true,
+            "model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a",
+            "parent_model": "qwen3.6:35b"
+          }
+        },
+        "codex-cli": {
+          "runner": "codex-cli",
+          "profile": "codex-ollama-main",
+          "model": "qwen-main-v1",
+          "reasoning_effort": "max",
+          "evidence": {
+            "basis": "accepted_local_bakeoff",
+            "live_verified": true,
+            "model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a",
+            "parent_model": "qwen3.6:35b"
+          }
+        }
+      }
+    },
+    "local-dense-27b-candidate": {
+      "adapter": "ollama",
+      "model": "qwen-review-v1",
+      "cloud": false,
+      "supports_vision": true,
+      "context_window_tokens": 131072,
+      "base_url_env": "LLM_TOOLKIT_OLLAMA_BASE_URL",
+      "base_url_default": "http://127.0.0.1:32100",
+      "data_destination": "LocalGpuBroker Ollama endpoint",
+      "evaluation_state": "rejected_not_integrated",
+      "evaluation_basis": "frozen_quality_holdout_2026-07-29",
+      "agent_routes": {}
+    }
+  }
+}

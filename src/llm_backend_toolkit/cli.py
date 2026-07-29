@@ -73,7 +73,6 @@ def _probe_request(
         **({"backend": backend} if backend else {}),
         "task": task,
         "context": {"mode": "compact", "target_tokens": 2048},
-        "reasoning": {"mode": "off"},
         "media": media,
         "privacy": {"cloud_allowed": cloud_allowed},
     }

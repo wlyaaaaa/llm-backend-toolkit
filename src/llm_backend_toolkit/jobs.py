@@ -421,7 +421,11 @@ class JobStore:
             },
             "privacy": privacy_value,
             "reasoning": {
-                "mode": str((request.get("reasoning") or {}).get("mode") or "off")
+                "mode": str(
+                    (request.get("reasoning") or {}).get("mode")
+                    or config.get("default_reasoning_mode")
+                    or "off"
+                )
             },
             "task_protocol": {
                 "type": str((request.get("task") or {}).get("type") or "generation"),
@@ -482,6 +486,11 @@ class JobStore:
             resolved = registry.resolve(requested_backend)
             resolved_backend = resolved.backend_id
             display_metadata["model"] = str(resolved.config.get("model") or "")
+            display_metadata["reasoning_mode"] = str(
+                (request.get("reasoning") or {}).get("mode")
+                or resolved.config.get("default_reasoning_mode")
+                or "off"
+            )
             if is_agent:
                 route_id = str(execution.get("runner") or "data_factory")
                 route = (resolved.config.get("agent_routes") or {}).get(route_id)
@@ -559,9 +568,7 @@ class JobStore:
                 "backend": resolved_backend,
                 "model": str(display_metadata.get("model") or ""),
                 "execution_mode": "agent" if is_agent else "direct",
-                "reasoning_mode": str(
-                    (request.get("reasoning") or {}).get("mode") or "off"
-                ),
+                "reasoning_mode": str(display_metadata.get("reasoning_mode") or "off"),
                 "reasoning_effort": str(
                     display_metadata.get("reasoning_effort") or ""
                 ),

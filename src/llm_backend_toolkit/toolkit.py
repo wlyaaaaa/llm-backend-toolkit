@@ -161,7 +161,12 @@ class Toolkit:
         except ValueError as exc:
             return self._blocked("invalid_request", str(exc))
 
-        reasoning_mode = str((request.get("reasoning") or {}).get("mode") or "off")
+        requested_reasoning_mode = (request.get("reasoning") or {}).get("mode")
+        reasoning_mode = str(
+            requested_reasoning_mode
+            or resolved.config.get("default_reasoning_mode")
+            or "off"
+        )
         if reasoning_mode not in {"off", "on"}:
             result = self._blocked("invalid_request", f"Unsupported reasoning mode: {reasoning_mode}")
             result["backend"] = self._backend_receipt(resolved)

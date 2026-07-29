@@ -1,6 +1,6 @@
 import unittest
 
-from llm_backend_toolkit.cli import _exit_code, build_parser
+from llm_backend_toolkit.cli import _exit_code, _probe_request, build_parser
 
 
 class CliContractTests(unittest.TestCase):
@@ -23,6 +23,11 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual("C:/jobs", args.state_dir)
         self.assertTrue(args.force)
         self.assertTrue(args.cloud_allowed)
+
+    def test_probe_defers_to_the_selected_backend_reasoning_default(self):
+        request = _probe_request(None, "json", None, cloud_allowed=False)
+
+        self.assertNotIn("reasoning", request)
 
     def test_status_accepts_an_arbitrary_backend_id(self):
         args = build_parser().parse_args(["status", "--backend", "future-platform-v2"])

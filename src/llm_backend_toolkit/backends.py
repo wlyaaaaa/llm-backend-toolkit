@@ -130,6 +130,15 @@ class BackendRegistry:
                     raise ValueError(
                         f"Backend {backend_id} required_reasoning_mode must be off or on"
                     )
+            if "default_reasoning_mode" in raw:
+                default_reasoning_mode = raw["default_reasoning_mode"]
+                if type(default_reasoning_mode) is not str or default_reasoning_mode not in {
+                    "off",
+                    "on",
+                }:
+                    raise ValueError(
+                        f"Backend {backend_id} default_reasoning_mode must be off or on"
+                    )
             if "ollama_options" in raw:
                 if adapter != "ollama" or bool(raw.get("cloud")):
                     raise ValueError(
@@ -205,6 +214,7 @@ class BackendRegistry:
                     "supports_vision": bool(config.get("supports_vision")),
                     "context_window_tokens": config.get("context_window_tokens"),
                     "data_destination": config.get("data_destination"),
+                    "default_reasoning_mode": config.get("default_reasoning_mode"),
                     "required_reasoning_mode": config.get("required_reasoning_mode"),
                     "agent_routes": sorted((config.get("agent_routes") or {}).keys()),
                 }

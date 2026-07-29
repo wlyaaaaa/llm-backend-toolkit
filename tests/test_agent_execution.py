@@ -2527,7 +2527,7 @@ class AgentExecutionTests(unittest.TestCase):
             self.assertEqual("xhigh", receipt["reasoning_effort"])
             self.assertTrue(receipt["route_live_verified"])
             self.assertEqual(
-                "aicli_0.3.1_toolkit_live_and_synthetic_acceptance_2026-07-24",
+                "aicli_source_codex_0.145_workspace_rootfix_live_2026-07-29",
                 receipt["route_basis"],
             )
             self.assertFalse(receipt["fallback_used"])

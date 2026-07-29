@@ -20,32 +20,34 @@ def _registry(
     model: str = "model-v1",
     profile: str = "profile-v1",
     backend_id: str = "local-a",
+    default_reasoning_mode: str | None = None,
 ) -> BackendRegistry:
+    backend = {
+        "adapter": "ollama",
+        "model": model,
+        "cloud": False,
+        "supports_vision": True,
+        "agent_routes": {
+            "data_factory": {
+                "runner": "codex-cli",
+                "profile": profile,
+                "model": model,
+                "evidence": {
+                    "basis": "synthetic-test",
+                    "live_verified": True,
+                    "model_digest": f"digest-{model}",
+                },
+            }
+        },
+    }
+    if default_reasoning_mode is not None:
+        backend["default_reasoning_mode"] = default_reasoning_mode
     return BackendRegistry.from_dict(
         {
             "schema": "llm-backend-toolkit.backends.v1",
             "default_backend": backend_id,
             "aliases": {},
-            "backends": {
-                backend_id: {
-                    "adapter": "ollama",
-                    "model": model,
-                    "cloud": False,
-                    "supports_vision": True,
-                    "agent_routes": {
-                        "data_factory": {
-                            "runner": "codex-cli",
-                            "profile": profile,
-                            "model": model,
-                            "evidence": {
-                                "basis": "synthetic-test",
-                                "live_verified": True,
-                                "model_digest": f"digest-{model}",
-                            },
-                        }
-                    },
-                }
-            },
+            "backends": {backend_id: backend},
         }
     )
 
@@ -133,6 +135,31 @@ def _spawn_hold_cache_lock(
 
 
 class JobStoreTests(unittest.TestCase):
+    def test_job_receipts_and_cache_identity_use_the_backend_reasoning_default(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(
+                Path(temp),
+                spawner=lambda *_: None,
+                registry=_registry(default_reasoning_mode="on"),
+            )
+            request = {
+                "backend": "local-a",
+                "task": {"goal": "g"},
+                "execution": {"cache_key": "same-key"},
+            }
+
+            accepted = store.submit(request)
+            state = store.get(accepted["job_id"])
+            _, default_digest = store._explicit_cache_identity(request, "same-key")
+            explicit_off = dict(request)
+            explicit_off["reasoning"] = {"mode": "off"}
+            _, off_digest = store._explicit_cache_identity(explicit_off, "same-key")
+
+            self.assertEqual("on", state["display"]["reasoning_mode"])
+            created = read_events(Path(temp) / accepted["job_id"])[0]
+            self.assertEqual("on", created["payload"]["reasoning_mode"])
+            self.assertNotEqual(default_digest, off_digest)
+
     def test_submit_returns_immediately_and_spawns_one_background_worker(self):
         with tempfile.TemporaryDirectory() as temp:
             spawned = []
@@ -155,7 +182,7 @@ class JobStoreTests(unittest.TestCase):
                 {
                     "task_label": "模型生成任务",
                     "execution_mode": "direct",
-                    "reasoning_mode": "off",
+                    "reasoning_mode": "on",
                     "model": "qwen-main-v1",
                 },
                 state["display"],

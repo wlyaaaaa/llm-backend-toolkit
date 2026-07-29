@@ -1,6 +1,6 @@
 # Spark 高速中档智能体验收报告
 
-状态：**ACCEPTED_WITH_BOUNDARIES**
+状态：**ROUTE_VERIFIED / CURRENT_CAPABILITY_NOT_QUALIFIED**
 
 验收日期：2026-07-24（UTC）
 
@@ -8,7 +8,18 @@
 
 对照链路：`local-default → data_factory → codex-cli → aicli codex-ollama-main → LocalGpuBroker:32100 → qwen-main-v1 → Qwen3.6 35B Q4_K_M`
 
-协议失效安全默认保持：省略 backend 时解析到 `local-default`。任务质量采用相对默认：跨文件、工具循环、长对话降噪和严格结构任务优先显式选择 Spark；隐含现实目标/常识因果与额度回退优先本地。
+协议失效安全默认保持：省略 backend 时解析到质量优先的免费 `local-default`。Spark 只允许显式选择，不自动回退或自动推荐。
+
+## 2026-07-29 当前裁决
+
+Codex 0.145 原生 app-server 的 `workspace-write` 根目录合同已经修正并由真实源码入口验证：本轮回执确认 `policy=workspace-write`、模型为 `gpt-5.3-codex-spark`、强度为 `xhigh`，没有退回只读或其他模型。
+
+但同一真实运行在冻结 `code_repair` 题上消耗 81 个 step，触发 80 步硬上限，35 次工具调用，最终 2/9；进程树清理已确认。依照“步数失败不增加预算重测”的门禁，本轮不再运行其余题，也不以历史成功覆盖当前失败。因此：
+
+- 路由/写权限修复：通过；
+- 当前能力验收：未通过；
+- 2026-07-24 的以下结果保留为历史证据，不再支撑自动优先 Spark；
+- Spark 仍可由顶级模型显式选择，但默认使用本地 35B 或更高等级 Codex。
 
 当前正式 skill 把 `LLM_TOOLKIT_AICLI_ENTRY` 固定为受管的当前源码入口，入口缺失时明确失败，不会静默调用旧安装态。Codex app-server 以 `codex-cli 0.145.0` 为当前最低已验证基线，`0.146.0-alpha.3.1` 曾通过兼容验收；后续版本默认尝试，但字段、通知、生命周期或清理协议漂移必须明确失败。
 
