@@ -136,7 +136,7 @@ class LocalQwenQualityBenchmarkTests(unittest.TestCase):
         self.assertEqual(2, summary["by_candidate"]["slow-right|p"]["score"])
         json.dumps(summary)
 
-    def test_rejected_candidate_registry_cannot_be_used_as_an_agent_route(self):
+    def test_candidate_registry_exposes_27b_as_non_primary_direct_crosscheck(self):
         path = (
             ROOT
             / "benchmarks"
@@ -144,12 +144,35 @@ class LocalQwenQualityBenchmarkTests(unittest.TestCase):
             / "agent-candidate-registry.json"
         )
         registry = BackendRegistry.load(path)
-        candidate = registry.resolve("local-dense-27b-candidate")
+        default = registry.resolve(None)
+        candidate = registry.resolve("local-crosscheck-27b")
+        model_alias = registry.resolve("qwen-review-v1")
 
         self.assertEqual("local-default", registry.default_backend)
+        self.assertEqual("qwen-main-v1", default.config["model"])
+        self.assertEqual("local-crosscheck-27b", model_alias.backend_id)
         self.assertFalse(candidate.config["cloud"])
         self.assertEqual("qwen-review-v1", candidate.config["model"])
-        self.assertEqual("rejected_not_integrated", candidate.config["evaluation_state"])
+        self.assertEqual("crosscheck_only", candidate.config["routing_role"])
+        self.assertEqual(
+            "crosscheck_available_not_primary",
+            candidate.config["evaluation_state"],
+        )
+        self.assertEqual("on", candidate.config["default_reasoning_mode"])
+        self.assertEqual(131_072, candidate.config["context_window_tokens"])
+        self.assertEqual(
+            {
+                "temperature": 0.6,
+                "top_p": 0.95,
+                "top_k": 20,
+                "min_p": 0.0,
+                "presence_penalty": 0.0,
+                "repeat_penalty": 1.0,
+                "num_ctx": 131_072,
+                "num_predict": 32_768,
+            },
+            candidate.config["ollama_options"],
+        )
         self.assertEqual({}, candidate.config["agent_routes"])
 
 

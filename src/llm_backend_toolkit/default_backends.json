@@ -3,6 +3,7 @@
   "default_backend": "local-default",
   "aliases": {
     "qwen-main-v1": "local-default",
+    "qwen-review-v1": "local-crosscheck-27b",
     "qwen3.7-flash": "cloud-qwen-flash",
     "gpt-5.3-codex-spark": "fast-middle-agent"
   },
@@ -94,11 +95,35 @@
       },
       "agent_routes": {}
     },
+    "local-crosscheck-27b": {
+      "adapter": "ollama",
+      "model": "qwen-review-v1",
+      "cloud": false,
+      "supports_vision": true,
+      "context_window_tokens": 131072,
+      "routing_role": "crosscheck_only",
+      "default_reasoning_mode": "on",
+      "ollama_options": {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "repeat_penalty": 1.0,
+        "num_ctx": 131072,
+        "num_predict": 32768
+      },
+      "base_url_env": "LLM_TOOLKIT_OLLAMA_BASE_URL",
+      "base_url_default": "http://127.0.0.1:32100",
+      "data_destination": "LocalGpuBroker Ollama endpoint",
+      "agent_routes": {}
+    },
     "fast-middle-agent": {
       "adapter": "agent-only",
       "model": "gpt-5.3-codex-spark",
       "cloud": true,
       "supports_vision": false,
+      "routing_role": "latency_crosscheck",
       "data_destination": "OpenAI/ChatGPT official Codex CLI path",
       "agent_routes": {
         "data_factory": {

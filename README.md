@@ -11,7 +11,7 @@
 - token 估算区分中日韩字符与 ASCII，压缩循环按 token 预算收敛。
 - 可直接引用 UTF-8 文本 source；工具在内部检索相关片段，Codex 无需先读取整份材料。
 - 长结果自动外置为本地 artifact，默认返回短预览和 hash。
-- 默认关闭 thinking，不向顶级模型返回长推理过程。
+- thinking 默认值由 backend registry 显式声明；内置本地质量角色默认开启，但不会向顶级模型返回隐藏推理正文。
 - 支持本地模型原生图片、LocalOCR 和 ChineseASR 三种媒体路线。
 - 异步 Smart Job：提交立即返回，顶级模型无需被长时间命令阻塞。
 - 欠费、额度、限流、权限、GPU 占用等错误只返回裁决选项，不自动调用另一个模型。
@@ -38,9 +38,11 @@ python -m venv .venv
 
 内置注册表位于包内 `default_backends.json`；设置 `LLM_TOOLKIT_BACKEND_REGISTRY` 可让机器自己的 JSON 注册表成为运行时事实源。请求省略 `backend` 时只使用注册表的本地 `default_backend`，不会自动选择云端。旧字段 `provider` 和旧 Qwen ID 仅作为兼容 alias。
 
-注册表把 backend ID、adapter、模型、端点环境变量、数据去向、AICLI Profile、route、runner 与版本绑定证据分离。替换 Ollama 模型、OpenAI Chat 兼容 API 或已有 AICLI Profile 只需改注册表；route 名称可以自定义并映射到已实现的 runner adapter，全新 wire protocol 或全新智能体 CLI 才需要增加代码 adapter。已验收模型的 digest/父模型一旦不匹配，`live_verified` 自动失效并阻止沿用旧验收。注册表禁止内嵌凭据；云端 `openai-chat` 地址必须使用 HTTPS。
+注册表把 backend ID、adapter、模型、端点环境变量、数据去向、`routing_role`、AICLI Profile、route、runner 与版本绑定证据分离。替换 Ollama 模型、OpenAI Chat 兼容 API 或已有 AICLI Profile 只需改注册表；route 名称可以自定义并映射到已实现的 runner adapter，全新 wire protocol 或全新智能体 CLI 才需要增加代码 adapter。已验收模型的 digest/父模型一旦不匹配，`live_verified` 自动失效并阻止沿用旧验收。注册表禁止内嵌凭据；云端 `openai-chat` 地址必须使用 HTTPS。
 
 `local-default` 是免费、质量优先的本地 direct 默认：使用 `qwen-main-v1`，省略 `reasoning.mode` 时默认开启 thinking，并固定当前冻结质量参数 `temperature=0.6`、`top_p=0.95`、`top_k=20`、`min_p=0`、`presence_penalty=0`、`repeat_penalty=1`、`num_ctx=262144`、`num_predict=32768`。只有明确追求低延迟的低价值任务才应显式写 `reasoning.mode=off`。`local-hard-reasoning` 使用同一模型和参数，但声明 `required_reasoning_mode=on`，漏写或关闭 thinking 会在读取 source、处理媒体或调用 provider 前失败关闭；它不会创建或加载第二个模型别名。隐藏 thinking 在 provider 边界即丢弃，只保留公开回答和非正文计数。
+
+`local-crosscheck-27b` 是显式、非默认、仅 direct 的交叉验证角色：使用 `qwen-review-v1`（Qwen3.6 27B），并在 catalog 中公开 `routing_role=crosscheck_only`。它默认开启 thinking，固定 `temperature=0.6`、`top_p=0.95`、`top_k=20`、`min_p=0`、`presence_penalty=0`、`repeat_penalty=1`、`num_ctx=131072`、`num_predict=32768`，且只访问 LocalGpuBroker `127.0.0.1:32100`。它没有任何 `agent_routes`，不能成为 `default_backend`；省略 backend 始终仍是 35B `local-default`，任何失败也不会触发自动改投。顶级模型只有在不同模型的第二意见有信息增益并能比较结果时才显式选择它；`qwen-review-v1` 只是该角色的兼容 alias。详细边界和请求示例见 [27B 本地交叉验证角色](docs/local-crosscheck-27b.md)。
 
 `ollama_options` 只允许出现在本地 Ollama backend 配置中，并且只接受 `temperature`、`top_p`、`top_k`、`min_p`、`presence_penalty`、`repeat_penalty`、`num_ctx` 与 `num_predict` 的有界数值。请求本身不能任意注入这些参数，云端 adapter 也会拒绝该字段。
 
@@ -136,10 +138,10 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 
 显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或 chain-of-thought。有限预算任务只有在回执同时证明 `timeout/maxSteps/maxToolCalls=hard` 时才会被接受；未知事件、持续流墙钟或无法确认完整进程树清理均返回失败关闭，越限返回 `blocked` 与 `limit_hit`，不会把未执行的约束写成成功。
 
-当前 `local-default` 解析到 `codex-ollama-main + qwen-main-v1`，已经过本机版本绑定验收。省略 backend 永远只走这个免费本地默认；任何付费 API 都必须显式选择 exact backend 并同时允许云端传输。`cloud-qwen-flash` 是唯一内置 Qwen direct API backend，不会自动 fallback。`qwen3.7-plus` 已于 2026-07-29 从别名、内置 backend 和专用 provider 退役，只保留历史评测证据。2026-07-28 的 Codex 云端 Agent 复测暴露 `workspace-write` 沙箱故障：模型可以返回文本，但无法写入验收 workspace，因此 4/30 记录作废且 Flash Agent route 继续禁用。将来只有连接合同经无付费本地测试和有界真实验收重新通过后才可恢复；历史报告不会自动继承到新指纹。
+当前 `local-default` 解析到 `codex-ollama-main + qwen-main-v1`，已经过本机版本绑定验收。省略 backend 永远只走这个免费本地默认；`local-crosscheck-27b` 没有 Agent route，不能用于本节的 `data_factory` 或其他 Agent runner。任何付费 API 都必须显式选择 exact backend 并同时允许云端传输。`cloud-qwen-flash` 是唯一内置 Qwen direct API backend，不会自动 fallback。`qwen3.7-plus` 已于 2026-07-29 从别名、内置 backend 和专用 provider 退役，只保留历史评测证据。2026-07-28 的 Codex 云端 Agent 复测暴露 `workspace-write` 沙箱故障：模型可以返回文本，但无法写入验收 workspace，因此 4/30 记录作废且 Flash Agent route 继续禁用。将来只有连接合同经无付费本地测试和有界真实验收重新通过后才可恢复；历史报告不会自动继承到新指纹。
 `status` 会在不发模型生成请求的情况下返回当前 backend、模型指纹、agent 默认路由、证据状态和支持的 runner；实际任务回执同时记录精确 Profile、模型与是否采用默认。
 
-`fast-middle-agent` 是显式 opt-in 的文本型 Agent 角色：`codex-spark-xhigh + gpt-5.3-codex-spark + xhigh`。它只通过官方 Codex CLI/ChatGPT 登录链调用，不伪装成按调用计费的 OpenAI API，也不支持原生图片输入。2026-07-29 的真实源码链验证证明 `workspace-write` 路由已经生效，但 Spark 在冻结代码修复题上用到 81/80 步后硬停止，仅得 2/9；按“不因步数失败复测”的门禁，当前只保留显式候选，不作为自动任务推荐。选择它必须显式写 `backend=fast-middle-agent` 和 `privacy.cloud_allowed=true`；省略 backend 仍只走本地 Qwen。额度、限流、资格或预算失败会返回规范错误和 `invoke:local-default` 裁决选项，但不会自动重提；调用方如选择本地回退，必须保留两次独立回执和实际模型身份。
+`fast-middle-agent` 是显式 opt-in 的文本型 Agent 角色：`codex-spark-xhigh + gpt-5.3-codex-spark + xhigh`，catalog 将其标为 `routing_role=latency_crosscheck`。它只通过官方 Codex CLI/ChatGPT 登录链调用，不伪装成按调用计费的 OpenAI API，也不支持原生图片输入。2026-07-29 的真实源码链验证证明 `workspace-write` 路由已经生效，但 Spark 在冻结代码修复题上用到 81/80 步后硬停止，仅得 2/9；按“不因步数失败复测”的门禁，当前只保留显式候选，不作为自动任务推荐。选择它必须显式写 `backend=fast-middle-agent` 和 `privacy.cloud_allowed=true`；省略 backend 仍只走本地 Qwen。额度、限流、资格或预算失败会返回规范错误和 `invoke:local-default` 裁决选项，但不会自动重提；调用方如选择本地回退，必须保留两次独立回执和实际模型身份。
 
 云端示例见 [examples/cloud-direct-request.json](examples/cloud-direct-request.json)。普通单次摘要、抽取和结构化生成继续使用 `execution.mode=direct`，避免为不需要文件/命令循环的任务增加 Agent 调用成本。
 

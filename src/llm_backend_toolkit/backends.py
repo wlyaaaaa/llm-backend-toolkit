@@ -111,6 +111,11 @@ class BackendRegistry:
             if not model:
                 raise ValueError(f"Backend {backend_id} requires a model")
             normalized = dict(raw)
+            routing_role = raw.get("routing_role")
+            if routing_role is not None and (
+                type(routing_role) is not str or not SAFE_ID.fullmatch(routing_role)
+            ):
+                raise ValueError(f"Backend {backend_id} routing_role must be a safe non-empty ID")
             if "context_window_tokens" in raw:
                 context_window_tokens = raw["context_window_tokens"]
                 if (
@@ -148,6 +153,11 @@ class BackendRegistry:
             routes = raw.get("agent_routes") or {}
             if not isinstance(routes, dict):
                 raise ValueError(f"Backend {backend_id} agent_routes must be an object")
+            if routing_role == "crosscheck_only" and routes:
+                raise ValueError(
+                    f"Backend {backend_id} with routing_role=crosscheck_only "
+                    "cannot define agent_routes"
+                )
             for route_id, route in routes.items():
                 if not SAFE_ID.fullmatch(str(route_id)) or not isinstance(route, dict):
                     raise ValueError(f"Backend {backend_id} has an invalid route")
@@ -171,6 +181,10 @@ class BackendRegistry:
             raise ValueError("Backend registry default_backend does not exist")
         if bool(backends[default_backend].get("cloud")):
             raise ValueError("Backend registry default_backend must be local")
+        if backends[default_backend].get("routing_role") == "crosscheck_only":
+            raise ValueError(
+                "Backend with routing_role=crosscheck_only cannot be the default_backend"
+            )
         aliases: dict[str, str] = {}
         for alias, target in raw_aliases.items():
             if not isinstance(alias, str) or not SAFE_ID.fullmatch(alias):
@@ -214,6 +228,7 @@ class BackendRegistry:
                     "supports_vision": bool(config.get("supports_vision")),
                     "context_window_tokens": config.get("context_window_tokens"),
                     "data_destination": config.get("data_destination"),
+                    "routing_role": config.get("routing_role"),
                     "default_reasoning_mode": config.get("default_reasoning_mode"),
                     "required_reasoning_mode": config.get("required_reasoning_mode"),
                     "agent_routes": sorted((config.get("agent_routes") or {}).keys()),

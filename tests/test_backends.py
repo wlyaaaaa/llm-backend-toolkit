@@ -82,6 +82,85 @@ class ReplacementRunner:
 
 
 class BackendRegistryTests(unittest.TestCase):
+    def test_local_crosscheck_27b_is_explicit_direct_only_and_keeps_35b_default(self):
+        registry = BackendRegistry.load()
+
+        default = registry.resolve(None)
+        crosscheck = registry.resolve("local-crosscheck-27b")
+        model_alias = registry.resolve("qwen-review-v1")
+
+        self.assertEqual("local-default", default.backend_id)
+        self.assertEqual("qwen-main-v1", default.config["model"])
+        self.assertEqual("local-crosscheck-27b", crosscheck.backend_id)
+        self.assertEqual("local-crosscheck-27b", model_alias.backend_id)
+        self.assertTrue(model_alias.alias_applied)
+        self.assertFalse(crosscheck.default_applied)
+        self.assertEqual("ollama", crosscheck.config["adapter"])
+        self.assertEqual("qwen-review-v1", crosscheck.config["model"])
+        self.assertFalse(crosscheck.config["cloud"])
+        self.assertTrue(crosscheck.config["supports_vision"])
+        self.assertEqual(131_072, crosscheck.config["context_window_tokens"])
+        self.assertEqual("on", crosscheck.config["default_reasoning_mode"])
+        self.assertEqual("crosscheck_only", crosscheck.config["routing_role"])
+        self.assertEqual(
+            {
+                "temperature": 0.6,
+                "top_p": 0.95,
+                "top_k": 20,
+                "min_p": 0.0,
+                "presence_penalty": 0.0,
+                "repeat_penalty": 1.0,
+                "num_ctx": 131_072,
+                "num_predict": 32_768,
+            },
+            crosscheck.config["ollama_options"],
+        )
+        self.assertEqual("http://127.0.0.1:32100", crosscheck.config["base_url_default"])
+        self.assertEqual({}, crosscheck.config["agent_routes"])
+
+        catalog_entry = next(
+            item
+            for item in registry.catalog()["backends"]
+            if item["id"] == "local-crosscheck-27b"
+        )
+        self.assertFalse(catalog_entry["default"])
+        self.assertEqual("crosscheck_only", catalog_entry["routing_role"])
+        self.assertEqual([], catalog_entry["agent_routes"])
+
+    def test_local_crosscheck_agent_request_fails_without_invoking_or_falling_back(self):
+        registry = BackendRegistry.load()
+        default_provider = ReplacementProvider()
+        crosscheck_provider = ReplacementProvider()
+        runner = ReplacementRunner()
+        toolkit = Toolkit(
+            registry=registry,
+            providers={
+                "local-default": default_provider,
+                "local-crosscheck-27b": crosscheck_provider,
+            },
+            runners={"data_factory": runner},
+        )
+
+        with tempfile.TemporaryDirectory() as workspace:
+            result = toolkit.invoke(
+                {
+                    "backend": "local-crosscheck-27b",
+                    "task": {"goal": "crosscheck"},
+                    "execution": {
+                        "mode": "agent",
+                        "workspace": workspace,
+                        "policy": "read-only",
+                    },
+                }
+            )
+
+        self.assertEqual("blocked", result["status"])
+        self.assertEqual("agent_runner_incompatible", result["error"]["category"])
+        self.assertIn("backend local-crosscheck-27b", result["error"]["summary"])
+        self.assertEqual(0, len(default_provider.calls))
+        self.assertEqual(0, len(crosscheck_provider.calls))
+        self.assertEqual(0, len(runner.calls))
+
     def test_qwen_flash_is_direct_only_and_does_not_change_the_local_default(self):
         registry = BackendRegistry.load()
 
@@ -119,11 +198,18 @@ class BackendRegistryTests(unittest.TestCase):
         self.assertTrue(spark.config["cloud"])
         self.assertFalse(spark.config["supports_vision"])
         self.assertEqual("gpt-5.3-codex-spark", spark.config["model"])
+        self.assertEqual("latency_crosscheck", spark.config["routing_role"])
         route = spark.config["agent_routes"]["data_factory"]
         self.assertEqual("codex-cli", route["runner"])
         self.assertEqual("codex-spark-xhigh", route["profile"])
         self.assertEqual("gpt-5.3-codex-spark", route["model"])
         self.assertEqual("xhigh", route["reasoning_effort"])
+        catalog_roles = {
+            item["id"]: item["routing_role"]
+            for item in registry.catalog()["backends"]
+        }
+        self.assertEqual("crosscheck_only", catalog_roles["local-crosscheck-27b"])
+        self.assertEqual("latency_crosscheck", catalog_roles["fast-middle-agent"])
 
     def test_default_registry_uses_the_frozen_quality_profile_and_keeps_hard_role(self):
         registry = BackendRegistry.load()
@@ -235,6 +321,26 @@ class BackendRegistryTests(unittest.TestCase):
                 data = registry_data()
                 data["backends"]["local-default"]["required_reasoning_mode"] = invalid_mode
                 with self.assertRaisesRegex(ValueError, "required_reasoning_mode"):
+                    BackendRegistry.from_dict(data)
+
+    def test_crosscheck_only_role_cannot_be_default_or_define_agent_routes(self):
+        with_agent_route = registry_data()
+        with_agent_route["backends"]["local-default"]["routing_role"] = "crosscheck_only"
+        with self.assertRaisesRegex(ValueError, "crosscheck_only.*agent_routes"):
+            BackendRegistry.from_dict(with_agent_route)
+
+        as_default = registry_data()
+        as_default["backends"]["local-default"]["routing_role"] = "crosscheck_only"
+        as_default["backends"]["local-default"]["agent_routes"] = {}
+        with self.assertRaisesRegex(ValueError, "crosscheck_only.*default_backend"):
+            BackendRegistry.from_dict(as_default)
+
+    def test_registry_rejects_invalid_routing_role(self):
+        for invalid_role in ("", "contains spaces", True, 1, {}):
+            with self.subTest(invalid_role=invalid_role):
+                data = registry_data()
+                data["backends"]["local-default"]["routing_role"] = invalid_role
+                with self.assertRaisesRegex(ValueError, "routing_role"):
                     BackendRegistry.from_dict(data)
 
     def test_backend_required_reasoning_mode_fails_before_provider_invocation(self):
