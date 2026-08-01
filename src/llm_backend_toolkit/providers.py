@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .backends import BackendRegistry, validate_ollama_options
+from .backends import BackendRegistry, validate_ollama_options, validate_reasoning_request
 from .errors import ProviderCallError, ToolError, classify_provider_error
 
 
@@ -54,6 +54,26 @@ def _image_data_url(path_value: str) -> str:
     return f"data:{mime};base64,{encoded}"
 
 
+def _apply_reasoning_request(
+    payload: dict[str, Any],
+    mapping: dict[str, Any],
+    reasoning_mode: str,
+) -> None:
+    target = payload
+    path = mapping["path"]
+    for segment in path[:-1]:
+        child = target.get(segment)
+        if child is None:
+            child = {}
+            target[segment] = child
+        if not isinstance(child, dict):
+            raise ValueError(
+                f"reasoning_request path conflicts with request field: {segment}"
+            )
+        target = child
+    target[path[-1]] = mapping["off" if reasoning_mode == "off" else "on"]
+
+
 class OpenAIChatProvider:
     def __init__(
         self,
@@ -66,6 +86,7 @@ class OpenAIChatProvider:
         cloud: bool = True,
         supports_vision: bool = False,
         thinking_field: str = "",
+        reasoning_request: dict[str, Any] | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -74,7 +95,19 @@ class OpenAIChatProvider:
         self.timeout = timeout
         self.cloud = cloud
         self.supports_vision = supports_vision
-        self.thinking_field = thinking_field
+        if thinking_field and reasoning_request is not None:
+            raise ValueError("Configure either thinking_field or reasoning_request, not both")
+        if reasoning_request is None and thinking_field:
+            reasoning_request = {
+                "path": [thinking_field],
+                "on": True,
+                "off": False,
+            }
+        self.reasoning_request = (
+            validate_reasoning_request(reasoning_request)
+            if reasoning_request is not None
+            else None
+        )
 
     def invoke(
         self,
@@ -105,8 +138,8 @@ class OpenAIChatProvider:
             "messages": [{"role": "user", "content": content}],
             "stream": False,
         }
-        if self.thinking_field:
-            payload[self.thinking_field] = reasoning_mode != "off"
+        if self.reasoning_request is not None:
+            _apply_reasoning_request(payload, self.reasoning_request, reasoning_mode)
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             f"{self.base_url}/chat/completions",
@@ -445,6 +478,7 @@ def provider_from_config(config: dict[str, Any]) -> Any:
             cloud=cloud,
             supports_vision=supports_vision,
             thinking_field=str(config.get("thinking_field") or ""),
+            reasoning_request=config.get("reasoning_request"),
         )
     if adapter == "agent-only":
         return AgentOnlyProvider(model=model, cloud=cloud, supports_vision=supports_vision)

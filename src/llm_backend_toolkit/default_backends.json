@@ -5,6 +5,7 @@
     "qwen-main-v1": "local-default",
     "qwen-review-v1": "local-crosscheck-27b",
     "qwen3.7-flash": "cloud-qwen-flash",
+    "deepseek-v4-flash": "cloud-deepseek-v4-flash",
     "gpt-5.3-codex-spark": "fast-middle-agent"
   },
   "backends": {
@@ -161,8 +162,30 @@
       "base_url_env": "LLM_TOOLKIT_QWEN_BASE_URL",
       "base_url_default": "https://dashscope.aliyuncs.com/compatible-mode/v1",
       "api_key_env": "DASHSCOPE_API_KEY",
-      "thinking_field": "enable_thinking",
+      "reasoning_request": {
+        "path": ["enable_thinking"],
+        "on": true,
+        "off": false
+      },
       "data_destination": "Alibaba Cloud Model Studio",
+      "agent_routes": {}
+    },
+    "cloud-deepseek-v4-flash": {
+      "adapter": "openai-chat",
+      "model": "deepseek-v4-flash",
+      "cloud": true,
+      "supports_vision": false,
+      "context_window_tokens": 1048576,
+      "routing_role": "direct_only",
+      "default_reasoning_mode": "on",
+      "base_url_default": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "reasoning_request": {
+        "path": ["thinking", "type"],
+        "on": "enabled",
+        "off": "disabled"
+      },
+      "data_destination": "DeepSeek API",
       "agent_routes": {}
     }
   }

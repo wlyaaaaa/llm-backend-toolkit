@@ -3,6 +3,8 @@ import os
 import unittest
 from unittest.mock import patch
 
+from llm_backend_toolkit.backends import BackendRegistry
+from llm_backend_toolkit.errors import ProviderCallError
 from llm_backend_toolkit.providers import OllamaProvider, OpenAIChatProvider, provider_from_config
 
 
@@ -121,6 +123,86 @@ class ProviderContractTests(unittest.TestCase):
         self.assertEqual("done", response.content)
         self.assertEqual("", response.reasoning)
         self.assertNotIn("PRIVATE_CLOUD_HIDDEN_TRACE", json.dumps(response.__dict__))
+
+    def test_deepseek_v4_flash_protocol_uses_nested_thinking_and_discards_hidden_reasoning(self):
+        seen = []
+        events = []
+        fixture_key = "deepseek-fixture-key-must-not-leak"
+        hidden_reasoning = "DEEPSEEK_PRIVATE_REASONING_MUST_NOT_LEAK"
+        tool_calls = [
+            {
+                "id": "call_fixture",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{\"id\":1}"},
+            }
+        ]
+
+        def fake_urlopen(request, timeout):
+            seen.append((request, timeout))
+            return FakeHttpResponse(
+                {
+                    "model": "deepseek-v4-flash",
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "public answer",
+                                "reasoning_content": hidden_reasoning,
+                                "tool_calls": tool_calls,
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12},
+                }
+            )
+
+        config = BackendRegistry.load().resolve("cloud-deepseek-v4-flash").config
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": fixture_key}):
+            provider = provider_from_config(config)
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            enabled = provider.invoke("task", [], "on", events.append)
+            disabled = provider.invoke("task", [], "off", events.append)
+
+        enabled_request = seen[0][0]
+        disabled_request = seen[1][0]
+        enabled_payload = json.loads(enabled_request.data.decode("utf-8"))
+        disabled_payload = json.loads(disabled_request.data.decode("utf-8"))
+        self.assertEqual(
+            "https://api.deepseek.com/chat/completions",
+            enabled_request.full_url,
+        )
+        self.assertEqual("POST", enabled_request.method)
+        self.assertEqual(f"Bearer {fixture_key}", enabled_request.get_header("Authorization"))
+        self.assertEqual("deepseek-v4-flash", enabled_payload["model"])
+        self.assertEqual({"type": "enabled"}, enabled_payload["thinking"])
+        self.assertEqual({"type": "disabled"}, disabled_payload["thinking"])
+        self.assertEqual("public answer", enabled.content)
+        self.assertEqual(tool_calls, enabled.tool_calls)
+        self.assertEqual("", enabled.reasoning)
+        self.assertEqual("", disabled.reasoning)
+        public_result_and_logs = json.dumps(
+            {"enabled": enabled.__dict__, "disabled": disabled.__dict__, "events": events},
+            ensure_ascii=False,
+        )
+        self.assertNotIn(hidden_reasoning, public_result_and_logs)
+        self.assertNotIn(fixture_key, public_result_and_logs)
+
+    def test_deepseek_v4_flash_missing_key_and_plain_http_fail_closed(self):
+        config = dict(BackendRegistry.load().resolve("cloud-deepseek-v4-flash").config)
+
+        with patch.dict(os.environ, {}, clear=True):
+            provider = provider_from_config(config)
+        with patch("urllib.request.urlopen") as urlopen:
+            with self.assertRaises(ProviderCallError) as caught:
+                provider.invoke("task", [], "on")
+
+        self.assertEqual("authentication_failed", caught.exception.error.category)
+        self.assertIn("DEEPSEEK_API_KEY", caught.exception.error.summary)
+        urlopen.assert_not_called()
+
+        config["base_url_default"] = "http://api.deepseek.example"
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            provider_from_config(config)
 
     def test_ollama_adapter_uses_managed_public_endpoint_and_no_thinking(self):
         seen = []

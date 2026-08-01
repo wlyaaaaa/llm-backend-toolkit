@@ -10,6 +10,8 @@ from typing import Any
 
 REGISTRY_SCHEMA = "llm-backend-toolkit.backends.v1"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SAFE_REQUEST_FIELD = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+REASONING_REQUEST_RESERVED_TOP_LEVEL = frozenset({"model", "messages", "stream"})
 OLLAMA_OPTION_RULES: dict[str, tuple[str, float, float]] = {
     "temperature": ("number", 0.0, 2.0),
     "top_p": ("number", 0.0, 1.0),
@@ -44,6 +46,33 @@ def validate_ollama_options(value: Any) -> dict[str, int | float]:
             )
         output[key] = raw_value
     return output
+
+
+def validate_reasoning_request(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"path", "on", "off"}:
+        raise ValueError(
+            "Backend reasoning_request must contain exactly path, on, and off"
+        )
+    path = value.get("path")
+    if (
+        not isinstance(path, list)
+        or not 1 <= len(path) <= 8
+        or any(type(segment) is not str or not SAFE_REQUEST_FIELD.fullmatch(segment) for segment in path)
+    ):
+        raise ValueError(
+            "Backend reasoning_request.path must contain 1-8 safe JSON field names"
+        )
+    if path[0] in REASONING_REQUEST_RESERVED_TOP_LEVEL:
+        raise ValueError(
+            f"Backend reasoning_request.path cannot replace reserved field {path[0]}"
+        )
+    for mode in ("on", "off"):
+        mapped = value[mode]
+        if mapped is not None and type(mapped) not in {str, bool, int, float}:
+            raise ValueError(
+                f"Backend reasoning_request.{mode} must be a JSON scalar"
+            )
+    return {"path": list(path), "on": value["on"], "off": value["off"]}
 
 
 @dataclass(frozen=True)
@@ -144,6 +173,29 @@ class BackendRegistry:
                     raise ValueError(
                         f"Backend {backend_id} default_reasoning_mode must be off or on"
                     )
+            if "reasoning_request" in raw:
+                if adapter != "openai-chat":
+                    raise ValueError(
+                        f"Backend {backend_id} reasoning_request is allowed only for openai-chat"
+                    )
+                normalized["reasoning_request"] = validate_reasoning_request(
+                    raw["reasoning_request"]
+                )
+            if "thinking_field" in raw:
+                thinking_field = raw["thinking_field"]
+                if (
+                    adapter != "openai-chat"
+                    or type(thinking_field) is not str
+                    or not SAFE_REQUEST_FIELD.fullmatch(thinking_field)
+                    or thinking_field in REASONING_REQUEST_RESERVED_TOP_LEVEL
+                ):
+                    raise ValueError(
+                        f"Backend {backend_id} thinking_field must be a safe openai-chat field"
+                    )
+                if "reasoning_request" in raw:
+                    raise ValueError(
+                        f"Backend {backend_id} cannot define both thinking_field and reasoning_request"
+                    )
             if "ollama_options" in raw:
                 if adapter != "ollama" or bool(raw.get("cloud")):
                     raise ValueError(
@@ -153,9 +205,9 @@ class BackendRegistry:
             routes = raw.get("agent_routes") or {}
             if not isinstance(routes, dict):
                 raise ValueError(f"Backend {backend_id} agent_routes must be an object")
-            if routing_role == "crosscheck_only" and routes:
+            if routing_role in {"crosscheck_only", "direct_only"} and routes:
                 raise ValueError(
-                    f"Backend {backend_id} with routing_role=crosscheck_only "
+                    f"Backend {backend_id} with routing_role={routing_role} "
                     "cannot define agent_routes"
                 )
             for route_id, route in routes.items():

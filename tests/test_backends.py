@@ -41,9 +41,11 @@ class ReplacementProvider:
     cloud = False
     supports_vision = True
 
-    def __init__(self, digest="digest-v1"):
+    def __init__(self, digest="digest-v1", *, cloud=False):
         self.digest = digest
+        self.cloud = cloud
         self.calls = []
+        self.reasoning_modes = []
 
     def status(self):
         return {
@@ -55,6 +57,7 @@ class ReplacementProvider:
 
     def invoke(self, prompt, native_images, reasoning_mode):
         self.calls.append(prompt)
+        self.reasoning_modes.append(reasoning_mode)
         return ProviderResponse(content='{"ok": true}', model="replacement-local-model")
 
 
@@ -180,6 +183,89 @@ class BackendRegistryTests(unittest.TestCase):
             registry.resolve("qwen3.7-plus")
         with self.assertRaisesRegex(ValueError, "Unknown backend"):
             registry.resolve("cloud-qwen-plus")
+
+    def test_deepseek_v4_flash_is_explicit_direct_only_with_registry_driven_thinking(self):
+        registry = BackendRegistry.load()
+
+        default = registry.resolve(None)
+        flash = registry.resolve("deepseek-v4-flash")
+
+        self.assertEqual("local-default", default.backend_id)
+        self.assertEqual("cloud-deepseek-v4-flash", flash.backend_id)
+        self.assertTrue(flash.alias_applied)
+        self.assertFalse(flash.default_applied)
+        self.assertEqual("openai-chat", flash.config["adapter"])
+        self.assertEqual("deepseek-v4-flash", flash.config["model"])
+        self.assertTrue(flash.config["cloud"])
+        self.assertEqual("direct_only", flash.config["routing_role"])
+        self.assertEqual("on", flash.config["default_reasoning_mode"])
+        self.assertEqual("https://api.deepseek.com", flash.config["base_url_default"])
+        self.assertEqual("DEEPSEEK_API_KEY", flash.config["api_key_env"])
+        self.assertEqual(
+            {
+                "path": ["thinking", "type"],
+                "on": "enabled",
+                "off": "disabled",
+            },
+            flash.config["reasoning_request"],
+        )
+        self.assertEqual({}, flash.config["agent_routes"])
+        with self.assertRaisesRegex(ValueError, "Unknown backend"):
+            registry.resolve("deepseek-v4-pro")
+        with self.assertRaisesRegex(ValueError, "Unknown backend"):
+            registry.resolve("cloud-deepseek-v4-pro")
+
+    def test_deepseek_cloud_permission_and_agent_mode_fail_closed_without_fallback(self):
+        registry = BackendRegistry.load()
+        default_provider = ReplacementProvider()
+        deepseek_provider = ReplacementProvider(cloud=True)
+        runner = ReplacementRunner()
+        toolkit = Toolkit(
+            registry=registry,
+            providers={
+                "local-default": default_provider,
+                "cloud-deepseek-v4-flash": deepseek_provider,
+            },
+            runners={"data_factory": runner},
+        )
+
+        privacy_blocked = toolkit.invoke(
+            {
+                "backend": "cloud-deepseek-v4-flash",
+                "task": {"goal": "explicit cloud route"},
+            }
+        )
+        with tempfile.TemporaryDirectory() as workspace:
+            agent_blocked = toolkit.invoke(
+                {
+                    "backend": "cloud-deepseek-v4-flash",
+                    "task": {"goal": "must remain direct-only"},
+                    "privacy": {"cloud_allowed": True},
+                    "execution": {
+                        "mode": "agent",
+                        "workspace": workspace,
+                        "policy": "read-only",
+                    },
+                }
+            )
+        direct = toolkit.invoke(
+            {
+                "backend": "cloud-deepseek-v4-flash",
+                "task": {"goal": "omitted reasoning defaults to thinking"},
+                "privacy": {"cloud_allowed": True},
+                "execution": {"mode": "direct"},
+            }
+        )
+
+        self.assertEqual("blocked", privacy_blocked["status"])
+        self.assertEqual("privacy_block", privacy_blocked["error"]["category"])
+        self.assertEqual("blocked", agent_blocked["status"])
+        self.assertEqual("agent_runner_incompatible", agent_blocked["error"]["category"])
+        self.assertEqual("ok", direct["status"])
+        self.assertEqual(0, len(default_provider.calls))
+        self.assertEqual(1, len(deepseek_provider.calls))
+        self.assertEqual(["on"], deepseek_provider.reasoning_modes)
+        self.assertEqual(0, len(runner.calls))
 
     def test_fast_middle_spark_is_opt_in_agent_only_and_does_not_change_the_local_default(self):
         registry = BackendRegistry.load()
@@ -323,6 +409,44 @@ class BackendRegistryTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "required_reasoning_mode"):
                     BackendRegistry.from_dict(data)
 
+    def test_registry_validates_generic_nested_reasoning_request_mapping(self):
+        valid = registry_data()
+        valid["backends"]["remote"] = {
+            "adapter": "openai-chat",
+            "model": "remote-model",
+            "cloud": True,
+            "base_url_default": "https://api.example.invalid",
+            "api_key_env": "REMOTE_API_KEY",
+            "reasoning_request": {
+                "path": ["thinking", "type"],
+                "on": "enabled",
+                "off": "disabled",
+            },
+            "agent_routes": {},
+        }
+        registry = BackendRegistry.from_dict(valid)
+
+        self.assertEqual(
+            ["thinking", "type"],
+            registry.resolve("remote").config["reasoning_request"]["path"],
+        )
+
+        invalid_mappings = (
+            None,
+            {},
+            {"path": "thinking.type", "on": "enabled", "off": "disabled"},
+            {"path": [], "on": "enabled", "off": "disabled"},
+            {"path": ["messages", "content"], "on": "enabled", "off": "disabled"},
+            {"path": ["thinking", "bad field"], "on": "enabled", "off": "disabled"},
+            {"path": ["thinking", "type"], "on": {}, "off": "disabled"},
+        )
+        for invalid_mapping in invalid_mappings:
+            with self.subTest(invalid_mapping=invalid_mapping):
+                data = json.loads(json.dumps(valid))
+                data["backends"]["remote"]["reasoning_request"] = invalid_mapping
+                with self.assertRaisesRegex(ValueError, "reasoning_request"):
+                    BackendRegistry.from_dict(data)
+
     def test_crosscheck_only_role_cannot_be_default_or_define_agent_routes(self):
         with_agent_route = registry_data()
         with_agent_route["backends"]["local-default"]["routing_role"] = "crosscheck_only"
@@ -334,6 +458,22 @@ class BackendRegistryTests(unittest.TestCase):
         as_default["backends"]["local-default"]["agent_routes"] = {}
         with self.assertRaisesRegex(ValueError, "crosscheck_only.*default_backend"):
             BackendRegistry.from_dict(as_default)
+
+    def test_direct_only_role_cannot_define_agent_routes(self):
+        data = registry_data()
+        remote = json.loads(json.dumps(data["backends"]["local-default"]))
+        remote.update(
+            {
+                "adapter": "openai-chat",
+                "model": "remote-model",
+                "cloud": True,
+                "routing_role": "direct_only",
+            }
+        )
+        data["backends"]["remote"] = remote
+
+        with self.assertRaisesRegex(ValueError, "direct_only.*agent_routes"):
+            BackendRegistry.from_dict(data)
 
     def test_registry_rejects_invalid_routing_role(self):
         for invalid_role in ("", "contains spaces", True, 1, {}):
