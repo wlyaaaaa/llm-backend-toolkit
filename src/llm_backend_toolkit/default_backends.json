@@ -175,7 +175,7 @@
       "model": "deepseek-v4-flash",
       "cloud": true,
       "supports_vision": false,
-      "context_window_tokens": 1048576,
+      "context_window_tokens": 1000000,
       "routing_role": "direct_only",
       "default_reasoning_mode": "on",
       "base_url_default": "https://api.deepseek.com",
