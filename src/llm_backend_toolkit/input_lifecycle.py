@@ -19,12 +19,34 @@ from .input_integrity import (
 
 
 WORKER_LEASE_SCHEMA = "llm-backend-toolkit.worker-lease.v1"
+CONTROLLED_CANCEL_SCHEMA = "llm-backend-toolkit.controlled-cancel.v1"
+CONTROLLED_CANCEL_CLEANUP_SCHEMA = "llm-backend-toolkit.controlled-cancel-cleanup.v1"
 _ACTIVE_PHASES = {"input_spooling", "inputs_captured", "provider_running"}
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
 
 class JobNotRunnableError(ValueError):
     pass
+
+
+def _controlled_cancel_pending(state: dict[str, Any]) -> bool:
+    controlled = state.get("controlled_cancel")
+    if (
+        not isinstance(controlled, dict)
+        or controlled.get("schema") != CONTROLLED_CANCEL_SCHEMA
+    ):
+        return False
+    cleanup = controlled.get("cleanup")
+    if not isinstance(cleanup, dict) or cleanup.get("schema") != CONTROLLED_CANCEL_CLEANUP_SCHEMA:
+        return True
+    process_tree = cleanup.get("process_tree")
+    gpu_lease = cleanup.get("gpu_lease")
+    return not (
+        isinstance(process_tree, dict)
+        and process_tree.get("status") == "confirmed_absent"
+        and isinstance(gpu_lease, dict)
+        and gpu_lease.get("status") == "released"
+    )
 
 
 def _utc_now() -> str:
@@ -281,6 +303,12 @@ class JobInputLifecycle:
                 "cancelled",
                 "cancellation_requested",
             }:
+                if _controlled_cancel_pending(state):
+                    # The caller requested a controlled cancellation.  Do not
+                    # infer process-tree or GPU-lease cleanup from this worker
+                    # noticing the request while it exits.
+                    self._write_state(job_id, state)
+                    return
                 state["job_status"] = "cancelled"
                 state["result_status"] = "cancelled"
                 state["cache_result_eligible"] = False
@@ -383,6 +411,11 @@ class JobInputLifecycle:
                 "cancelled",
                 "cancellation_requested",
             }:
+                if _controlled_cancel_pending(state):
+                    self._write_state(job_id, state)
+                    raise JobNotRunnableError(
+                        f"Controlled cancellation cleanup is unconfirmed: {job_id}"
+                    )
                 state["job_status"] = "cancelled"
                 state["result_status"] = "cancelled"
                 state["cache_result_eligible"] = False
@@ -415,6 +448,8 @@ class JobInputLifecycle:
             state = self.store._read_state(job_id)
             job_status = str(state.get("job_status") or "")
             if job_status in {"cancelled", "cancellation_requested"}:
+                if _controlled_cancel_pending(state):
+                    return False
                 if job_status == "cancellation_requested":
                     state["job_status"] = "cancelled"
                     state["result_status"] = "cancelled"
@@ -560,6 +595,8 @@ class JobInputLifecycle:
                 job_status not in {"running", "cancellation_requested"}
                 or worker_phase not in _ACTIVE_PHASES
             ):
+                return False
+            if job_status == "cancellation_requested" and _controlled_cancel_pending(state):
                 return False
             if has_active_job_input_lease(job_dir):
                 return False

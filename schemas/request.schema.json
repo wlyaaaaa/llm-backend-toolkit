@@ -168,7 +168,11 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
         },
         "workspace": {"type": "string", "minLength": 1},
-        "policy": {"enum": ["read-only", "workspace-write"], "default": "read-only"},
+        "policy": {
+          "enum": ["read-only", "workspace-write", "danger-full-access"],
+          "default": "danger-full-access",
+          "description": "Codex agent runs default to full local access. Use workspace-write or read-only only as an explicit restriction."
+        },
         "cache_key": {
           "type": "string",
           "minLength": 1,
@@ -179,11 +183,66 @@
         "budget": {
           "type": "object",
           "properties": {
-            "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 86400},
-            "max_steps": {"type": "integer", "minimum": 1, "maximum": 200},
-            "max_tool_calls": {"type": "integer", "minimum": 0, "maximum": 10000}
+            "timeout_seconds": {
+              "type": ["integer", "null"],
+              "minimum": 30,
+              "maximum": 86400,
+              "description": "Total wall-clock timeout. It is null for completion_driven jobs."
+            },
+            "idle_timeout_seconds": {
+              "anyOf": [
+                {"const": 0},
+                {"type": "integer", "minimum": 60, "maximum": 604800}
+              ],
+              "default": 3600,
+              "description": "Renewable inactivity lease used by completion_driven jobs; 0 explicitly disables the lease, otherwise the value is 60 seconds to 7 days."
+            },
+            "max_steps": {
+              "type": ["integer", "null"],
+              "minimum": 1,
+              "maximum": 200
+            },
+            "max_tool_calls": {
+              "type": ["integer", "null"],
+              "minimum": 0,
+              "maximum": 10000
+            },
+            "limit_mode": {
+              "enum": ["completion_driven", "bounded", "watchdog_only"],
+              "default": "completion_driven",
+              "description": "completion_driven is the default and has no total wall, step, or tool-call cutoff; bounded and watchdog_only are explicit backwards-compatible modes."
+            }
           },
-          "additionalProperties": false
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "required": ["limit_mode"],
+                "properties": {"limit_mode": {"const": "watchdog_only"}}
+              },
+              "then": {
+                "not": {
+                  "anyOf": [
+                    {"required": ["max_steps"]},
+                    {"required": ["max_tool_calls"]}
+                  ]
+                }
+              }
+            },
+            {
+              "if": {
+                "required": ["limit_mode"],
+                "properties": {"limit_mode": {"const": "completion_driven"}}
+              },
+              "then": {
+                "properties": {
+                  "timeout_seconds": {"type": "null"},
+                  "max_steps": {"type": "null"},
+                  "max_tool_calls": {"type": "null"}
+                }
+              }
+            }
+          ]
         }
       },
       "additionalProperties": false

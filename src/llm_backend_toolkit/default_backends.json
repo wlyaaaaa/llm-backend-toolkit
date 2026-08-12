@@ -1,10 +1,34 @@
 {
   "schema": "llm-backend-toolkit.backends.v1",
+  "acceptance_contract": {
+    "receipt_schema": "aicli.agent.acceptance-receipt.v1",
+    "receipt_authority": "aicli",
+    "identity_source": "aicli_app_server_or_provider_attestation",
+    "minimum_agent_capability": "one_nontrivial_agent_task_with_deterministic_verifier",
+    "stability_required_for_initial_capability": false,
+    "stress_required_for_initial_capability": false,
+    "evidence_states": ["static", "historical", "live", "unverified"],
+    "fail_closed_on_missing_or_mismatched_receipt": true,
+    "reserved_routes": {
+      "codex-qwen3-7-plus-paygo": {
+        "backend_id": "cloud-qwen3-7-plus-agent",
+        "model": "qwen3.7-plus",
+        "transport": "responses",
+        "runner": "codex-cli",
+        "state": "unverified",
+        "selectable": false,
+        "implicit_selection": false,
+        "fallback_eligible": false,
+        "receipt_required": true
+      }
+    }
+  },
   "default_backend": "local-default",
   "aliases": {
     "qwen-main-v1": "local-default",
     "qwen-review-v1": "local-crosscheck-27b",
     "qwen3.7-flash": "cloud-qwen-flash",
+    "qwen3.8-max": "cloud-qwen3-8-max-agent",
     "deepseek-v4-flash": "cloud-deepseek-v4-flash",
     "gpt-5.3-codex-spark": "fast-middle-agent"
   },
@@ -38,6 +62,12 @@
           "evidence": {
             "basis": "accepted_local_bakeoff",
             "live_verified": true,
+            "evidence_state": "historical",
+            "receipt_schema": "aicli.agent.acceptance-receipt.v1",
+            "receipt_authority": "aicli",
+            "capability_acceptance_state": "historical_nontrivial_agent",
+            "stability_evidence": "not_required",
+            "stress_evidence": "not_required",
             "model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a",
             "parent_model": "qwen3.6:35b"
           }
@@ -50,6 +80,12 @@
           "evidence": {
             "basis": "accepted_local_bakeoff",
             "live_verified": true,
+            "evidence_state": "historical",
+            "receipt_schema": "aicli.agent.acceptance-receipt.v1",
+            "receipt_authority": "aicli",
+            "capability_acceptance_state": "historical_nontrivial_agent",
+            "stability_evidence": "not_required",
+            "stress_evidence": "not_required",
             "model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a",
             "parent_model": "qwen3.6:35b"
           }
@@ -117,7 +153,36 @@
       "base_url_env": "LLM_TOOLKIT_OLLAMA_BASE_URL",
       "base_url_default": "http://127.0.0.1:32100",
       "data_destination": "LocalGpuBroker Ollama endpoint",
-      "agent_routes": {}
+      "fallback_eligible": false,
+      "agent_routes": {
+        "codex-cli": {
+          "runner": "codex-cli",
+          "profile": "codex-ollama-review",
+          "model": "qwen-review-v1",
+          "reasoning_effort": "max",
+          "evidence": {
+            "basis": "aicli_agent_acceptance_2026-08-08",
+            "live_verified": true,
+            "evidence_state": "historical",
+            "receipt_schema": "aicli.agent.acceptance-receipt.v1",
+            "receipt_authority": "aicli",
+            "receipt_id": "d62e939e-8d48-4a5f-a213-1646368104a8",
+            "capability_acceptance_state": "historical_nontrivial_agent",
+            "identity_scope": "exact-model",
+            "profile_fingerprint": "c60cf0754075f48710dfd8b2bfe64aa9a8a123583ed03112eee7f02640ef1f49",
+            "source_entry_sha256": "sha256:53acdd7b6312c52b679810f16c1b3c59c805ae5fea3c9e9be8bd7002ea6412aa",
+            "provider_id": "aicli_ollama_review",
+            "wire": "responses",
+            "task_contract_sha256": "sha256:797e410ec67bf7a71a64f26464e85db6bffec92088e024589318f5288d833884",
+            "verifier_sha256": "sha256:06ed464e4c142ee92c2c8887c85b9eaa6b2cce6f1a582fb1c49f38c7075f1086",
+            "cleanup_confirmed": true,
+            "stability_evidence": "not_required",
+            "stress_evidence": "not_required",
+            "model_digest": "90a516a548f99c9a68f9915620e00bf1a800a507a9a2c86236a1354ab08e3195",
+            "parent_model": "qwen3.6:27b"
+          }
+        }
+      }
     },
     "fast-middle-agent": {
       "adapter": "agent-only",
@@ -149,6 +214,38 @@
             "live_verified": true,
             "capability_acceptance": "failed_max_steps_80",
             "capability_score": "2/9"
+          }
+        }
+      }
+    },
+    "cloud-qwen3-8-max-agent": {
+      "adapter": "agent-only",
+      "model": "qwen3.8-max",
+      "cloud": true,
+      "supports_vision": true,
+      "context_window_tokens": 983616,
+      "routing_role": "high_capability_external_worker",
+      "data_destination": "Alibaba Cloud Model Studio Beijing Workspace via AICLI Responses",
+      "agent_routes": {
+        "codex-cli": {
+          "runner": "codex-cli",
+          "profile": "codex-qwen3-8-max-paygo",
+          "model": "qwen3.8-max",
+          "reasoning_effort": "max",
+          "evidence": {
+            "basis": "aicli_qwen38_full_access_task_live_2026-08-08",
+            "live_verified": true,
+            "evidence_state": "historical",
+            "receipt_schema": "aicli.agent.acceptance-receipt.v1",
+            "receipt_authority": "aicli",
+            "capability_acceptance_state": "historical_nontrivial_agent",
+            "stability_evidence": "not_required",
+            "stress_evidence": "not_required",
+            "standard_receipt_refresh": "pending",
+            "profile_fingerprint": "27707c249a471a662c894dc764d37dd42a00dd4216ff3a8db2839c7892534ea0",
+        "capability_acceptance": "passed_nontrivial_full_access",
+        "workspace_write_acceptance": "upstream_codex_0.146_windows_blocked",
+        "protocol": "responses"
           }
         }
       }

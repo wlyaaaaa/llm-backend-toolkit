@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Callable
@@ -22,6 +23,16 @@ from .workspace_observer import (
     revalidate_workspace_root,
     validate_workspace_root,
 )
+
+
+def _canonical_digest(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 class Toolkit:
@@ -349,8 +360,9 @@ class Toolkit:
                 "non-reparse directory with a stable identity.",
             )
         workspace = validated_workspace.canonical_path
-        policy = str(execution.get("policy") or "read-only")
-        if policy not in {"read-only", "workspace-write"}:
+        policy = str(execution.get("policy") or "danger-full-access")
+        writable_policies = {"workspace-write", "danger-full-access"}
+        if policy not in {"read-only", *writable_policies}:
             return self._blocked("invalid_request", f"Unsupported agent policy: {policy}")
         observability = request.get("observability") or {}
         if not isinstance(observability, dict):
@@ -358,10 +370,10 @@ class Toolkit:
         file_changes = observability.get("file_changes")
         public_text_allowlist: frozenset[str] = frozenset()
         if file_changes is not None:
-            if policy != "workspace-write" or not isinstance(file_changes, dict):
+            if policy not in writable_policies or not isinstance(file_changes, dict):
                 return self._blocked(
                     "invalid_request",
-                    "observability.file_changes requires workspace-write agent mode.",
+                    "observability.file_changes requires a writable agent mode.",
                 )
             declared_paths = file_changes.get("include")
             if (
@@ -402,11 +414,27 @@ class Toolkit:
                 f"Configured agent runner adapter is unavailable: {runner_adapter}",
                 options=("inspect-runner", "handle-in-codex"),
             )
-        evidence = self._route_evidence(route, provider)
-        if evidence["evidence_state"] == "stale":
+        benchmark_route = resolved.config.get("routing_role") == "benchmark_only"
+        evidence, provider_status_before = self._route_evidence(route, provider)
+        if evidence["evidence_state"] == "stale" or (
+            benchmark_route
+            and (
+                evidence.get("evidence_state") != "current"
+                or evidence.get("live_verified") is not True
+            )
+        ):
+            category = (
+                "route_evidence_stale"
+                if evidence["evidence_state"] == "stale"
+                else "route_evidence_unverified"
+            )
             result = self._blocked(
-                "route_evidence_stale",
-                "The selected backend no longer matches its accepted model evidence.",
+                category,
+                (
+                    "The selected backend no longer matches its accepted model evidence."
+                    if category == "route_evidence_stale"
+                    else "The benchmark backend did not provide current model evidence."
+                ),
                 options=("probe-backend", "update-backend-registry", "handle-in-codex"),
             )
             result["backend"] = self._backend_receipt(resolved)
@@ -415,24 +443,103 @@ class Toolkit:
             )
             return result
         budget_input = execution.get("budget") or {}
+        if not isinstance(budget_input, dict):
+            return self._blocked("invalid_request", "Agent execution.budget must be an object.")
+
+        # ``completion_driven`` is the product default.  Requests that carry
+        # the pre-completion numeric fields without a mode are retained as a
+        # narrow backwards-compatible bounded form; new callers must opt in to
+        # either legacy mode explicitly.
+        requested_limit_mode = budget_input.get("limit_mode")
+        if requested_limit_mode is None:
+            has_legacy_cutoff = any(
+                budget_input.get(name) is not None
+                for name in ("timeout_seconds", "max_steps", "max_tool_calls")
+            )
+            limit_mode = "bounded" if has_legacy_cutoff else "completion_driven"
+        else:
+            limit_mode = str(requested_limit_mode)
+        if limit_mode not in {"completion_driven", "bounded", "watchdog_only"}:
+            return self._blocked(
+                "invalid_request",
+                "Agent budget limit_mode must be completion_driven, bounded, or watchdog_only.",
+            )
+
         try:
-            timeout_value = budget_input.get("timeout_seconds", 900)
-            max_steps_value = budget_input.get("max_steps", 20)
-            max_tool_calls_value = budget_input.get("max_tool_calls", 80)
-            budget = {
-                "timeout_seconds": int(900 if timeout_value is None else timeout_value),
-                "max_steps": int(20 if max_steps_value is None else max_steps_value),
-                "max_tool_calls": int(80 if max_tool_calls_value is None else max_tool_calls_value),
-            }
+            if limit_mode == "completion_driven":
+                if any(
+                    budget_input.get(name) is not None
+                    for name in ("timeout_seconds", "max_steps", "max_tool_calls")
+                ):
+                    return self._blocked(
+                        "invalid_request",
+                        "completion_driven cannot declare a total wall, step, or tool-call cutoff.",
+                    )
+                idle_value = budget_input.get("idle_timeout_seconds", 3600)
+                idle_timeout_seconds = int(3600 if idle_value is None else idle_value)
+                budget = {
+                    "timeout_seconds": None,
+                    "idle_timeout_seconds": idle_timeout_seconds,
+                    "limit_mode": "completion_driven",
+                    "max_steps": None,
+                    "max_tool_calls": None,
+                }
+            else:
+                timeout_value = budget_input.get("timeout_seconds", 900)
+                timeout_seconds = int(900 if timeout_value is None else timeout_value)
+                idle_value = budget_input.get("idle_timeout_seconds")
+                idle_timeout_seconds = (
+                    int(idle_value) if idle_value is not None else None
+                )
+                if limit_mode == "watchdog_only":
+                    if any(
+                        budget_input.get(name) is not None
+                        for name in ("max_steps", "max_tool_calls")
+                    ):
+                        return self._blocked(
+                            "invalid_request",
+                            "watchdog_only cannot declare max_steps or max_tool_calls.",
+                        )
+                    budget = {
+                        "timeout_seconds": timeout_seconds,
+                        "idle_timeout_seconds": idle_timeout_seconds,
+                        "limit_mode": "watchdog_only",
+                        "max_steps": None,
+                        "max_tool_calls": None,
+                    }
+                else:
+                    max_steps_value = budget_input.get("max_steps", 20)
+                    max_tool_calls_value = budget_input.get("max_tool_calls", 80)
+                    budget = {
+                        "timeout_seconds": timeout_seconds,
+                        "idle_timeout_seconds": idle_timeout_seconds,
+                        "limit_mode": "bounded",
+                        "max_steps": int(20 if max_steps_value is None else max_steps_value),
+                        "max_tool_calls": int(
+                            80 if max_tool_calls_value is None else max_tool_calls_value
+                        ),
+                    }
         except (TypeError, ValueError):
             return self._blocked("invalid_request", "Agent budget values must be integers.")
-        if not 30 <= budget["timeout_seconds"] <= 86_400:
+        idle_timeout_seconds = budget["idle_timeout_seconds"]
+        if (
+            idle_timeout_seconds is not None
+            and idle_timeout_seconds != 0
+            and not 60 <= idle_timeout_seconds <= 604_800
+        ):
+            return self._blocked(
+                "invalid_request",
+                "Agent idle_timeout_seconds must be 0 or between 60 and 604800.",
+            )
+        if budget["timeout_seconds"] is not None and not 30 <= budget["timeout_seconds"] <= 86_400:
             return self._blocked("invalid_request", "Agent timeout_seconds must be between 30 and 86400.")
-        if not 1 <= budget["max_steps"] <= 200:
-            return self._blocked("invalid_request", "Agent max_steps must be between 1 and 200.")
-        if not 0 <= budget["max_tool_calls"] <= 10_000:
-            return self._blocked("invalid_request", "Agent max_tool_calls must be between 0 and 10000.")
+        if limit_mode == "bounded":
+            if not 1 <= budget["max_steps"] <= 200:
+                return self._blocked("invalid_request", "Agent max_steps must be between 1 and 200.")
+            if not 0 <= budget["max_tool_calls"] <= 10_000:
+                return self._blocked("invalid_request", "Agent max_tool_calls must be between 0 and 10000.")
         resolved_execution = dict(execution)
+        declared_route_evidence = dict(route.get("evidence") or {})
         resolved_execution.update(
             {
                 "workspace": str(workspace.resolve()),
@@ -443,6 +550,22 @@ class Toolkit:
                 "model": route["model"],
                 "cloud": bool(resolved.config.get("cloud")),
                 "_progress_callback": progress_callback,
+                "provider_id": declared_route_evidence.get("provider_id"),
+                "codex_cli_version": declared_route_evidence.get(
+                    "codex_cli_version"
+                ),
+                "aicli_entry_sha256": declared_route_evidence.get(
+                    "aicli_entry_sha256"
+                ),
+                "aicli_version": declared_route_evidence.get("aicli_version"),
+                "profile_fingerprint": declared_route_evidence.get(
+                    "profile_fingerprint"
+                ),
+                "require_runtime_identity": benchmark_route,
+                "require_benchmark_preflight": benchmark_route,
+                "require_network_proof": benchmark_route,
+                "network_policy": "forbidden" if benchmark_route else None,
+                "search_policy": "disabled" if benchmark_route else None,
             }
         )
         route_receipt = self._route_receipt(route, evidence, requested_runner=requested_runner)
@@ -451,7 +574,7 @@ class Toolkit:
             prompt += "\n\nApproved native image paths:\n" + "\n".join(media.native_images)
         workspace_before = (
             self._workspace_snapshot(validated_workspace, public_text_allowlist)
-            if policy == "workspace-write" and callable(progress_callback)
+            if policy in writable_policies and callable(progress_callback)
             else None
         )
         workspace_event_phase = "waiting"
@@ -467,9 +590,19 @@ class Toolkit:
             workspace_event_phase = "validating"
         except AgentRunnerError as exc:
             workspace_event_phase = "failed"
+            provider_status_after = (
+                self._provider_status(provider) if benchmark_route else None
+            )
             error_status = (
                 "blocked"
-                if exc.error.category in {"agent_budget_exceeded", "agent_budget_unenforced"}
+                if exc.error.category
+                in {
+                    "agent_budget_exceeded",
+                    "agent_budget_unenforced",
+                    "agent_network_proof_unavailable",
+                    "agent_network_proof_incomplete",
+                    "agent_runner_identity_mismatch",
+                }
                 else "failed"
             )
             result = self._from_error(error_status, exc.error)
@@ -488,6 +621,20 @@ class Toolkit:
                 **route_receipt,
                 **exc.receipt,
             }
+            if benchmark_route:
+                result["execution_receipt"][
+                    "local_codex_benchmark_observation"
+                ] = self._local_codex_benchmark_observation(
+                    resolved=resolved,
+                    route=route,
+                    runtime=exc.receipt,
+                    request=request,
+                    budget=budget,
+                    policy=policy,
+                    workspace=validated_workspace,
+                    provider_status_before=provider_status_before,
+                    provider_status_after=provider_status_after,
+                )
             return result
         finally:
             if workspace_before is not None:
@@ -501,6 +648,9 @@ class Toolkit:
                     )
                 except Exception:
                     pass
+        provider_status_after = (
+            self._provider_status(provider) if benchmark_route else None
+        )
         output, checks = self._check_output(response.content, (request.get("task") or {}).get("expected_output") or {})
         status = "ok" if all(check["passed"] for check in checks) else "partial"
         usage = self._agent_usage(response)
@@ -549,6 +699,23 @@ class Toolkit:
                 "budget": budget,
                 "fallback_used": False,
                 **route_receipt,
+                **(
+                    {
+                        "local_codex_benchmark_observation": self._local_codex_benchmark_observation(
+                            resolved=resolved,
+                            route=route,
+                            runtime=response,
+                            request=request,
+                            budget=budget,
+                            policy=policy,
+                            workspace=validated_workspace,
+                            provider_status_before=provider_status_before,
+                            provider_status_after=provider_status_after,
+                        )
+                    }
+                    if benchmark_route
+                    else {}
+                ),
             },
             "decision": None,
         }
@@ -558,6 +725,29 @@ class Toolkit:
             resolved, provider = self._resolve_provider(backend_name)
             provider_status = provider.status()
             routes = resolved.config.get("agent_routes") or {}
+            if routes:
+                route_status: dict[str, Any] = {}
+                for route_id in sorted(routes):
+                    route = routes[route_id]
+                    evidence = self.registry.evaluate_route_evidence(
+                        route, provider_status
+                    )
+                    declared_evidence = route.get("evidence") or {}
+                    route_status[route_id] = {
+                        "runner": route["runner"],
+                        "profile": route["profile"],
+                        "model": route["model"],
+                        "reasoning_effort": route.get("reasoning_effort"),
+                        "evidence_state": evidence["evidence_state"],
+                        "receipt_schema": declared_evidence.get("receipt_schema"),
+                        "receipt_authority": declared_evidence.get(
+                            "receipt_authority"
+                        ),
+                        "model_digest": declared_evidence.get("model_digest"),
+                        "parent_model": declared_evidence.get("parent_model"),
+                    }
+                provider_status["agent_routes"] = route_status
+                provider_status["agent_supported_runners"] = sorted(routes)
             default_route = routes.get("data_factory")
             if default_route:
                 evidence = self.registry.evaluate_route_evidence(default_route, provider_status)
@@ -568,7 +758,6 @@ class Toolkit:
                     "model": default_route["model"],
                     **evidence,
                 }
-                provider_status["agent_supported_runners"] = sorted(routes)
             return {
                 "status": "ok",
                 "backend": self._backend_receipt(resolved),
@@ -586,18 +775,100 @@ class Toolkit:
             raise ValueError(f"Backend has no provider adapter: {resolved.backend_id}")
         return resolved, provider
 
-    def _route_evidence(self, route: dict[str, Any], provider: Any) -> dict[str, Any]:
+    def _route_evidence(
+        self, route: dict[str, Any], provider: Any
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         evidence = route.get("evidence") or {}
         needs_observation = bool(evidence.get("live_verified")) and any(
             evidence.get(key) for key in ("model_digest", "parent_model")
         )
         provider_status: dict[str, Any] | None = None
-        if needs_observation and hasattr(provider, "status"):
-            try:
-                provider_status = provider.status()
-            except (ProviderCallError, OSError, ValueError):
-                provider_status = None
-        return self.registry.evaluate_route_evidence(route, provider_status)
+        if needs_observation:
+            provider_status = self._provider_status(provider)
+        return (
+            self.registry.evaluate_route_evidence(route, provider_status),
+            provider_status,
+        )
+
+    @staticmethod
+    def _provider_status(provider: Any) -> dict[str, Any] | None:
+        if not hasattr(provider, "status"):
+            return None
+        try:
+            value = provider.status()
+        except (ProviderCallError, OSError, ValueError):
+            return None
+        return dict(value) if isinstance(value, dict) else None
+
+    @staticmethod
+    def _local_codex_benchmark_observation(
+        *,
+        resolved: ResolvedBackend,
+        route: dict[str, Any],
+        runtime: Any,
+        request: dict[str, Any],
+        budget: dict[str, Any],
+        policy: str,
+        workspace: ValidatedWorkspaceRoot,
+        provider_status_before: dict[str, Any] | None,
+        provider_status_after: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        def runtime_value(name: str, default: Any = None) -> Any:
+            if isinstance(runtime, dict):
+                return runtime.get(name, default)
+            return getattr(runtime, name, default)
+
+        limit_usage = dict(runtime_value("limit_usage", {}) or {})
+        route_evidence = dict(route.get("evidence") or {})
+        try:
+            revalidate_workspace_root(workspace)
+            workspace_identity_current = True
+        except WorkspaceRootError:
+            workspace_identity_current = False
+        return {
+            "schema": "llm-backend-toolkit.local-codex-benchmark-observation.v1",
+            "backend": resolved.backend_id,
+            "route": {
+                "runner": str(route.get("runner") or ""),
+                "profile": str(route.get("profile") or ""),
+                "model": str(route.get("model") or ""),
+                "reasoning_effort": str(route.get("reasoning_effort") or ""),
+                "evidence": route_evidence,
+            },
+            "profile_id": str(runtime_value("profile_id", "") or ""),
+            "model_provider": str(runtime_value("model_provider", "") or ""),
+            "runtime_identity": dict(
+                runtime_value("runtime_identity", {}) or {}
+            ),
+            "aicli_preflight": dict(
+                runtime_value("aicli_preflight", {}) or {}
+            ),
+            "budget_mode": str(runtime_value("budget_mode", "") or ""),
+            "budget": dict(budget),
+            "policy": policy,
+            "usage": dict(runtime_value("usage", {}) or {}),
+            "limit_enforcement": dict(
+                runtime_value("limit_enforcement", {}) or {}
+            ),
+            "process_tree": {
+                "cleanup_confirmed": bool(
+                    limit_usage.get("cleanup_confirmed", False)
+                ),
+                "cleanup_method": str(
+                    limit_usage.get("cleanup_method") or ""
+                ),
+            },
+            "workspace": {
+                "canonical_path": str(workspace.canonical_path),
+                "device": int(getattr(workspace, "_device")),
+                "inode": int(getattr(workspace, "_inode")),
+                "identity_current": workspace_identity_current,
+            },
+            "task": {"request_sha256": _canonical_digest(request)},
+            "provider_before": dict(provider_status_before or {}),
+            "provider_after": dict(provider_status_after or {}),
+            "fallback_used": False,
+        }
 
     @staticmethod
     def _agent_usage(response: Any) -> dict[str, Any]:

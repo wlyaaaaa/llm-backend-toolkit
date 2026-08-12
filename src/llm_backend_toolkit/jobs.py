@@ -24,7 +24,7 @@ from .input_integrity import (
     declaration_scope,
     pending_receipt,
 )
-from .input_lifecycle import JobInputLifecycle, JobNotRunnableError
+from .input_lifecycle import JobInputLifecycle, JobNotRunnableError  # noqa: F401
 from .observability import append_event, append_event_once, notify_observer
 from .workspace_observer import (
     WorkspaceRootError,
@@ -33,13 +33,17 @@ from .workspace_observer import (
 )
 
 
-Spawner = Callable[[str, Path], None]
+Spawner = Callable[[str, Path], Any]
+CancelBridge = Callable[[str, dict[str, Any]], dict[str, Any]]
+BeforeSpawn = Callable[[str], None]
 EXPLICIT_CACHE_IDENTITY_SCHEMA = "llm-backend-toolkit.explicit-cache-identity.v2"
 CACHE_INDEX_SCHEMA = "llm-backend-toolkit.cache-index.v1"
 CACHE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+/=-]{0,511}$")
 CACHEABLE_RESULT_STATUSES = frozenset({"ok", "partial"})
 REQUEST_DIGEST_CANONICALIZATION = "stdlib-json-sort-compact-utf8-v1"
 OBSERVER_LOCAL_SCHEMA = "llm-backend-toolkit.observer-local.v1"
+CONTROLLED_CANCEL_SCHEMA = "llm-backend-toolkit.controlled-cancel.v1"
+CONTROLLED_CANCEL_CLEANUP_SCHEMA = "llm-backend-toolkit.controlled-cancel-cleanup.v1"
 _CACHE_LOCK_TIMEOUT_SECONDS = 5.0
 _CACHE_LOCK_POLL_SECONDS = 0.01
 _PROCESS_CACHE_LOCKS_GUARD = threading.Lock()
@@ -212,20 +216,32 @@ class JobStore:
         spawner: Spawner | None = None,
         result_preview_chars: int | None = None,
         registry: BackendRegistry | None = None,
+        cancel_bridge: CancelBridge | None = None,
     ) -> None:
         self.root = Path(root or default_state_root()).expanduser().resolve()
         self.spawner = spawner or _default_spawner
         configured_preview = int(os.environ.get("LLM_TOOLKIT_RESULT_PREVIEW_CHARS", "2000"))
         self.result_preview_chars = max(32, result_preview_chars or configured_preview)
         self.registry = registry
+        self._cancel_bridge = cancel_bridge
         self._input_lifecycle = JobInputLifecycle(self)
+
+    @property
+    def has_controlled_cancel_bridge(self) -> bool:
+        return callable(self._cancel_bridge)
 
     @staticmethod
     def request_digest(request: dict[str, Any]) -> str:
         canonical = json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    def submit(self, request: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
+    def submit(
+        self,
+        request: dict[str, Any],
+        *,
+        force: bool = False,
+        before_spawn: BeforeSpawn | None = None,
+    ) -> dict[str, Any]:
         request, conversation = self._prepare_continuation(request)
         input_integrity = pending_receipt(request)
         request_digest = self.request_digest(request)
@@ -306,6 +322,8 @@ class JobStore:
                     status="active",
                 )
         try:
+            if before_spawn is not None:
+                before_spawn(job_id)
             self.spawner(job_id, self.root)
         except Exception:
             self.fail(job_id, "Background worker could not be started")
@@ -410,7 +428,7 @@ class JobStore:
             },
             "execution": {
                 "mode": execution_mode,
-                "policy": str(execution.get("policy") or "read-only"),
+                "policy": str(execution.get("policy") or "danger-full-access"),
                 "route_id": route_id or None,
                 "runner": str(route.get("runner") or "") or None,
                 "profile": str(route.get("profile") or "") or None,
@@ -520,6 +538,7 @@ class JobStore:
         if observer_local is not None:
             _atomic_json(job_dir / ".observer-local.json", observer_local)
         created_utc = _utc_now()
+        monitor_timeout_seconds = self._timeout_seconds(request)
         _atomic_json(
             job_dir / "state.json",
             {
@@ -533,7 +552,11 @@ class JobStore:
                 "provider": str(request.get("provider") or ""),
                 "created_utc": created_utc,
                 "updated_utc": created_utc,
-                "monitor_until_utc": _utc_after(self._timeout_seconds(request)),
+                "monitor_until_utc": (
+                    _utc_after(monitor_timeout_seconds)
+                    if monitor_timeout_seconds is not None
+                    else None
+                ),
                 "cacheable": cacheable,
                 "cache_result_eligible": False,
                 "input_integrity": input_integrity,
@@ -858,10 +881,217 @@ class JobStore:
         return self._input_lifecycle.begin_execution(job_id)
 
     def cancel(self, job_id: str) -> dict[str, Any]:
+        state = self._read_state(job_id)
+        if self._has_controlled_cancel(state):
+            return self._cancel_controlled(job_id)
         return self._input_lifecycle.cancel(job_id)
 
     def cleanup_inputs(self, job_id: str) -> dict[str, Any]:
+        state = self._read_state(job_id)
+        if self._controlled_cancel_pending(state):
+            return {
+                "status": "blocked",
+                "job_id": job_id,
+                "job_status": "cancellation_requested",
+                "error": {
+                    "category": "controlled_cancel_cleanup_unconfirmed",
+                    "summary": (
+                        "Controlled cancellation cannot clean inputs before process-tree "
+                        "and GPU-lease cleanup are both confirmed."
+                    ),
+                    "retryable": True,
+                },
+                "controlled_cancel": dict(state.get("controlled_cancel") or {}),
+            }
         return self._input_lifecycle.cleanup(job_id)
+
+    @staticmethod
+    def _has_controlled_cancel(state: dict[str, Any]) -> bool:
+        value = state.get("controlled_cancel")
+        return isinstance(value, dict) and value.get("schema") == CONTROLLED_CANCEL_SCHEMA
+
+    @classmethod
+    def _controlled_cancel_pending(cls, state: dict[str, Any]) -> bool:
+        if not cls._has_controlled_cancel(state):
+            return False
+        value = state.get("controlled_cancel") or {}
+        cleanup = value.get("cleanup")
+        return not cls._controlled_cleanup_confirmed(cleanup)
+
+    @staticmethod
+    def _controlled_cleanup_confirmed(value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        if value.get("schema") != CONTROLLED_CANCEL_CLEANUP_SCHEMA:
+            return False
+        process_tree = value.get("process_tree")
+        gpu_lease = value.get("gpu_lease")
+        return bool(
+            isinstance(process_tree, dict)
+            and process_tree.get("status") == "confirmed_absent"
+            and isinstance(gpu_lease, dict)
+            and gpu_lease.get("status") == "released"
+        )
+
+    @staticmethod
+    def _normalized_controlled_cleanup(value: Any) -> dict[str, Any]:
+        process_tree = value.get("process_tree") if isinstance(value, dict) else None
+        gpu_lease = value.get("gpu_lease") if isinstance(value, dict) else None
+        process_status = (
+            "confirmed_absent"
+            if isinstance(process_tree, dict)
+            and process_tree.get("status") == "confirmed_absent"
+            else "unconfirmed"
+        )
+        gpu_status = (
+            "released"
+            if isinstance(gpu_lease, dict) and gpu_lease.get("status") == "released"
+            else "unconfirmed"
+        )
+        return {
+            "schema": CONTROLLED_CANCEL_CLEANUP_SCHEMA,
+            "process_tree": {"status": process_status},
+            "gpu_lease": {"status": gpu_status},
+        }
+
+    def arm_controlled_cancel(
+        self,
+        job_id: str,
+        bridge: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Attach a dependency-injected cancellation controller to one job.
+
+        The durable record deliberately contains only declarative bridge bindings.
+        It never accepts a command, endpoint, or callback from a request.  The
+        executable controller is supplied to JobStore construction instead.
+        """
+        if not self.has_controlled_cancel_bridge:
+            raise ValueError("A controlled cancel bridge is not configured")
+        if not isinstance(bridge, dict):
+            raise ValueError("Controlled cancel bridge metadata must be an object")
+        executor_kind = str(bridge.get("executor_kind") or "")
+        broker = bridge.get("broker")
+        if (
+            not executor_kind
+            or not isinstance(broker, dict)
+            or str(broker.get("id") or "") != "LocalGpuBroker"
+            or str(broker.get("lease_id") or "") == ""
+            or str(broker.get("serialization") or "") != "exclusive"
+        ):
+            raise ValueError(
+                "Controlled cancel requires an exact executor and exclusive LocalGpuBroker lease binding"
+            )
+        durable = {
+            "schema": CONTROLLED_CANCEL_SCHEMA,
+            "executor_kind": executor_kind,
+            "broker": {
+                "id": "LocalGpuBroker",
+                "lease_id": str(broker["lease_id"]),
+                "serialization": "exclusive",
+            },
+            "status": "armed",
+            "cleanup": self._normalized_controlled_cleanup({}),
+            "armed_utc": _utc_now(),
+        }
+        with self._job_lock(job_id):
+            state = self._read_state(job_id)
+            if str(state.get("job_status") or "") != "queued":
+                raise ValueError("Controlled cancel can be armed only before a job is claimed")
+            state["controlled_cancel"] = durable
+            self._input_lifecycle.persist_state_locked(job_id, state)
+        return dict(durable)
+
+    def record_worker_contract(self, job_id: str, contract: dict[str, Any]) -> None:
+        if not isinstance(contract, dict):
+            raise ValueError("Worker contract must be an object")
+        with self._job_lock(job_id):
+            state = self._read_state(job_id)
+            state["worker_contract"] = json.loads(
+                json.dumps(contract, ensure_ascii=False, sort_keys=True)
+            )
+            self._input_lifecycle.persist_state_locked(job_id, state)
+
+    def read_worker_contract(self, job_id: str) -> dict[str, Any]:
+        state = self._read_state(job_id)
+        value = state.get("worker_contract")
+        if not isinstance(value, dict):
+            raise ValueError("Job has no durable worker contract")
+        return json.loads(json.dumps(value, ensure_ascii=False, sort_keys=True))
+
+    def _cancel_controlled(self, job_id: str) -> dict[str, Any]:
+        if not self.has_controlled_cancel_bridge:
+            return {
+                "status": "blocked",
+                "job_id": job_id,
+                "job_status": "cleanup_unconfirmed",
+                "error": {
+                    "category": "controlled_cancel_bridge_unavailable",
+                    "summary": "The controlled cancellation bridge is unavailable.",
+                    "retryable": True,
+                },
+            }
+        with self._job_lock(job_id):
+            state = self._read_state(job_id)
+            job_status = str(state.get("job_status") or "")
+            controlled = dict(state.get("controlled_cancel") or {})
+            if job_status in {"completed", "failed", "cancelled"}:
+                return {
+                    "status": "ok",
+                    "job_id": job_id,
+                    "job_status": job_status,
+                    "controlled_cancel": controlled,
+                }
+            controlled["status"] = "cancellation_requested"
+            controlled["requested_utc"] = _utc_now()
+            state["controlled_cancel"] = controlled
+            state["job_status"] = "cancellation_requested"
+            state["cancellation_requested"] = True
+            state["cache_result_eligible"] = False
+            self._input_lifecycle.persist_state_locked(job_id, state)
+            bridge_input = json.loads(
+                json.dumps(controlled, ensure_ascii=False, sort_keys=True)
+            )
+        try:
+            cleanup = self._normalized_controlled_cleanup(
+                self._cancel_bridge(job_id, bridge_input)
+            )
+        except Exception:
+            cleanup = self._normalized_controlled_cleanup({})
+        with self._job_lock(job_id):
+            state = self._read_state(job_id)
+            controlled = dict(state.get("controlled_cancel") or {})
+            controlled["cleanup"] = cleanup
+            if self._controlled_cleanup_confirmed(cleanup):
+                state["job_status"] = "cancelled"
+                state["result_status"] = "cancelled"
+                state["cache_result_eligible"] = False
+                state["worker_phase"] = "cancelled"
+                controlled["status"] = "cancelled"
+                state["controlled_cancel"] = controlled
+                self._input_lifecycle.finish_locked(job_id, state=state)
+                return {
+                    "status": "ok",
+                    "job_id": job_id,
+                    "job_status": "cancelled",
+                    "controlled_cancel": controlled,
+                }
+            controlled["status"] = "cleanup_unconfirmed"
+            state["controlled_cancel"] = controlled
+            self._input_lifecycle.persist_state_locked(job_id, state)
+            return {
+                "status": "blocked",
+                "job_id": job_id,
+                "job_status": "cleanup_unconfirmed",
+                "error": {
+                    "category": "controlled_cancel_cleanup_unconfirmed",
+                    "summary": (
+                        "Cancellation remains non-terminal until both process-tree "
+                        "and LocalGpuBroker lease cleanup are confirmed."
+                    ),
+                    "retryable": True,
+                },
+                "controlled_cancel": controlled,
+            }
 
     def progress_recorder(
         self,
@@ -1058,6 +1288,14 @@ class JobStore:
                 "cancelled",
                 "cancellation_requested",
             }:
+                if self._controlled_cancel_pending(state):
+                    # A controlled local worker may not convert a cancellation
+                    # request into a terminal state merely because its Python
+                    # wrapper returned.  The out-of-process bridge must first
+                    # prove both tree termination and LocalGpuBroker release.
+                    state["cache_result_eligible"] = False
+                    self._input_lifecycle.persist_state_locked(job_id, state)
+                    return
                 state["job_status"] = "cancelled"
                 state["result_status"] = "cancelled"
                 state["cache_result_eligible"] = False
@@ -1195,7 +1433,9 @@ class JobStore:
         include_result: bool = False,
         full_result: bool = False,
     ) -> dict[str, Any]:
-        self._input_lifecycle.recover_if_dead(job_id)
+        initial_state = self._read_state(job_id)
+        if not self._controlled_cancel_pending(initial_state):
+            self._input_lifecycle.recover_if_dead(job_id)
         state = self._read_state(job_id)
         terminal_statuses = {"completed", "failed", "cancelled"}
         if str(state.get("job_status") or "") in terminal_statuses:
@@ -1253,6 +1493,8 @@ class JobStore:
             output["input_spool_cleanup"] = dict(state["input_spool_cleanup"])
         if isinstance(state.get("worker_lease"), dict):
             output["worker_lease"] = dict(state["worker_lease"])
+        if isinstance(state.get("controlled_cancel"), dict):
+            output["controlled_cancel"] = dict(state["controlled_cancel"])
         if poll_after_ms:
             output["recommended_check_utc"] = _utc_after(poll_after_ms // 1000)
         if stale:
@@ -1319,10 +1561,25 @@ class JobStore:
         return output
 
     @staticmethod
-    def _timeout_seconds(request: dict[str, Any]) -> int:
+    def _timeout_seconds(request: dict[str, Any]) -> int | None:
         execution = request.get("execution") or {}
         if str(execution.get("mode") or "direct") == "agent":
             budget = execution.get("budget") or {}
+            if not isinstance(budget, dict):
+                return None
+            requested_limit_mode = budget.get("limit_mode")
+            if requested_limit_mode is None:
+                # Legacy numeric budget fields implied the old bounded route;
+                # an omitted budget (or only null fields) is completion-driven.
+                has_legacy_cutoff = any(
+                    budget.get(name) is not None
+                    for name in ("timeout_seconds", "max_steps", "max_tool_calls")
+                )
+                limit_mode = "bounded" if has_legacy_cutoff else "completion_driven"
+            else:
+                limit_mode = str(requested_limit_mode)
+            if limit_mode == "completion_driven":
+                return None
             try:
                 wall = int(budget.get("timeout_seconds") or 900)
             except (TypeError, ValueError):

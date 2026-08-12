@@ -16,7 +16,7 @@
 - 异步 Smart Job：提交立即返回，顶级模型无需被长时间命令阻塞。
 - 欠费、额度、限流、权限、GPU 占用等错误只返回裁决选项，不自动调用另一个模型。
 - 任何云端调用都要求显式 `privacy.cloud_allowed=true`，包括 task 文本、source 片段与媒体。
-- agent mode 通过 aicli 调用原生 CLI：官方与远程 Responses Codex machine run 使用 Codex 原生 `read-only` / `workspace-write` 命令沙箱，使模型传输保持联网而模型生成的命令仍受限；本地 Ollama Codex 及其他适用本地引擎使用网络关闭的 Windows 外层沙箱。正式 personal skill 会把 `LLM_TOOLKIT_AICLI_ENTRY` 钉到其受管的当前源码入口；该入口缺失时明确失败，不会静默改用可能过期的安装态。`data_factory` 从 registry 解析精确 Profile 与模型，不做运行时猜测或 fallback。
+- agent mode 通过 aicli 调用原生 CLI：Codex 任务省略 `execution.policy` 时默认 `danger-full-access` 且不请求交互审批；调用方可显式收窄为 `workspace-write` 或 `read-only`。完全访问允许模型在当前用户权限内读写工作区外文件并执行命令，只应用于可信任务；API Key 仍只注入目标子进程。正式 personal skill 会把 `LLM_TOOLKIT_AICLI_ENTRY` 钉到其受管的当前源码入口；该入口缺失时明确失败，不会静默改用可能过期的安装态。`data_factory` 从 registry 解析精确 Profile 与模型，不做运行时猜测或 fallback。
 
 ## 安装
 
@@ -121,7 +121,7 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 
 请求可选填 `observability.public_label` 作为持久历史中的非敏感短标题；观察台不会从私密任务正文自动生成标题。技能调用会在有合适公开名称时填写此字段。
 
-`workspace-write` 默认只持久化运行时窗内观察到的变更文件数，不读取或展示文件正文。只有调用方通过 `observability.file_changes={mode:"diff",include:[...]}` 明确声明精确相对路径可在本机历史中公开时，观察台才保存这些普通小文本文件的有界 `+/-` 与 unified diff；任何二进制、疑似秘密、绝对路径、reparse、大小或总量门禁失败都会退回 count-only。loopback GUI 会从独立的本机观察元数据安全合成并支持复制完整路径，但事件、状态、结果、公开进度和 diff header 始终只保留相对路径。
+可写模式（默认 `danger-full-access` 或显式 `workspace-write`）只持久化运行时窗内观察到的工作区变更文件数，不读取或展示文件正文。只有调用方通过 `observability.file_changes={mode:"diff",include:[...]}` 明确声明精确相对路径可在本机历史中公开时，观察台才保存这些普通小文本文件的有界 `+/-` 与 unified diff；任何二进制、疑似秘密、绝对路径、reparse、大小或总量门禁失败都会退回 count-only。loopback GUI 会从独立的本机观察元数据安全合成并支持复制完整路径，但事件、状态、结果、公开进度和 diff header 始终只保留相对路径。
 
 完整产品与安全合同见 [模型调用观察台设计](docs/model-observer.md)。
 
@@ -131,15 +131,17 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 
 - `execution.mode=agent`
 - `execution.runner=data_factory`（可省略；从 backend registry 锁定精确 Profile/模型）
-- `execution.policy=workspace-write|read-only`
-- `execution.budget`（当前 `data_factory`/Codex 关闭 multi-agent，并通过版本化公开 JSON 事件投影硬执行预算：`distinct-non-output-thread-item-v2` 的 step 是不同的推理、计划、工具、压缩等非输出 ThreadItem，公开进度/最终消息只增加事件计数、不挤占行动预算；tool-call 包括命令、文件、MCP 与 web 等工具项；意外 collab 会被计数并失败关闭，无法证明同等边界的 runner 也会失败关闭）
+- `execution.policy=danger-full-access|workspace-write|read-only`（省略时默认 `danger-full-access`）
+- `execution.budget`（当前 `data_factory`/Codex 默认 `limit_mode=completion_driven`，仅配置可由活动续期的 `idle_timeout_seconds`，默认 3600 秒；可设为 `0` 明确禁用 idle lease，或 60 秒至 7 天。没有总 wall、step 或 tool-call 上限。AICLI 必须在回执中证明 `budgetMode=completion-driven`、`timeout/maxSteps/maxToolCalls=not-configured`，并在 idle lease 启用时报告 `idleTimeout=renewable`、禁用时报告 `idleTimeout=disabled`。`bounded` 与 `watchdog_only` 仅为显式向后兼容模式；显式 bounded 才启用硬上限。completion-driven 仍通过版本化公开 JSON 事件投影记录安全进度：`distinct-non-output-thread-item-v2` 的 step 是不同的推理、计划、工具、压缩等非输出 ThreadItem，公开进度/最终消息只增加事件计数、不挤占行动预算；tool-call 包括命令、文件、MCP 与 web 等工具项；意外 collab 会被计数并失败关闭。）
 
-`workspace-write` 必须指向隔离 worktree 或暂存任务目录。canonical raw、唯一事实源和不可恢复数据应留在可写根之外；智能体只产生 derived、checkpoint 和 receipt。可变工作区默认不复用已完成 job；只有调用者提供绑定输入内容 hash 的 `execution.cache_key` 才允许 cache hit。
+默认 `danger-full-access` 是执行权限默认值，不是扩大任务授权：它允许 Codex 在当前用户权限范围访问工作区外路径，因此只用于可信项目和可信任务。显式 `workspace-write` 应指向隔离 worktree 或暂存任务目录；`read-only` 用于只读分析。工作模型的 operational admission 必须在全新隔离目录、声明的实际权限下证明真实写入和确定性结果；若要宣称窄权限边界有效，还必须另做显式 `workspace-write` 验收，并分别记录测试所用权限。可变工作区默认不复用已完成 job；只有调用者提供绑定输入内容 hash 的 `execution.cache_key` 才允许 cache hit。
 
-显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或 chain-of-thought。有限预算任务只有在回执同时证明 `timeout/maxSteps/maxToolCalls=hard` 时才会被接受；未知事件、持续流墙钟或无法确认完整进程树清理均返回失败关闭，越限返回 `blocked` 与 `limit_hit`，不会把未执行的约束写成成功。
+显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或 chain-of-thought。completion-driven 任务只有在回执同时证明可续期 idle lease（或显式禁用）且没有总 wall/step/tool-call 硬上限时才会被接受；显式 bounded/watchdog-only 任务才验证其相应硬上限。未知事件、无法确认完整进程树清理或 idle lease 到期均返回失败关闭，越限返回 `blocked` 与 `limit_hit`，不会把未执行的约束写成成功。
 
-当前 `local-default` 解析到 `codex-ollama-main + qwen-main-v1`，已经过本机版本绑定验收。省略 backend 永远只走这个免费本地默认；`local-crosscheck-27b` 没有 Agent route，不能用于本节的 `data_factory` 或其他 Agent runner。任何付费 API 都必须显式选择 exact backend 并同时允许云端传输。`cloud-qwen-flash` 与 `cloud-deepseek-v4-flash` 都是显式 direct-only backend，不会自动 fallback。DeepSeek 路由没有 Pro alias/backend，也不会读取 AICLI/OpenClaw credential。`qwen3.7-plus` 已于 2026-07-29 从别名、内置 backend 和专用 provider 退役，只保留历史评测证据。2026-07-28 的 Codex 云端 Agent 复测暴露 `workspace-write` 沙箱故障：模型可以返回文本，但无法写入验收 workspace，因此 4/30 记录作废且 Qwen Flash Agent route 继续禁用。将来只有连接合同经无付费本地测试和有界真实验收重新通过后才可恢复；历史报告不会自动继承到新指纹。
+当前 `local-default` 解析到 `codex-ollama-main + qwen-main-v1`，已经过本机版本绑定验收。省略 backend 永远只走这个免费本地默认；`local-crosscheck-27b` 仍是非默认、`crosscheck_only`、no fallback 的显式路线，并保留 direct adapter。它的唯一 Agent/CACB 入口是 benchmark-only `codex-cli → codex-ollama-review / qwen-review-v1 / max`，必须由运行时重新解析为 exact non-cloud `routing_role=benchmark_only` 临时 backend；不能经 `data_factory`、其他 runner 或默认/fallback 选择。任何付费 API 都必须显式选择 exact backend 并同时允许云端传输。`cloud-qwen-flash` 与 `cloud-deepseek-v4-flash` 都是显式 direct-only backend，不会自动 fallback。DeepSeek 路由没有 Pro alias/backend，也不会读取 AICLI/OpenClaw credential。`qwen3.7-plus` 已于 2026-07-29 从别名、内置 backend 和专用 provider 退役，只保留历史评测证据。2026-07-28 的 Codex 云端 Agent 复测暴露 `workspace-write` 沙箱故障：模型可以返回文本，但无法写入验收 workspace，因此 4/30 记录作废且 Qwen Flash Agent route 继续禁用。将来只有连接合同经无付费本地测试和有界真实验收重新通过后才可恢复；历史报告不会自动继承到新指纹。
 `status` 会在不发模型生成请求的情况下返回当前 backend、模型指纹、agent 默认路由、证据状态和支持的 runner；实际任务回执同时记录精确 Profile、模型与是否采用默认。
+
+`cloud-qwen3-8-max-agent`（兼容 alias `qwen3.8-max`）是显式付费的高能力外部 Agent，不改变 `local-default`。它只开放 `codex-cli` route，精确绑定 `codex-qwen3-8-max-paygo + qwen3.8-max + max`，通过 AICLI 的北京 Workspace Responses 路径取用受管 SecretRef；Toolkit 不读取或复制 API Key。调用必须同时显式选择该 backend、`execution.mode=agent`、`execution.runner=codex-cli` 和 `privacy.cloud_allowed=true`。省略执行策略时 Codex 默认 `danger-full-access`；失败、欠费或限流不会自动改投本地模型。供应商 Responses 支持 `none/minimal/low/medium/high/xhigh/max` 且接口缺省为 `xhigh`，本高能力工作 route 明确推荐并固定 `max`；如需降低档位，应直接选择 AICLI Profile 的显式 effort，而不是伪造 Toolkit 档位。当前验收绑定 2026-08-08 的真实非平凡文件/命令任务及 Profile fingerprint，既不是原生 `spawn_agent` 子线程，也不冒充 Luna 血统。默认完全访问的实现、测试与 hidden verifier 已闭合；显式 `workspace-write` 在 AICLI 发送正确策略后仍受 Codex CLI 0.146.0 / Windows app-server 上游拒写缺陷限制，因此路线可用于可信任务，但不能宣称当前窄沙箱边界已通过。
 
 `fast-middle-agent` 是显式 opt-in 的文本型 Agent 角色：`codex-spark-xhigh + gpt-5.3-codex-spark + xhigh`，catalog 将其标为 `routing_role=latency_crosscheck`。它只通过官方 Codex CLI/ChatGPT 登录链调用，不伪装成按调用计费的 OpenAI API，也不支持原生图片输入。2026-07-29 的真实源码链验证证明 `workspace-write` 路由已经生效，但 Spark 在冻结代码修复题上用到 81/80 步后硬停止，仅得 2/9；按“不因步数失败复测”的门禁，当前只保留显式候选，不作为自动任务推荐。选择它必须显式写 `backend=fast-middle-agent` 和 `privacy.cloud_allowed=true`；省略 backend 仍只走本地 Qwen。额度、限流、资格或预算失败会返回规范错误和 `invoke:local-default` 裁决选项，但不会自动重提；调用方如选择本地回退，必须保留两次独立回执和实际模型身份。
 
@@ -158,7 +160,7 @@ python scripts/run_general_agent_benchmark.py --list
 python scripts/run_general_agent_benchmark.py --aicli-entry C:\path\to\aicli.ps1
 ```
 
-默认依次串行运行 Codex CLI、Claude Code、Qwen Code 与 OpenCode，并使用 `local-default`。真实运行必须通过 `--aicli-entry` 或 `LLM_TOOLKIT_AICLI_ENTRY` 固定一个现存的 `aicli.ps1`；缺失时在创建输出目录和调用模型前失败关闭，不再生成看似 4/30 的空跑结果。`--backend` 可选择注册表中的其他精确后端；默认行动预算为 24 步、80 次工具调用，`--max-steps` / `--max-tool-calls` 可显式调整并写入新格式 summary。扩大步数不会改变题目、workspace 或隐藏 verifier。若按模型价格比较，应同时保留同步数结果，并说明上下文累积使总 Token 成本通常不是步数的线性倍数。结果只对记录的 suite fingerprint、模型身份、CLI 版本、沙箱合同和 Toolkit 提交有效；它比较的是“模型 + harness”的代理表现，不生成永久通用智商分。
+默认依次串行运行 Codex CLI、Claude Code、Qwen Code 与 OpenCode，并使用 `local-default`。真实运行必须通过 `--aicli-entry` 或 `LLM_TOOLKIT_AICLI_ENTRY` 固定一个现存的 `aicli.ps1`；缺失时在创建输出目录和调用模型前失败关闭，不再生成看似 4/30 的空跑结果。`--backend` 可选择注册表中的其他精确后端；当前 agent 请求默认采用 completion-driven（idle lease 3600 秒），`--max-steps` / `--max-tool-calls` 仅在显式选择兼容的 bounded 模式时生效并写入新格式 summary。扩大步数不会改变题目、workspace 或隐藏 verifier。若按模型价格比较，应同时保留同步数结果，并说明上下文累积使总 Token 成本通常不是步数的线性倍数。结果只对记录的 suite fingerprint、模型身份、CLI 版本、沙箱合同和 Toolkit 提交有效；它比较的是“模型 + harness”的代理表现，不生成永久通用智商分。（早期验收报告中的 24 步/80 工具调用是旧合同历史事实，不是当前默认。）
 
 2026-07-22 的完整横向实测、耗时、能力边界和默认建议见 [四 harness 通用代理验收报告](docs/general-agent-benchmark-v1.md)。2026-07-25 又用当前 AICLI 源码入口、`codex-app-server` 与 `distinct-non-output-thread-item-v2` 完整复测 Codex 三题，最终 30/30、协议 3/3；数据工厂专项同链路复测 21/21。2026-07-29（UTC+8）因 CLI 更新兼容与错误空跑做了仅本地四 runner 调查：Codex 单次 28/30 且协议 3/3，Qwen Code 产物 30/30 但达到上游会话轮次，两个 4/30 设施根因均已定位；详见 [本地 Qwen 四智能体复核与更新兼容调查](docs/local-qwen-four-agent-investigation-2026-07-29.md)。当前版本的建议仍是 `data_factory` 固定使用 Codex CLI；日常调用不重复跑四 harness。
 

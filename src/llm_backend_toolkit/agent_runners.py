@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -53,6 +54,35 @@ _PUBLIC_PROGRESS_URL_PATTERN = re.compile(
     r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s<>＜＞]+"
 )
 
+_AUDITED_AICLI_VERSION = "0.3.3"
+_AUDITED_AICLI_SOURCE_BUNDLE_SHA256 = (
+    "sha256:53acdd7b6312c52b679810f16c1b3c59c805ae5fea3c9e9be8bd7002ea6412aa"
+)
+_AUDITED_AICLI_ENTRY_SHA256 = (
+    "sha256:00cf5e0cf8c1ecc6742a8501656efe51d2cf9bfca2d3c222a8b5eb566370249f"
+)
+_AUDITED_AICLI_NETWORK_COMPONENTS = {
+    "Private/ChildProcess.ps1": (
+        "sha256:29d78b7dc86ccb1f4be98c7742cdf3fd14e6eae48631fe2b1aa7d150b697acee"
+    ),
+    "Private/LaunchPlan.ps1": (
+        "sha256:5053f0a1c8d3025e3bd092396aa0d290cff8256e288ba99a7fa50bf5fff68fcd"
+    ),
+    "Support/CodexAppServerBridge.ps1": (
+        "sha256:ea9e66e8453a9f0120e9e68a57782a264d7f7e00d3b42004b86f2bca798e45b2"
+    ),
+}
+
+
+def _canonical_digest(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
 
 @dataclass(frozen=True)
 class AgentResponse:
@@ -74,6 +104,11 @@ class AgentResponse:
     machine_event_count: int = 0
     observability_level: str = "lifecycle"
     usage: dict[str, int] = field(default_factory=dict)
+    profile_id: str = ""
+    model_provider: str = ""
+    budget_mode: str = ""
+    runtime_identity: dict[str, Any] = field(default_factory=dict)
+    aicli_preflight: dict[str, Any] = field(default_factory=dict)
 
 
 class AgentRunnerError(Exception):
@@ -106,7 +141,7 @@ def _bounded_process(
     *,
     cwd: Path,
     stdin_text: str,
-    timeout_seconds: int,
+    timeout_seconds: int | None,
     env: dict[str, str] | None = None,
     max_output_chars: int = 1_000_000,
     event_file: Path | None = None,
@@ -423,7 +458,13 @@ class QwenCodeRunner:
                     "maxSessionTurns": int(budget["max_steps"]),
                     "maxToolCalls": int(budget["max_tool_calls"]),
                 },
-                "tools": {"approvalMode": "yolo" if execution["policy"] == "workspace-write" else "plan"},
+                "tools": {
+                    "approvalMode": (
+                        "yolo"
+                        if execution["policy"] in {"workspace-write", "danger-full-access"}
+                        else "plan"
+                    )
+                },
             }
             (qwen_home / "settings.json").write_text(
                 json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -490,7 +531,7 @@ class OpenCodeRunner:
             "--dir",
             str(workspace),
         ]
-        if execution["policy"] == "workspace-write":
+        if execution["policy"] in {"workspace-write", "danger-full-access"}:
             command.append("--auto")
         command.append(prompt)
         code, stdout, stderr, duration_ms = _bounded_process(
@@ -549,6 +590,388 @@ class AiCliProfileRunner:
         if not pwsh:
             raise _runner_error("agent_runner_unavailable", "PowerShell 7 is unavailable.")
         return [pwsh, "-NoProfile", "-File", str(entry)]
+
+    @staticmethod
+    def _benchmark_source_receipt(entry: Path) -> dict[str, Any]:
+        module_root = entry.parent.parent / "src" / "AiCliProfileManager"
+        if (
+            not module_root.is_dir()
+            or module_root.is_symlink()
+            or not (module_root / "AiCliProfileManager.psm1").is_file()
+        ):
+            raise _runner_error(
+                "agent_runner_identity_mismatch",
+                "The benchmark AICLI module source bundle is unavailable.",
+            )
+        files = sorted(
+            (
+                path
+                for path in module_root.rglob("*")
+                if path.is_file() and path.suffix.lower() in {".ps1", ".psd1", ".psm1"}
+            ),
+            key=lambda path: path.relative_to(module_root).as_posix(),
+        )
+        if not files or any(path.is_symlink() for path in files):
+            raise _runner_error(
+                "agent_runner_identity_mismatch",
+                "The benchmark AICLI source bundle is empty or redirected.",
+            )
+        manifest = bytearray()
+        component_sha256: dict[str, str] = {}
+        for path in files:
+            relative = path.relative_to(module_root).as_posix()
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            manifest.extend(f"{relative}\0{digest}\n".encode("utf-8"))
+            if relative in _AUDITED_AICLI_NETWORK_COMPONENTS:
+                component_sha256[relative] = "sha256:" + digest
+        return {
+            "entry_sha256": "sha256:" + hashlib.sha256(manifest).hexdigest(),
+            "raw_entry_sha256": "sha256:" + hashlib.sha256(entry.read_bytes()).hexdigest(),
+            "fingerprint_scope": "module-source-bundle-v1",
+            "file_count": len(files),
+            "component_sha256": component_sha256,
+        }
+
+    def _benchmark_preflight(
+        self,
+        prefix: list[str],
+        workspace: Path,
+        execution: dict[str, Any],
+    ) -> dict[str, Any]:
+        entry = Path(prefix[-1]).resolve()
+        try:
+            source = self._benchmark_source_receipt(entry)
+        except AgentRunnerError:
+            raise
+        except OSError as exc:
+            raise _runner_error(
+                "agent_runner_identity_mismatch",
+                "The benchmark AICLI source bundle could not be read.",
+            ) from exc
+        profile_id = str(execution.get("profile") or self.default_profile)
+        observations: list[dict[str, Any]] = []
+        for arguments in (
+            ["version", "--json"],
+            ["profile", "show", profile_id, "--json"],
+        ):
+            try:
+                code, stdout, _, _ = _bounded_process(
+                    prefix + arguments,
+                    cwd=workspace,
+                    stdin_text="",
+                    timeout_seconds=10,
+                    max_output_chars=200_000,
+                )
+            except AgentRunnerError as exc:
+                raise _runner_error(
+                    "agent_runner_identity_mismatch",
+                    "The benchmark AICLI identity preflight failed closed.",
+                    receipt={"aicli_preflight": source},
+                ) from exc
+            values = _json_values(stdout)
+            observations.append(values[-1] if code == 0 and values else {})
+        version_record, profile_record = observations
+        capabilities = version_record.get("capabilities")
+        capabilities = capabilities if isinstance(capabilities, dict) else {}
+        profile = profile_record.get("profile")
+        profile = profile if isinstance(profile, dict) else {}
+        models = profile.get("models")
+        models = models if isinstance(models, dict) else {}
+        preflight = {
+            "schema": "llm-backend-toolkit.aicli-benchmark-preflight.v1",
+            **source,
+            "version": str(version_record.get("version") or ""),
+            "machine_event_projection": str(
+                capabilities.get("machineEventProjection") or ""
+            ),
+            "profile": {
+                "id": str(profile.get("id") or ""),
+                "engine": str(profile.get("engine") or ""),
+                "provider": str(profile.get("provider") or ""),
+                "provider_id": str(profile.get("codexProviderId") or ""),
+                "model": str(models.get("primary") or ""),
+                "fingerprint": str(profile.get("profileFingerprint") or ""),
+            },
+        }
+
+        def normalized_digest(value: Any) -> str:
+            return str(value or "").lower().removeprefix("sha256:")
+
+        expected_profile = {
+            "id": profile_id,
+            "engine": "codex",
+            "provider": "ollama",
+            "provider_id": str(execution.get("provider_id") or ""),
+            "model": str(execution.get("model") or ""),
+            "fingerprint": str(execution.get("profile_fingerprint") or ""),
+        }
+        mismatches: list[str] = []
+        if normalized_digest(source["entry_sha256"]) != normalized_digest(
+            execution.get("aicli_entry_sha256")
+        ):
+            mismatches.append("aicli_entry_sha256")
+        if source["entry_sha256"] != _AUDITED_AICLI_SOURCE_BUNDLE_SHA256:
+            mismatches.append("aicli_network_source_bundle")
+        if source["raw_entry_sha256"] != _AUDITED_AICLI_ENTRY_SHA256:
+            mismatches.append("aicli_raw_entry_sha256")
+        if source.get("component_sha256") != _AUDITED_AICLI_NETWORK_COMPONENTS:
+            mismatches.append("aicli_network_source_components")
+        if preflight["version"] != str(execution.get("aicli_version") or ""):
+            mismatches.append("aicli_version")
+        if preflight["version"] != _AUDITED_AICLI_VERSION:
+            mismatches.append("aicli_network_source_version")
+        if preflight["machine_event_projection"] != "aicli.machine-event.v1":
+            mismatches.append("machine_event_projection")
+        for profile_field, expected in expected_profile.items():
+            if not expected or preflight["profile"][profile_field] != expected:
+                mismatches.append(f"profile.{profile_field}")
+        if (
+            self.engine != "codex"
+            or execution.get("policy") != "workspace-write"
+            or execution.get("network_policy") != "forbidden"
+            or execution.get("search_policy") != "disabled"
+            or execution.get("require_network_proof") is not True
+            or execution.get("cloud") is True
+        ):
+            mismatches.append("network_request_contract")
+        if mismatches:
+            raise _runner_error(
+                "agent_runner_identity_mismatch",
+                "The benchmark AICLI source, version, or profile identity drifted.",
+                receipt={
+                    "aicli_preflight": preflight,
+                    "identity_mismatches": mismatches,
+                },
+            )
+        source_contract = {
+            "schema": "llm-backend-toolkit.aicli-network-source-contract.v1",
+            "aicli_version": preflight["version"],
+            "source_bundle_sha256": source["entry_sha256"],
+            "entry_sha256": source["raw_entry_sha256"],
+            "component_sha256": dict(source["component_sha256"]),
+            "outer_launcher_network_flag": "--sandbox-state-disable-network",
+            "outer_launcher_applies_when_policy_is_not": "danger-full-access",
+            "runtime_sandbox_boundary": "outer-codex",
+            "runtime_sandbox_type": "externalSandbox",
+            "turn_network_access": "restricted",
+            "terminal_event": "turn.completed",
+        }
+        request_contract = {
+            "engine": "codex",
+            "profile": profile_id,
+            "profile_fingerprint": str(
+                execution.get("profile_fingerprint") or ""
+            ),
+            "model": str(execution.get("model") or ""),
+            "provider_id": str(execution.get("provider_id") or ""),
+            "sandbox_policy": "workspace-write",
+            "network": "forbidden",
+            "search": "disabled",
+            "runtime_permission": {
+                "approval_policy": "never",
+                "requested_policy": "workspace-write",
+                "sandbox_boundary": "outer-codex",
+                "sandbox_type": "externalSandbox",
+            },
+        }
+        preflight["network_proof"] = {
+            "policy": "forbidden",
+            "search": "disabled",
+            "status": "agent_network_proof_pending_prelaunch",
+            "evidence_kind": "aicli-audited-source-request-contract",
+            "source_contract": source_contract,
+            "source_contract_sha256": _canonical_digest(source_contract),
+            "request_contract": request_contract,
+            "request_contract_sha256": _canonical_digest(request_contract),
+            "source_bundle_sha256": source["entry_sha256"],
+            "entry_sha256": source["raw_entry_sha256"],
+        }
+        self._machine_events_supported = True
+        return preflight
+
+    @staticmethod
+    def _runtime_network_proof(
+        *,
+        preflight: dict[str, Any],
+        run: dict[str, Any],
+        machine_events: list[dict[str, Any]],
+        runtime_identity: dict[str, Any],
+        identity_mismatches: list[str],
+        outer_exit_code: int,
+        child_exit_code: int,
+    ) -> tuple[dict[str, Any], list[str]]:
+        pending = preflight.get("network_proof")
+        pending = dict(pending) if isinstance(pending, dict) else {}
+        source_contract = pending.get("source_contract")
+        source_contract = (
+            dict(source_contract) if isinstance(source_contract, dict) else {}
+        )
+        request_contract = pending.get("request_contract")
+        request_contract = (
+            dict(request_contract) if isinstance(request_contract, dict) else {}
+        )
+        permission = runtime_identity.get("permission")
+        permission = dict(permission) if isinstance(permission, dict) else {}
+        limit_usage = run.get("limitUsage")
+        limit_usage = dict(limit_usage) if isinstance(limit_usage, dict) else {}
+        limit_enforcement = run.get("limitEnforcement")
+        limit_enforcement = (
+            dict(limit_enforcement) if isinstance(limit_enforcement, dict) else {}
+        )
+        machine_count_value = run.get("machineEventCount")
+        machine_count = machine_count_value if type(machine_count_value) is int else 0
+        terminal_events = [
+            event for event in machine_events if event.get("kind") == "turn.completed"
+        ]
+        terminal_event = terminal_events[-1] if terminal_events else {}
+        terminal_sequence_value = terminal_event.get("sequence")
+        terminal_sequence = (
+            terminal_sequence_value if type(terminal_sequence_value) is int else 0
+        )
+        runtime_events = [
+            event for event in machine_events if event.get("kind") == "runtime.identity"
+        ]
+        runtime_event = runtime_events[0] if len(runtime_events) == 1 else {}
+        expected_runtime_event = {
+            "model": runtime_identity.get("model"),
+            "provider_id": runtime_identity.get("model_provider"),
+            "cli_version": runtime_identity.get("cli_version"),
+            "approval_policy": permission.get("approval_policy"),
+            "sandbox_policy": permission.get("requested_policy"),
+            "sandbox_boundary": permission.get("sandbox_boundary"),
+            "sandbox_type": permission.get("sandbox_type"),
+        }
+        failures: list[str] = []
+        if pending.get("status") != "agent_network_proof_pending_prelaunch":
+            failures.append("preflight_status")
+        if (
+            not source_contract
+            or pending.get("source_contract_sha256")
+            != _canonical_digest(source_contract)
+            or source_contract.get("source_bundle_sha256")
+            != _AUDITED_AICLI_SOURCE_BUNDLE_SHA256
+            or source_contract.get("entry_sha256") != _AUDITED_AICLI_ENTRY_SHA256
+            or source_contract.get("component_sha256")
+            != _AUDITED_AICLI_NETWORK_COMPONENTS
+        ):
+            failures.append("source_contract")
+        if (
+            not request_contract
+            or pending.get("request_contract_sha256")
+            != _canonical_digest(request_contract)
+            or request_contract.get("sandbox_policy") != "workspace-write"
+            or request_contract.get("network") != "forbidden"
+            or request_contract.get("search") != "disabled"
+        ):
+            failures.append("request_contract")
+        if identity_mismatches:
+            failures.append("runtime_identity")
+        if (
+            run.get("profileId") != request_contract.get("profile")
+            or run.get("model") != request_contract.get("model")
+            or run.get("modelProvider") != request_contract.get("provider_id")
+        ):
+            failures.append("process_identity")
+        if run.get("sandboxPolicy") != request_contract.get("sandbox_policy"):
+            failures.append("sandbox_policy")
+        if (
+            run.get("machineEventProjection") != "aicli.machine-event.v1"
+            or run.get("machineEventStatus") != "ok"
+            or machine_count <= 0
+            or machine_count != len(machine_events)
+            or [event.get("sequence") for event in machine_events]
+            != list(range(1, machine_count + 1))
+            or any(
+                event.get("schema") != "aicli.machine-event.v1"
+                for event in machine_events
+            )
+        ):
+            failures.append("machine_event_stream")
+        if any(
+            runtime_event.get(field) != expected
+            for field, expected in expected_runtime_event.items()
+        ):
+            failures.append("runtime_identity_event")
+        if (
+            len(terminal_events) != 1
+            or terminal_event.get("status") != "completed"
+            or terminal_sequence != machine_count
+        ):
+            failures.append("terminal_event")
+        if (
+            outer_exit_code != 0
+            or child_exit_code != 0
+            or run.get("timedOut") is True
+            or bool(run.get("limitHit"))
+        ):
+            failures.append("process_terminal")
+        if (
+            limit_usage.get("cleanupConfirmed") is not True
+            or not str(limit_usage.get("cleanupMethod") or "")
+        ):
+            failures.append("cleanup")
+
+        process_receipt = {
+            "profile_id": str(run.get("profileId") or ""),
+            "model": str(run.get("model") or ""),
+            "model_provider": str(run.get("modelProvider") or ""),
+            "sandbox_policy": str(run.get("sandboxPolicy") or ""),
+            "runtime_identity": runtime_identity,
+            "outer_exit_code": outer_exit_code,
+            "child_exit_code": child_exit_code,
+            "timed_out": run.get("timedOut") is True,
+            "budget_mode": str(run.get("budgetMode") or ""),
+            "limit_enforcement": limit_enforcement,
+            "limit_usage": limit_usage,
+            "limit_hit": run.get("limitHit"),
+            "event_projection": str(run.get("eventProjection") or ""),
+            "machine_event_projection": str(
+                run.get("machineEventProjection") or ""
+            ),
+            "machine_event_status": str(run.get("machineEventStatus") or ""),
+            "machine_event_count": machine_count,
+        }
+        machine_event_receipt = {
+            "schema": "llm-backend-toolkit.aicli-machine-event-receipt.v1",
+            "projection": str(run.get("machineEventProjection") or ""),
+            "status": str(run.get("machineEventStatus") or ""),
+            "count": machine_count,
+            "sequences": [event.get("sequence") for event in machine_events],
+            "kinds": [str(event.get("kind") or "") for event in machine_events],
+            "runtime_identity": {
+                field: runtime_event.get(field)
+                for field in expected_runtime_event
+            },
+            "terminal": {
+                "kind": str(terminal_event.get("kind") or ""),
+                "status": str(terminal_event.get("status") or ""),
+                "sequence": terminal_sequence,
+            },
+        }
+        proof = {
+            **pending,
+            "status": "incomplete_postrun" if failures else "enforced",
+            "evidence_kind": "aicli-runtime-bound-source-contract",
+            "enforcement": "unproven" if failures else "network-denied",
+            "sandbox_policy": str(run.get("sandboxPolicy") or ""),
+            "sandbox_boundary": str(permission.get("sandbox_boundary") or ""),
+            "sandbox_type": str(permission.get("sandbox_type") or ""),
+            "runtime_identity_sha256": _canonical_digest(runtime_identity),
+            "process_receipt": process_receipt,
+            "process_receipt_sha256": _canonical_digest(process_receipt),
+            "machine_event_receipt": machine_event_receipt,
+            "machine_event_stream_sha256": _canonical_digest(
+                machine_event_receipt
+            ),
+            "terminal_event": str(terminal_event.get("kind") or ""),
+            "terminal_sequence": terminal_sequence,
+            "machine_event_count": machine_count,
+            "cleanup_confirmed": limit_usage.get("cleanupConfirmed") is True,
+            "cleanup_method": str(limit_usage.get("cleanupMethod") or ""),
+        }
+        if failures:
+            proof["failure_codes"] = sorted(set(failures))
+        return proof, failures
 
     def _require_machine_events(self, prefix: list[str], workspace: Path) -> None:
         if self._machine_events_supported is True:
@@ -732,6 +1155,35 @@ class AiCliProfileRunner:
     def invoke(self, prompt: str, execution: dict[str, Any]) -> AgentResponse:
         workspace = Path(execution["workspace"])
         budget = execution["budget"]
+        if not isinstance(budget, dict):
+            raise _runner_error("invalid_request", "Agent execution budget must be an object.")
+        requested_limit_mode = budget.get("limit_mode")
+        if requested_limit_mode is None:
+            has_legacy_cutoff = any(
+                budget.get(name) is not None
+                for name in ("timeout_seconds", "max_steps", "max_tool_calls")
+            )
+            limit_mode = "bounded" if has_legacy_cutoff else "completion_driven"
+        else:
+            limit_mode = str(requested_limit_mode)
+        if limit_mode not in {"completion_driven", "bounded", "watchdog_only"}:
+            raise _runner_error(
+                "invalid_request",
+                "Agent budget limit_mode is unsupported.",
+            )
+        try:
+            idle_value = budget.get("idle_timeout_seconds")
+            idle_timeout_seconds = int(3600 if idle_value is None else idle_value)
+        except (TypeError, ValueError) as exc:
+            raise _runner_error(
+                "invalid_request",
+                "Agent idle_timeout_seconds must be an integer.",
+            ) from exc
+        if idle_timeout_seconds != 0 and not 60 <= idle_timeout_seconds <= 604_800:
+            raise _runner_error(
+                "invalid_request",
+                "Agent idle_timeout_seconds must be 0 or between 60 and 604800.",
+            )
         model = str(execution.get("model") or "qwen-main-v1")
         profile = str(execution.get("profile") or self.default_profile)
         native_images = [str(path) for path in execution.get("native_images") or []]
@@ -746,8 +1198,10 @@ class AiCliProfileRunner:
         elif self.engine == "claude":
             native = [
                 "--model", model, "-p", "--output-format", "json",
-                "--max-turns", str(budget["max_steps"]), "--dangerously-skip-permissions",
+                "--dangerously-skip-permissions",
             ]
+            if limit_mode == "bounded":
+                native.extend(["--max-turns", str(budget["max_steps"])])
         elif self.engine == "opencode":
             native = []
             for path in native_images:
@@ -757,7 +1211,23 @@ class AiCliProfileRunner:
         else:
             raise _runner_error("agent_runner_unavailable", f"Unsupported aicli agent engine: {self.engine}")
         prefix = self._prefix()
+        aicli_preflight: dict[str, Any] = {}
+        if execution.get("require_benchmark_preflight") is True:
+            aicli_preflight = self._benchmark_preflight(
+                prefix,
+                workspace,
+                execution,
+            )
         progress_callback = execution.get("_progress_callback")
+        captured_machine_events: list[dict[str, Any]] = []
+
+        def capture_machine_event(event: dict[str, Any]) -> None:
+            captured_machine_events.append(
+                json.loads(json.dumps(event, ensure_ascii=False, sort_keys=True))
+            )
+            if callable(progress_callback):
+                self._emit_machine_event(progress_callback, event)
+
         machine_events_supported = False
         if self.engine == "codex":
             self._require_machine_events(prefix, workspace)
@@ -789,11 +1259,27 @@ class AiCliProfileRunner:
         command = prefix + [
             "run", profile, "--project", str(workspace), "--stdin", "--json",
             "--sandbox-policy", str(execution["policy"]),
-            "--timeout-seconds", str(budget["timeout_seconds"]),
-            "--max-steps", str(budget["max_steps"]),
-            "--max-tool-calls", str(budget["max_tool_calls"]),
             "--max-output-chars", "1000000",
         ]
+        watchdog_only = limit_mode == "watchdog_only"
+        completion_driven = limit_mode == "completion_driven"
+        if completion_driven:
+            command.extend(["--idle-timeout-seconds", str(idle_timeout_seconds)])
+        elif watchdog_only:
+            command.extend(
+                ["--timeout-seconds", str(budget["timeout_seconds"]), "--watchdog-only"]
+            )
+        else:
+            command.extend(
+                [
+                    "--timeout-seconds",
+                    str(budget["timeout_seconds"]),
+                    "--max-steps",
+                    str(budget["max_steps"]),
+                    "--max-tool-calls",
+                    str(budget["max_tool_calls"]),
+                ]
+            )
         event_temp: tempfile.TemporaryDirectory[str] | None = None
         event_path: Path | None = None
         if machine_events_supported:
@@ -809,16 +1295,21 @@ class AiCliProfileRunner:
                 command,
                 cwd=workspace,
                 stdin_text=prompt,
-                timeout_seconds=int(budget["timeout_seconds"]) + 15,
+                timeout_seconds=(
+                    None
+                    if completion_driven
+                    else int(budget["timeout_seconds"]) + 15
+                ),
                 event_file=event_path,
                 on_event=(
-                    lambda event: self._emit_machine_event(
-                        progress_callback,
-                        event,
+                    capture_machine_event
+                    if machine_events_supported
+                    and (
+                        execution.get("require_network_proof") is True
+                        or callable(progress_callback)
                     )
-                )
-                if callable(progress_callback)
-                else None,
+                    else None
+                ),
             )
         finally:
             if event_temp is not None:
@@ -845,10 +1336,55 @@ class AiCliProfileRunner:
                 },
             )
         routed_model = effective_model or model
+        profile_id = str(run.get("profileId") or "")
+        model_provider = str(run.get("modelProvider") or "")
+        runtime_identity_value = run.get("runtimeIdentity")
+        runtime_identity = (
+            dict(runtime_identity_value)
+            if isinstance(runtime_identity_value, dict)
+            else {}
+        )
+        identity_mismatches: list[str] = []
+        if bool(execution.get("require_runtime_identity")):
+            expected_provider_id = str(execution.get("provider_id") or "")
+            expected_cli_version = str(execution.get("codex_cli_version") or "")
+            permission = runtime_identity.get("permission") or {}
+            if not isinstance(permission, dict):
+                permission = {}
+            if profile_id != profile:
+                identity_mismatches.append("profile_id")
+            if not expected_provider_id or model_provider != expected_provider_id:
+                identity_mismatches.append("model_provider")
+            if runtime_identity.get("model") != routed_model:
+                identity_mismatches.append("runtime_identity.model")
+            if runtime_identity.get("model_provider") != expected_provider_id:
+                identity_mismatches.append("runtime_identity.model_provider")
+            if (
+                not expected_cli_version
+                or runtime_identity.get("cli_version") != expected_cli_version
+            ):
+                identity_mismatches.append("runtime_identity.cli_version")
+            if permission.get("approval_policy") != "never":
+                identity_mismatches.append(
+                    "runtime_identity.permission.approval_policy"
+                )
+            if permission.get("requested_policy") != execution.get("policy"):
+                identity_mismatches.append(
+                    "runtime_identity.permission.requested_policy"
+                )
+            if permission.get("sandbox_boundary") != "outer-codex":
+                identity_mismatches.append(
+                    "runtime_identity.permission.sandbox_boundary"
+                )
+            if permission.get("sandbox_type") != "externalSandbox":
+                identity_mismatches.append(
+                    "runtime_identity.permission.sandbox_type"
+                )
         child_stdout = str(run.get("stdout") or "")
         child_values = _json_values(child_stdout)
         usage = _safe_aicli_usage(run.get("usage"))
         limit_enforcement = dict(run.get("limitEnforcement") or {})
+        budget_mode = str(run.get("budgetMode") or "")
         limit_usage = dict(run.get("limitUsage") or {})
         limit_hit = str(run.get("limitHit") or "")
         steps = int(limit_usage.get("steps") or 0)
@@ -913,13 +1449,19 @@ class AiCliProfileRunner:
             "stop_reason": limit_hit or ("failed" if code != 0 or child_code != 0 else "completed"),
             "limit_hit": limit_hit or None,
             "limit_enforcement": limit_enforcement,
+            "budget_mode": budget_mode,
+            "profile_id": profile_id,
+            "model_provider": model_provider,
+            "sandbox_policy": str(run.get("sandboxPolicy") or ""),
+            "runtime_identity": runtime_identity,
+            "aicli_preflight": aicli_preflight,
             "limit_usage": {
                 "steps": steps,
                 "tool_calls": tool_calls,
                 "events_seen": int(limit_usage.get("eventsSeen") or 0),
                 "protocol": str(limit_usage.get("protocol") or ""),
                 "step_definition": str(limit_usage.get("stepDefinition") or ""),
-                "cleanup_confirmed": bool(limit_usage.get("cleanupConfirmed", True)),
+                "cleanup_confirmed": bool(limit_usage.get("cleanupConfirmed", False)),
                 "cleanup_method": str(limit_usage.get("cleanupMethod") or ""),
             },
             "event_projection": str(run.get("eventProjection") or ""),
@@ -936,9 +1478,41 @@ class AiCliProfileRunner:
                 else "lifecycle"
             ),
         }
+        if execution.get("require_network_proof") is True:
+            network_proof, network_failures = self._runtime_network_proof(
+                preflight=aicli_preflight,
+                run=run,
+                machine_events=captured_machine_events,
+                runtime_identity=runtime_identity,
+                identity_mismatches=identity_mismatches,
+                outer_exit_code=code,
+                child_exit_code=child_code,
+            )
+            aicli_preflight["network_proof"] = network_proof
+            receipt["aicli_preflight"] = aicli_preflight
+            if network_failures:
+                receipt["stop_reason"] = "network_proof_incomplete"
+                receipt["identity_mismatches"] = identity_mismatches
+                receipt["benchmark_qualification"] = {
+                    "state": "infra-invalid",
+                    "scored": False,
+                    "ranking_eligible": False,
+                }
+                raise _runner_error(
+                    "agent_network_proof_incomplete",
+                    "The completed AICLI process did not provide a bound network-denied runtime receipt.",
+                    receipt=receipt,
+                )
+        elif identity_mismatches:
+            receipt["identity_mismatches"] = identity_mismatches
+            raise _runner_error(
+                "agent_runtime_identity_mismatch",
+                "aicli did not prove the exact local Codex runtime identity.",
+                receipt=receipt,
+            )
         if any(
             limit_enforcement.get(name) == "failed-closed"
-            for name in ("timeout", "maxSteps", "maxToolCalls")
+            for name in ("timeout", "idleTimeout", "maxSteps", "maxToolCalls")
         ):
             receipt["stop_reason"] = "budget_unenforced"
             raise _runner_error(
@@ -946,16 +1520,36 @@ class AiCliProfileRunner:
                 "The agent boundary failed closed before proving every declared hard limit.",
                 receipt=receipt,
             )
-        if bool(run.get("timedOut")) or limit_hit == "timeout":
-            receipt["stop_reason"] = "timeout"
-            receipt["limit_hit"] = "timeout"
+        if bool(run.get("timedOut")) or limit_hit in {
+            "timeout",
+            "idleTimeout",
+            "idle_timeout",
+        }:
+            normalized_limit_hit = (
+                "idle_timeout"
+                if completion_driven and limit_hit in {"", "timeout", "idleTimeout", "idle_timeout"}
+                else (limit_hit or "timeout")
+            )
+            receipt["stop_reason"] = normalized_limit_hit
+            receipt["limit_hit"] = normalized_limit_hit
             raise _runner_error(
                 "agent_timeout",
-                "Agent exceeded its hard wall-clock budget.",
+                (
+                    "Agent idle activity lease expired."
+                    if completion_driven
+                    else "Agent exceeded its hard wall-clock budget."
+                ),
                 retryable=True,
                 receipt=receipt,
             )
         if limit_hit:
+            if completion_driven and limit_hit in {"maxSteps", "maxToolCalls"}:
+                receipt["stop_reason"] = "budget_unenforced"
+                raise _runner_error(
+                    "agent_budget_unenforced",
+                    "A completion-driven run reported an unexpected hard step/tool limit.",
+                    receipt=receipt,
+                )
             raise _runner_error(
                 "agent_budget_exceeded",
                 f"Agent stopped after exceeding its hard {limit_hit} budget.",
@@ -967,11 +1561,46 @@ class AiCliProfileRunner:
             ).strip()[-2000:]
             error = classify_agent_process_error(detail)
             raise AgentRunnerError(error, receipt)
-        if any(limit_enforcement.get(name) != "hard" for name in ("timeout", "maxSteps", "maxToolCalls")):
+        if completion_driven:
+            expected_enforcement = {
+                "timeout": "not-configured",
+                "idleTimeout": (
+                    "disabled" if idle_timeout_seconds == 0 else "renewable"
+                ),
+                "maxSteps": "not-configured",
+                "maxToolCalls": "not-configured",
+            }
+        elif watchdog_only:
+            expected_enforcement = {
+                "timeout": "hard",
+                "maxSteps": "not-configured",
+                "maxToolCalls": "not-configured",
+            }
+        else:
+            expected_enforcement = {
+                "timeout": "hard",
+                "maxSteps": "hard",
+                "maxToolCalls": "hard",
+            }
+        expected_budget_mode = {
+            "completion_driven": "completion-driven",
+            "watchdog_only": "watchdog-only",
+        }.get(limit_mode)
+        if expected_budget_mode is not None and budget_mode != expected_budget_mode:
             receipt["stop_reason"] = "budget_unenforced"
             raise _runner_error(
                 "agent_budget_unenforced",
-                "The selected agent runner did not prove every declared budget as a hard limit.",
+                "The agent boundary did not confirm the selected budget semantics.",
+                receipt=receipt,
+            )
+        if any(
+            limit_enforcement.get(name) != expected
+            for name, expected in expected_enforcement.items()
+        ):
+            receipt["stop_reason"] = "budget_unenforced"
+            raise _runner_error(
+                "agent_budget_unenforced",
+                "The selected agent runner did not prove the declared budget semantics.",
                 receipt=receipt,
             )
         if not final:
@@ -995,6 +1624,11 @@ class AiCliProfileRunner:
             machine_event_status=receipt["machine_event_status"],
             machine_event_count=receipt["machine_event_count"],
             observability_level=receipt["observability_level"],
+            profile_id=profile_id,
+            model_provider=model_provider,
+            budget_mode=budget_mode,
+            runtime_identity=runtime_identity,
+            aicli_preflight=aicli_preflight,
         )
 
 

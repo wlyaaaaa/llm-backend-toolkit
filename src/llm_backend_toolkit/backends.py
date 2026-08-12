@@ -205,11 +205,25 @@ class BackendRegistry:
             routes = raw.get("agent_routes") or {}
             if not isinstance(routes, dict):
                 raise ValueError(f"Backend {backend_id} agent_routes must be an object")
-            if routing_role in {"crosscheck_only", "direct_only"} and routes:
+            if routing_role == "direct_only" and routes:
                 raise ValueError(
                     f"Backend {backend_id} with routing_role={routing_role} "
                     "cannot define agent_routes"
                 )
+            if routing_role == "crosscheck_only":
+                if bool(raw.get("fallback_eligible", False)):
+                    raise ValueError(
+                        f"Backend {backend_id} with routing_role=crosscheck_only "
+                        "cannot be fallback eligible"
+                    )
+                if routes and (
+                    set(routes) != {"codex-cli"}
+                    or str(routes["codex-cli"].get("runner") or "") != "codex-cli"
+                ):
+                    raise ValueError(
+                        f"Backend {backend_id} with routing_role=crosscheck_only "
+                        "agent_routes may contain only the exact codex-cli route"
+                    )
             for route_id, route in routes.items():
                 if not SAFE_ID.fullmatch(str(route_id)) or not isinstance(route, dict):
                     raise ValueError(f"Backend {backend_id} has an invalid route")

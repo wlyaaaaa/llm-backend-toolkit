@@ -140,7 +140,10 @@
     "poll_after_ms": {"type": "integer"},
     "recommended_check_utc": {"type": "string"},
     "conversation": {"type": "object"},
-    "monitor_until_utc": {"type": "string"}
+    "monitor_until_utc": {
+      "type": ["string", "null"],
+      "description": "Null for completion-driven jobs, which remain monitorable until completion or explicit cancellation."
+    }
   },
   "additionalProperties": true
 }

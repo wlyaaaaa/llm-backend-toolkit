@@ -1324,6 +1324,28 @@ class AgentExecutionTests(unittest.TestCase):
         self.assertEqual("ok", result["status"])
         snapshot.assert_not_called()
 
+    def test_agent_policy_defaults_to_codex_full_access(self):
+        with tempfile.TemporaryDirectory() as temp:
+            request = agent_request(Path(temp))
+            del request["execution"]["policy"]
+            runner = FakeRunner()
+            toolkit = Toolkit(
+                providers={"qwen-main-v1": FakeProvider()},
+                runners={"data_factory": runner},
+            )
+
+            result = toolkit.invoke(request)
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(
+            "danger-full-access",
+            result["execution_receipt"]["policy"],
+        )
+        self.assertEqual(
+            "danger-full-access",
+            runner.calls[0]["execution"]["policy"],
+        )
+
     def test_snapshot_and_progress_callback_failures_do_not_mask_agent_result(self):
         with tempfile.TemporaryDirectory() as temp:
             toolkit = Toolkit(
@@ -2530,6 +2552,42 @@ class AgentExecutionTests(unittest.TestCase):
                 "aicli_source_codex_0.145_workspace_rootfix_live_2026-07-29",
                 receipt["route_basis"],
             )
+            self.assertFalse(receipt["fallback_used"])
+            self.assertFalse(result["backend"]["default_applied"])
+
+    def test_qwen38_agent_pins_profile_model_max_and_full_access_default(self):
+        with tempfile.TemporaryDirectory() as temp:
+            runner = FakeRunner(
+                AgentResponse(
+                    content='{"answer": 56}',
+                    runner="codex-cli",
+                    model="qwen3.8-max",
+                    exit_code=0,
+                    duration_ms=321,
+                )
+            )
+            toolkit = Toolkit(runners={"codex-cli": runner})
+            request = agent_request(Path(temp))
+            request["backend"] = "qwen3.8-max"
+            request["privacy"] = {"cloud_allowed": True}
+            request["execution"]["runner"] = "codex-cli"
+            request["execution"].pop("policy")
+            request["execution"].pop("budget")
+
+            result = toolkit.invoke(request)
+
+            self.assertEqual("ok", result["status"])
+            execution = runner.calls[0]["execution"]
+            self.assertEqual("codex-qwen3-8-max-paygo", execution["profile"])
+            self.assertEqual("qwen3.8-max", execution["model"])
+            self.assertEqual("danger-full-access", execution["policy"])
+            receipt = result["execution_receipt"]
+            self.assertEqual("max", receipt["reasoning_effort"])
+            self.assertEqual(
+                "aicli_qwen38_full_access_task_live_2026-08-08",
+                receipt["route_basis"],
+            )
+            self.assertTrue(receipt["route_live_verified"])
             self.assertFalse(receipt["fallback_used"])
             self.assertFalse(result["backend"]["default_applied"])
 
