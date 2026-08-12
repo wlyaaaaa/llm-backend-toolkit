@@ -44,6 +44,9 @@ REQUEST_DIGEST_CANONICALIZATION = "stdlib-json-sort-compact-utf8-v1"
 OBSERVER_LOCAL_SCHEMA = "llm-backend-toolkit.observer-local.v1"
 CONTROLLED_CANCEL_SCHEMA = "llm-backend-toolkit.controlled-cancel.v1"
 CONTROLLED_CANCEL_CLEANUP_SCHEMA = "llm-backend-toolkit.controlled-cancel-cleanup.v1"
+WORKER_CONTRACT_ANCHOR_SCHEMA = (
+    "llm-backend-toolkit.worker-contract-anchor.v1"
+)
 _CACHE_LOCK_TIMEOUT_SECONDS = 5.0
 _CACHE_LOCK_POLL_SECONDS = 0.01
 _PROCESS_CACHE_LOCKS_GUARD = threading.Lock()
@@ -234,6 +237,56 @@ class JobStore:
     def request_digest(request: dict[str, Any]) -> str:
         canonical = json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _worker_contract_anchor(
+        cls,
+        state: dict[str, Any],
+        contract: dict[str, Any],
+    ) -> dict[str, Any]:
+        requested = contract.get("requested")
+        if not isinstance(requested, dict):
+            raise ValueError("Worker contract requested binding must be an object")
+        task = requested.get("task")
+        if not isinstance(task, dict):
+            raise ValueError("Worker contract task binding must be an object")
+        request_sha256 = f"sha256:{state.get('request_digest')}"
+        if task.get("request_sha256") != request_sha256:
+            raise ValueError("Worker contract does not bind the immutable job request")
+
+        registry_source = None
+        if requested.get("binding_kind") == "local_codex_benchmark":
+            source = contract.get("benchmark_registry_source")
+            requested_source = requested.get("registry_source")
+            if not isinstance(source, dict) or not isinstance(requested_source, dict):
+                raise ValueError("Benchmark worker contract lacks its registry source")
+            registry_source = {
+                "schema": source.get("schema"),
+                "backend_id": source.get("backend_id"),
+                "source_sha256": source.get("source_sha256"),
+            }
+            if requested_source != registry_source:
+                raise ValueError(
+                    "Benchmark worker contract registry source is internally mismatched"
+                )
+        elif (
+            "benchmark_registry_source" in contract
+            or "registry_source" in requested
+        ):
+            raise ValueError("Non-benchmark worker contract contains a registry source")
+
+        requested_sha256 = f"sha256:{cls.request_digest(requested)}"
+        scope = {
+            "schema": WORKER_CONTRACT_ANCHOR_SCHEMA,
+            "job_id": str(state.get("job_id") or ""),
+            "job_request_sha256": request_sha256,
+            "requested_binding_sha256": requested_sha256,
+            "registry_source": registry_source,
+        }
+        return {
+            **scope,
+            "anchor_sha256": f"sha256:{cls.request_digest(scope)}",
+        }
 
     def submit(
         self,
@@ -1001,15 +1054,30 @@ class JobStore:
             self._input_lifecycle.persist_state_locked(job_id, state)
         return dict(durable)
 
-    def record_worker_contract(self, job_id: str, contract: dict[str, Any]) -> None:
+    def record_worker_contract(
+        self,
+        job_id: str,
+        contract: dict[str, Any],
+    ) -> dict[str, Any]:
         if not isinstance(contract, dict):
             raise ValueError("Worker contract must be an object")
         with self._job_lock(job_id):
             state = self._read_state(job_id)
+            expected_anchor = self._worker_contract_anchor(state, contract)
+            durable_anchor = state.get("worker_contract_anchor")
+            if durable_anchor is None:
+                state["worker_contract_anchor"] = expected_anchor
+            elif durable_anchor != expected_anchor:
+                raise ValueError(
+                    "Worker contract cannot change its immutable creation anchor"
+                )
             state["worker_contract"] = json.loads(
                 json.dumps(contract, ensure_ascii=False, sort_keys=True)
             )
             self._input_lifecycle.persist_state_locked(job_id, state)
+        return json.loads(
+            json.dumps(expected_anchor, ensure_ascii=False, sort_keys=True)
+        )
 
     def read_worker_contract(self, job_id: str) -> dict[str, Any]:
         state = self._read_state(job_id)
@@ -1017,6 +1085,30 @@ class JobStore:
         if not isinstance(value, dict):
             raise ValueError("Job has no durable worker contract")
         return json.loads(json.dumps(value, ensure_ascii=False, sort_keys=True))
+
+    def read_worker_contract_binding(
+        self,
+        job_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Read one contract together with its immutable creation-time anchor."""
+
+        with self._job_lock(job_id):
+            state = self._read_state(job_id)
+            contract = state.get("worker_contract")
+            anchor = state.get("worker_contract_anchor")
+            if not isinstance(contract, dict):
+                raise ValueError("Job has no durable worker contract")
+            if not isinstance(anchor, dict):
+                raise ValueError("Job has no immutable worker contract anchor")
+            expected_anchor = self._worker_contract_anchor(state, contract)
+            if anchor != expected_anchor:
+                raise ValueError(
+                    "Worker contract does not match its immutable creation anchor"
+                )
+            return (
+                json.loads(json.dumps(contract, ensure_ascii=False, sort_keys=True)),
+                json.loads(json.dumps(anchor, ensure_ascii=False, sort_keys=True)),
+            )
 
     def _cancel_controlled(self, job_id: str) -> dict[str, Any]:
         if not self.has_controlled_cancel_bridge:

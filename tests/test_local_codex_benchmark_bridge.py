@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from llm_backend_toolkit import cli as cli_module
 from llm_backend_toolkit.acceptance_routes import (
     build_local_codex_benchmark_registry,
 )
@@ -17,6 +18,7 @@ from llm_backend_toolkit.agent_runners import (
 from llm_backend_toolkit.errors import ToolError
 from llm_backend_toolkit.jobs import JobStore
 from llm_backend_toolkit.toolkit import Toolkit
+from llm_backend_toolkit import worker_contract as worker_contract_module
 from llm_backend_toolkit.worker_contract import LocalAsyncWorker, WorkerContractError
 
 
@@ -27,6 +29,11 @@ PARENT_DIGEST = "a50eda8ed977ab48a12431878896b27ffd5cef552c17af3317d9623b939a7f1
 MODEL_LAYER_DIGEST = "83c54730a5fea8a0958598c01617c1419c431e93b33bacf980b49a420c798926"
 PARAMETERS_DIGEST = "b8ed70126e3123aa8f88bbca5dcc0dac4fba772a5c28da9353036ab07c722a73"
 PROFILE_FINGERPRINT = "c60cf0754075f48710dfd8b2bfe64aa9a8a123583ed03112eee7f02640ef1f49"
+ALIAS_35_DIGEST = "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a"
+PARENT_35_DIGEST = "647b6f633c9f89c399b592dcf1dda3c9fc57923b5df647cccc07485a1a49eb0b"
+MODEL_LAYER_35_DIGEST = "f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d"
+PARAMETERS_35_DIGEST = "c4511d09e246bd436f356591e21f39696906f4810e6ce8e7865200d5a27e6c8f"
+PROFILE_35_FINGERPRINT = "0e1982760bbdb1275f1b1afdab63e45acd9a248d02f74730d00e6cdb8bd77e4a"
 AICLI_DIGEST = "53acdd7b6312c52b679810f16c1b3c59c805ae5fea3c9e9be8bd7002ea6412aa"
 RAW_AICLI_ENTRY_DIGEST = "00cf5e0cf8c1ecc6742a8501656efe51d2cf9bfca2d3c222a8b5eb566370249f"
 CHILD_PROCESS_DIGEST = "29d78b7dc86ccb1f4be98c7742cdf3fd14e6eae48631fe2b1aa7d150b697acee"
@@ -313,6 +320,35 @@ def _registry():
     )
 
 
+def _registry_35():
+    source = json.loads(
+        (ROOT / "src" / "llm_backend_toolkit" / "default_backends.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return build_local_codex_benchmark_registry(
+        source,
+        backend_id="cacb-local-35b-formal-v10",
+        provider_model="qwen-main-v1",
+        route_model="qwen-main-v1",
+        profile="codex-ollama-main",
+        provider_id="aicli_ollama_main",
+        wire="responses",
+        context_window_tokens=262144,
+        reserved_output_tokens=8192,
+        model_digest=ALIAS_35_DIGEST,
+        parent_model="qwen3.6:35b",
+        parent_model_digest=PARENT_35_DIGEST,
+        model_layer_digest=MODEL_LAYER_35_DIGEST,
+        parameters_digest=PARAMETERS_35_DIGEST,
+        quantization="Q4_K_M",
+        profile_fingerprint=PROFILE_35_FINGERPRINT,
+        aicli_entry_sha256=AICLI_DIGEST,
+        aicli_version="0.3.3",
+        codex_cli_version="0.147.0",
+    )
+
+
 def _envelope(workspace: Path) -> dict:
     return {
         "schema": "llm-backend-toolkit.local-async-worker-envelope.v1",
@@ -390,6 +426,30 @@ def _envelope(workspace: Path) -> dict:
             "reasoning": {"mode": "on", "effort": "max"},
         },
     }
+
+
+def _envelope_35(workspace: Path) -> dict:
+    envelope = _envelope(workspace)
+    envelope["task_id"] = "cacb-local-35b-formal-v10-run-1"
+    envelope["request"]["backend"] = "cacb-local-35b-formal-v10"
+    envelope["request"]["context"]["target_tokens"] = 253952
+    bindings = envelope["bindings"]
+    bindings.update(
+        {
+            "backend_alias": "cacb-local-35b-formal-v10",
+            "artifact_digest": "sha256:" + ALIAS_35_DIGEST,
+            "parent_model": "qwen3.6:35b",
+            "parent_model_digest": "sha256:" + PARENT_35_DIGEST,
+            "model_layer_digest": "sha256:" + MODEL_LAYER_35_DIGEST,
+            "parameters_digest": "sha256:" + PARAMETERS_35_DIGEST,
+            "profile": "codex-ollama-main",
+            "profile_fingerprint": PROFILE_35_FINGERPRINT,
+            "provider_id": "aicli_ollama_main",
+        }
+    )
+    bindings["broker"]["lease_id"] = "cacb-local-35b-formal-v10-run-1"
+    bindings["context"]["total_tokens"] = 262144
+    return envelope
 
 
 class _CancelBridge:
@@ -998,6 +1058,289 @@ class LocalCodexBenchmarkBridgeTests(unittest.TestCase):
                 with self.assertRaises(WorkerContractError):
                     worker._validate_envelope(invalid)
 
+    def test_start_persists_exact_versioned_registry_source_for_fresh_worker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            workspace = root / "arm"
+            workspace.mkdir()
+            registry = _registry()
+            store = JobStore(
+                root / "jobs",
+                spawner=lambda *_: None,
+                registry=registry,
+                cancel_bridge=_CancelBridge(),
+            )
+            worker = LocalAsyncWorker(store, registry=registry)
+
+            handle = worker.start(_envelope(workspace))
+            persisted = JobStore(root / "jobs").read_worker_contract(
+                handle["job_id"]
+            )
+            _, contract_anchor = JobStore(
+                root / "jobs"
+            ).read_worker_contract_binding(handle["job_id"])
+
+        source = persisted["benchmark_registry_source"]
+        self.assertEqual(
+            "llm-backend-toolkit.local-codex-benchmark-registry-source.v1",
+            source["schema"],
+        )
+        self.assertEqual(
+            "cacb-local-27b-formal-v10", source["backend_id"]
+        )
+        self.assertRegex(source["source_sha256"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(
+            ["cacb-local-27b-formal-v10"],
+            list(source["registry"]["backends"]),
+        )
+        self.assertEqual({}, source["registry"]["aliases"])
+        self.assertEqual(
+            {
+                "schema": source["schema"],
+                "backend_id": source["backend_id"],
+                "source_sha256": source["source_sha256"],
+            },
+            handle["binding_receipt"]["requested"]["registry_source"],
+        )
+        self.assertEqual(
+            handle["binding_receipt"]["registry_source"],
+            handle["worker_contract_anchor"]["registry_source"],
+        )
+
+        rebuilt = worker_contract_module.registry_from_worker_contract(
+            persisted,
+            expected_anchor=contract_anchor,
+        )
+        self.assertIsNotNone(rebuilt)
+        route = rebuilt.resolve("cacb-local-27b-formal-v10")
+        self.assertEqual("benchmark_only", route.config["routing_role"])
+        self.assertEqual(
+            "codex-ollama-review",
+            route.config["agent_routes"]["codex-cli"]["profile"],
+        )
+
+    def test_fresh_cli_worker_rebuilds_the_persisted_benchmark_registry(self):
+        captured = {}
+
+        class _FreshProcessToolkit:
+            def __init__(self, *, registry=None):
+                captured["registry"] = registry
+
+            def invoke(self, request, progress_callback=None):
+                del request, progress_callback
+                return {"status": "ok", "output": "fixture"}
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            workspace = root / "arm"
+            workspace.mkdir()
+            registry = _registry()
+            store = JobStore(
+                root / "jobs",
+                spawner=lambda *_: None,
+                registry=registry,
+                cancel_bridge=_CancelBridge(),
+            )
+            handle = LocalAsyncWorker(store, registry=registry).start(
+                _envelope(workspace)
+            )
+
+            with patch.object(cli_module, "Toolkit", _FreshProcessToolkit):
+                exit_code = cli_module.main(
+                    [
+                        "_worker",
+                        "--job-id",
+                        handle["job_id"],
+                        "--state-dir",
+                        str(root / "jobs"),
+                    ]
+                )
+            completed = JobStore(root / "jobs").get(
+                handle["job_id"], include_result=True
+            )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("completed", completed["job_status"])
+        self.assertEqual("fixture", completed["result"]["output"])
+        self.assertEqual(
+            handle["binding_receipt"]["registry_source"],
+            completed["result"]["execution_receipt"][
+                "local_async_worker_registry_source"
+            ],
+        )
+        rebuilt = captured["registry"]
+        self.assertIsNotNone(rebuilt)
+        resolved = rebuilt.resolve("cacb-local-27b-formal-v10")
+        self.assertEqual("benchmark_only", resolved.config["routing_role"])
+        self.assertEqual(
+            "qwen-review-v1",
+            resolved.config["agent_routes"]["codex-cli"]["model"],
+        )
+
+    def test_35b_formal_max_route_survives_fresh_worker_rebuild(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            workspace = root / "arm"
+            workspace.mkdir()
+            registry = _registry_35()
+            store = JobStore(
+                root / "jobs",
+                spawner=lambda *_: None,
+                registry=registry,
+                cancel_bridge=_CancelBridge(),
+            )
+            handle = LocalAsyncWorker(store, registry=registry).start(
+                _envelope_35(workspace)
+            )
+            persisted = JobStore(root / "jobs").read_worker_contract(
+                handle["job_id"]
+            )
+            _, contract_anchor = JobStore(
+                root / "jobs"
+            ).read_worker_contract_binding(handle["job_id"])
+
+        rebuilt = worker_contract_module.registry_from_worker_contract(
+            persisted,
+            expected_anchor=contract_anchor,
+        )
+        self.assertIsNotNone(rebuilt)
+        route = rebuilt.resolve("cacb-local-35b-formal-v10").config
+        self.assertEqual(262144, route["context_window_tokens"])
+        self.assertEqual(8192, route["reserved_output_tokens"])
+        self.assertEqual(
+            "codex-ollama-main", route["agent_routes"]["codex-cli"]["profile"]
+        )
+        self.assertEqual(
+            "qwen-main-v1", route["agent_routes"]["codex-cli"]["model"]
+        )
+
+    def test_fresh_worker_registry_source_tampering_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            workspace = root / "arm"
+            workspace.mkdir()
+            registry = _registry()
+            store = JobStore(
+                root / "jobs",
+                spawner=lambda *_: None,
+                registry=registry,
+                cancel_bridge=_CancelBridge(),
+            )
+            handle = LocalAsyncWorker(store, registry=registry).start(
+                _envelope(workspace)
+            )
+            persisted = JobStore(root / "jobs").read_worker_contract(
+                handle["job_id"]
+            )
+            _, contract_anchor = JobStore(
+                root / "jobs"
+            ).read_worker_contract_binding(handle["job_id"])
+
+        receipt_tampered = copy.deepcopy(persisted)
+        receipt_tampered["requested"]["registry_source"]["source_sha256"] = (
+            "sha256:" + ("0" * 64)
+        )
+        with self.assertRaises(WorkerContractError):
+            worker_contract_module.registry_from_worker_contract(
+                receipt_tampered,
+                expected_anchor=contract_anchor,
+            )
+
+        route_tampered = copy.deepcopy(persisted)
+        source = route_tampered["benchmark_registry_source"]
+        source["registry"]["backends"][source["backend_id"]][
+            "base_url_default"
+        ] = "https://example.invalid"
+        source["source_sha256"] = worker_contract_module._canonical_digest(
+            {
+                "schema": source["schema"],
+                "backend_id": source["backend_id"],
+                "registry": source["registry"],
+            }
+        )
+        route_tampered["requested"]["registry_source"]["source_sha256"] = source[
+            "source_sha256"
+        ]
+        with self.assertRaises(WorkerContractError):
+            worker_contract_module.registry_from_worker_contract(
+                route_tampered,
+                expected_anchor=contract_anchor,
+            )
+
+    def test_fresh_worker_rejects_co_mutated_registry_source_before_invoke(self):
+        invocations = []
+
+        class _MustNotInvoke:
+            def __init__(self, *, registry=None):
+                del registry
+
+            def invoke(self, request, progress_callback=None):
+                del request, progress_callback
+                invocations.append("invoked")
+                return {"status": "ok", "output": "tampered"}
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            workspace = root / "arm"
+            workspace.mkdir()
+            registry = _registry()
+            store = JobStore(
+                root / "jobs",
+                spawner=lambda *_: None,
+                registry=registry,
+                cancel_bridge=_CancelBridge(),
+            )
+            handle = LocalAsyncWorker(store, registry=registry).start(
+                _envelope(workspace)
+            )
+            state_path = root / "jobs" / handle["job_id"] / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            contract = state["worker_contract"]
+            source = contract["benchmark_registry_source"]
+            route = source["registry"]["backends"][source["backend_id"]][
+                "agent_routes"
+            ]["codex-cli"]
+            route["profile"] = "tampered-profile"
+            contract["requested"]["harness"]["profile"] = "tampered-profile"
+            source["source_sha256"] = worker_contract_module._canonical_digest(
+                {
+                    "schema": source["schema"],
+                    "backend_id": source["backend_id"],
+                    "registry": source["registry"],
+                }
+            )
+            contract["requested"]["registry_source"]["source_sha256"] = source[
+                "source_sha256"
+            ]
+            with self.assertRaises(ValueError):
+                store.record_worker_contract(handle["job_id"], contract)
+            state_path.write_text(
+                json.dumps(state, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            with patch.object(cli_module, "Toolkit", _MustNotInvoke):
+                exit_code = cli_module.main(
+                    [
+                        "_worker",
+                        "--job-id",
+                        handle["job_id"],
+                        "--state-dir",
+                        str(root / "jobs"),
+                    ]
+                )
+            terminal = JobStore(root / "jobs").get(
+                handle["job_id"], include_result=True
+            )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual([], invocations)
+        self.assertEqual("completed", terminal["job_status"])
+        self.assertEqual("failed", terminal["result_status"])
+        self.assertEqual(
+            "worker_failed", terminal["result"]["error"]["category"]
+        )
+
     def test_benchmark_route_fails_closed_before_runner_when_provider_evidence_is_unknown(self):
         with tempfile.TemporaryDirectory() as temp:
             workspace = Path(temp).resolve()
@@ -1033,6 +1376,9 @@ class LocalCodexBenchmarkBridgeTests(unittest.TestCase):
             worker = LocalAsyncWorker(store, registry=registry)
             result = toolkit.invoke(worker._validate_envelope(envelope).request)
             handle = worker.start(envelope)
+            result["execution_receipt"][
+                "local_async_worker_registry_source"
+            ] = handle["binding_receipt"]["registry_source"]
             store.complete(handle["job_id"], result)
             terminal = worker.result(handle)
 
@@ -1089,12 +1435,19 @@ class LocalCodexBenchmarkBridgeTests(unittest.TestCase):
             self.assertEqual(2, provider.status_calls)
 
             handle = worker.start(envelope)
+            result["execution_receipt"][
+                "local_async_worker_registry_source"
+            ] = handle["binding_receipt"]["registry_source"]
             store.complete(handle["job_id"], result)
             completed = worker.result(handle)
 
         self.assertEqual("ok", completed["status"])
         observed = completed["binding_receipt"]["observed"]
         self.assertEqual("verified", completed["binding_receipt"]["verification"]["status"])
+        self.assertEqual(
+            completed["binding_receipt"]["registry_source"],
+            observed["registry_source"],
+        )
         self.assertEqual("exact_observed", observed["context"]["status"])
         self.assertEqual(131072, observed["context"]["runtime_proof"]["total_tokens"])
         self.assertEqual(8192, observed["context"]["runtime_proof"]["reserved_output_tokens"])
@@ -1125,6 +1478,41 @@ class LocalCodexBenchmarkBridgeTests(unittest.TestCase):
         self.assertEqual("aicli_ollama_review", observed["harness"]["provider_id"])
         self.assertEqual("responses", observed["harness"]["wire"])
         self.assertFalse(observed["fallback_used"])
+
+    def test_terminal_binding_cannot_verify_without_registry_source_receipt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            workspace = root / "arm"
+            workspace.mkdir()
+            registry = _registry()
+            toolkit = Toolkit(
+                registry=registry,
+                providers={"cacb-local-27b-formal-v10": _Provider()},
+                runners={"codex-cli": _Runner()},
+            )
+            envelope = _envelope(workspace)
+            store = JobStore(
+                root / "jobs",
+                spawner=lambda *_: None,
+                registry=registry,
+                cancel_bridge=_CancelBridge(),
+            )
+            worker = LocalAsyncWorker(store, registry=registry)
+            result = toolkit.invoke(worker._validate_envelope(envelope).request)
+            handle = worker.start(envelope)
+            store.complete(handle["job_id"], result)
+
+            terminal = worker.result(handle)
+
+        self.assertEqual("blocked", terminal["status"])
+        receipt = terminal["binding_receipt"]
+        self.assertEqual("failed_closed", receipt["verification"]["status"])
+        self.assertIn("registry_source", receipt["verification"]["failures"])
+        self.assertEqual({}, receipt["observed"]["registry_source"])
+        self.assertRegex(
+            receipt["registry_source"]["source_sha256"],
+            r"^sha256:[0-9a-f]{64}$",
+        )
 
 
 if __name__ == "__main__":

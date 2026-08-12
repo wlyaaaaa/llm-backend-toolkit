@@ -10,6 +10,7 @@ from .input_integrity import InputIntegrityError
 from .jobs import JobNotRunnableError, JobStore
 from .observer import ensure_observer, run_observer
 from .toolkit import Toolkit
+from .worker_contract import registry_from_worker_contract
 
 
 def _read_request(path_value: str) -> dict[str, Any]:
@@ -172,6 +173,21 @@ def main(argv: list[str] | None = None) -> int:
             progress = None
             try:
                 request = store.claim(args.job_id)
+                registry_source = None
+                try:
+                    worker_contract = store.read_worker_contract(args.job_id)
+                except ValueError:
+                    worker_registry = None
+                else:
+                    worker_contract, contract_anchor = (
+                        store.read_worker_contract_binding(args.job_id)
+                    )
+                    worker_registry = registry_from_worker_contract(
+                        worker_contract,
+                        expected_anchor=contract_anchor,
+                    )
+                    if worker_registry is not None:
+                        registry_source = contract_anchor["registry_source"]
                 if not store.begin_execution(args.job_id):
                     return 0
                 expected = ((request.get("task") or {}).get("expected_output") or {})
@@ -181,7 +197,27 @@ def main(argv: list[str] | None = None) -> int:
                     allow_public_preview=output_format in {"", "text", "plain", "markdown", "md"},
                 )
                 progress({"phase": "accepted"})
-                result = Toolkit().invoke(request, progress_callback=progress)
+                result = Toolkit(registry=worker_registry).invoke(
+                    request,
+                    progress_callback=progress,
+                )
+                if registry_source is not None:
+                    if not isinstance(result, dict):
+                        raise ValueError(
+                            "Benchmark worker result must be an object"
+                        )
+                    execution_receipt = result.get("execution_receipt")
+                    if execution_receipt is None:
+                        execution_receipt = {}
+                    if not isinstance(execution_receipt, dict):
+                        raise ValueError(
+                            "Benchmark worker execution receipt must be an object"
+                        )
+                    result = dict(result)
+                    result["execution_receipt"] = {
+                        **execution_receipt,
+                        "local_async_worker_registry_source": registry_source,
+                    }
                 store.complete(args.job_id, result)
             except (InputIntegrityError, JobNotRunnableError):
                 return 0

@@ -15,8 +15,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .backends import BackendRegistry
-from .jobs import CONTROLLED_CANCEL_SCHEMA, JobStore
+from .backends import REGISTRY_SCHEMA, BackendRegistry
+from .jobs import (
+    CONTROLLED_CANCEL_SCHEMA,
+    WORKER_CONTRACT_ANCHOR_SCHEMA,
+    JobStore,
+)
 from .workspace_observer import (
     WorkspaceRootError,
     is_safe_workspace_relative_path,
@@ -37,6 +41,9 @@ LOCAL_ASYNC_WORKER_BINDING_RECEIPT_SCHEMA = (
     "llm-backend-toolkit.local-async-worker-binding-receipt.v1"
 )
 LOCAL_ASYNC_WORKER_CONTRACT_SCHEMA = "llm-backend-toolkit.local-async-worker-contract.v1"
+LOCAL_CODEX_BENCHMARK_REGISTRY_SOURCE_SCHEMA = (
+    "llm-backend-toolkit.local-codex-benchmark-registry-source.v1"
+)
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})
@@ -52,6 +59,7 @@ class _ValidatedEnvelope:
     request: dict[str, Any]
     requested_binding: dict[str, Any]
     controlled_cancel: dict[str, Any]
+    benchmark_registry_source: dict[str, Any] | None
 
 
 def _canonical_digest(value: Any) -> str:
@@ -66,6 +74,276 @@ def _canonical_digest(value: Any) -> str:
 
 def _copy_json(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, sort_keys=True))
+
+
+def _validate_worker_contract_anchor(
+    contract: dict[str, Any],
+    expected_anchor: dict[str, Any],
+) -> None:
+    if not isinstance(expected_anchor, dict):
+        raise WorkerContractError("worker contract anchor must be an object")
+    expected_fields = {
+        "schema",
+        "job_id",
+        "job_request_sha256",
+        "requested_binding_sha256",
+        "registry_source",
+        "anchor_sha256",
+    }
+    if set(expected_anchor) != expected_fields:
+        raise WorkerContractError("worker contract anchor fields are not closed")
+    if expected_anchor.get("schema") != WORKER_CONTRACT_ANCHOR_SCHEMA:
+        raise WorkerContractError("worker contract anchor schema is unsupported")
+    anchor_scope = {
+        field: expected_anchor[field]
+        for field in expected_fields
+        if field != "anchor_sha256"
+    }
+    if (
+        _require_sha256(
+            expected_anchor.get("anchor_sha256"),
+            "worker_contract_anchor.anchor_sha256",
+        )
+        != _canonical_digest(anchor_scope)
+    ):
+        raise WorkerContractError("worker contract anchor digest is mismatched")
+
+    requested = _require_object(contract.get("requested"), "contract.requested")
+    task = _require_object(requested.get("task"), "contract.requested.task")
+    if expected_anchor.get("job_request_sha256") != task.get("request_sha256"):
+        raise WorkerContractError("worker contract anchor does not match the job request")
+    if expected_anchor.get("requested_binding_sha256") != _canonical_digest(requested):
+        raise WorkerContractError(
+            "worker contract requested binding changed after handle creation"
+        )
+
+    if requested.get("binding_kind") == "local_codex_benchmark":
+        source = _require_object(
+            contract.get("benchmark_registry_source"),
+            "contract.benchmark_registry_source",
+        )
+        source_receipt = {
+            "schema": source.get("schema"),
+            "backend_id": source.get("backend_id"),
+            "source_sha256": source.get("source_sha256"),
+        }
+        if expected_anchor.get("registry_source") != source_receipt:
+            raise WorkerContractError(
+                "benchmark registry source changed after handle creation"
+            )
+        if requested.get("registry_source") != source_receipt:
+            raise WorkerContractError(
+                "benchmark registry source does not match its requested binding"
+            )
+    elif expected_anchor.get("registry_source") is not None:
+        raise WorkerContractError(
+            "non-benchmark worker anchor contains a registry source"
+        )
+
+
+def _benchmark_registry_source(
+    registry: BackendRegistry,
+    backend_id: str,
+) -> dict[str, Any]:
+    """Freeze one exact benchmark-only route for a fresh worker process."""
+
+    resolved = registry.resolve(backend_id)
+    registry_payload = {
+        "schema": REGISTRY_SCHEMA,
+        "default_backend": backend_id,
+        "aliases": {},
+        "backends": {backend_id: _copy_json(resolved.config)},
+    }
+    scope = {
+        "schema": LOCAL_CODEX_BENCHMARK_REGISTRY_SOURCE_SCHEMA,
+        "backend_id": backend_id,
+        "registry": registry_payload,
+    }
+    return {**scope, "source_sha256": _canonical_digest(scope)}
+
+
+def registry_from_worker_contract(
+    contract: dict[str, Any],
+    *,
+    expected_anchor: dict[str, Any] | None = None,
+) -> BackendRegistry | None:
+    """Rebuild one persisted benchmark route for the fresh worker process.
+
+    Ordinary jobs and the legacy local-default worker continue to use the live
+    registry.  A benchmark contract is accepted only when its single-route
+    source, digest, loopback endpoint, no-fallback shape, and requested binding
+    all agree.
+    """
+
+    if not isinstance(contract, dict):
+        raise WorkerContractError("worker contract must be an object")
+    if contract.get("schema") != LOCAL_ASYNC_WORKER_CONTRACT_SCHEMA:
+        raise WorkerContractError("worker contract schema is unsupported")
+    requested = _require_object(contract.get("requested"), "contract.requested")
+    if expected_anchor is not None:
+        _validate_worker_contract_anchor(contract, expected_anchor)
+    if requested.get("binding_kind") != "local_codex_benchmark":
+        return None
+    if expected_anchor is None:
+        raise WorkerContractError(
+            "benchmark worker contract requires its immutable creation anchor"
+        )
+    source = _require_object(
+        contract.get("benchmark_registry_source"),
+        "contract.benchmark_registry_source",
+    )
+    if set(source) != {"schema", "backend_id", "registry", "source_sha256"}:
+        raise WorkerContractError("benchmark registry source fields are not closed")
+    if source.get("schema") != LOCAL_CODEX_BENCHMARK_REGISTRY_SOURCE_SCHEMA:
+        raise WorkerContractError("benchmark registry source schema is unsupported")
+    source_scope = {
+        "schema": source["schema"],
+        "backend_id": source.get("backend_id"),
+        "registry": source.get("registry"),
+    }
+    source_sha256 = _require_sha256(
+        source.get("source_sha256"),
+        "contract.benchmark_registry_source.source_sha256",
+    )
+    if source_sha256 != _canonical_digest(source_scope):
+        raise WorkerContractError("benchmark registry source digest is mismatched")
+    requested_source = _require_object(
+        requested.get("registry_source"), "contract.requested.registry_source"
+    )
+    expected_source_receipt = {
+        "schema": source["schema"],
+        "backend_id": source.get("backend_id"),
+        "source_sha256": source_sha256,
+    }
+    if (
+        set(requested_source) != set(expected_source_receipt)
+        or requested_source != expected_source_receipt
+    ):
+        raise WorkerContractError(
+            "benchmark registry source does not match the requested receipt"
+        )
+
+    backend_id = _require_string(source.get("backend_id"), "registry_source.backend_id")
+    requested_backend = _require_object(
+        requested.get("backend"), "contract.requested.backend"
+    )
+    requested_harness = _require_object(
+        requested.get("harness"), "contract.requested.harness"
+    )
+    requested_context = _require_object(
+        requested.get("context"), "contract.requested.context"
+    )
+    if backend_id != requested_backend.get("alias"):
+        raise WorkerContractError("benchmark registry backend does not match the request")
+
+    registry_payload = _require_object(source.get("registry"), "registry_source.registry")
+    if (
+        set(registry_payload) != {"schema", "default_backend", "aliases", "backends"}
+        or registry_payload.get("schema") != REGISTRY_SCHEMA
+        or registry_payload.get("default_backend") != backend_id
+        or registry_payload.get("aliases") != {}
+        or not isinstance(registry_payload.get("backends"), dict)
+        or set(registry_payload["backends"]) != {backend_id}
+    ):
+        raise WorkerContractError("benchmark registry must contain one exact no-alias route")
+    try:
+        registry = BackendRegistry.from_dict(
+            _copy_json(registry_payload),
+            source=f"worker-contract:{source_sha256}",
+        )
+    except ValueError as exc:
+        raise WorkerContractError("benchmark registry source is invalid") from exc
+    config = registry.resolve(backend_id).config
+    expected_config_fields = {
+        "adapter",
+        "model",
+        "cloud",
+        "supports_vision",
+        "context_window_tokens",
+        "reserved_output_tokens",
+        "routing_role",
+        "default_reasoning_mode",
+        "ollama_options",
+        "base_url_default",
+        "data_destination",
+        "agent_routes",
+    }
+    if set(config) != expected_config_fields:
+        raise WorkerContractError("benchmark registry backend fields are not closed")
+    routes = config.get("agent_routes")
+    route = routes.get("codex-cli") if isinstance(routes, dict) else None
+    if not isinstance(route, dict) or set(routes) != {"codex-cli"}:
+        raise WorkerContractError("benchmark registry lacks its single Codex route")
+    evidence = route.get("evidence")
+    if not isinstance(evidence, dict):
+        raise WorkerContractError("benchmark Codex route lacks exact evidence")
+
+    def unprefixed(value: Any) -> str:
+        return _require_sha256(value, "requested digest").removeprefix("sha256:")
+
+    expected_evidence = {
+        "basis": "benchmark_only",
+        "live_verified": True,
+        "model_digest": unprefixed(requested_backend.get("artifact_digest")),
+        "alias_manifest_digest": unprefixed(
+            requested_backend.get("alias_manifest_digest")
+        ),
+        "parent_model": requested_backend.get("parent_model"),
+        "context_window_tokens": requested_context.get("total_tokens"),
+        "reserved_output_tokens": requested_context.get("reserved_output_tokens"),
+        "wire": requested_harness.get("wire"),
+        "provider_id": requested_harness.get("provider_id"),
+        "parent_model_digest": unprefixed(
+            requested_backend.get("parent_model_digest")
+        ),
+        "model_layer_digest": unprefixed(
+            requested_backend.get("model_layer_digest")
+        ),
+        "parameters_digest": unprefixed(
+            requested_backend.get("parameters_digest")
+        ),
+        "quantization": requested_backend.get("quantization"),
+        "profile_fingerprint": requested_harness.get("profile_fingerprint"),
+        "aicli_entry_sha256": unprefixed(
+            requested_harness.get("aicli_entry_sha256")
+        ),
+        "aicli_version": requested_harness.get("aicli_version"),
+        "codex_cli_version": requested_harness.get("codex_cli_version"),
+    }
+    expected_options = {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "repeat_penalty": 1.0,
+        "num_ctx": requested_context.get("total_tokens"),
+        "num_predict": requested_context.get("reserved_output_tokens"),
+    }
+    if (
+        config.get("adapter") != "ollama"
+        or config.get("model") != requested_backend.get("provider_model")
+        or config.get("cloud") is not False
+        or config.get("supports_vision") is not False
+        or config.get("context_window_tokens") != requested_context.get("total_tokens")
+        or config.get("reserved_output_tokens")
+        != requested_context.get("reserved_output_tokens")
+        or config.get("routing_role") != "benchmark_only"
+        or config.get("default_reasoning_mode") != "on"
+        or config.get("ollama_options") != expected_options
+        or config.get("base_url_default") != "http://127.0.0.1:32100"
+        or config.get("data_destination")
+        != "LocalGpuBroker benchmark-only loopback endpoint"
+        or set(route) != {"runner", "profile", "model", "reasoning_effort", "evidence"}
+        or route.get("runner") != "codex-cli"
+        or route.get("profile") != requested_harness.get("profile")
+        or route.get("model") != requested_backend.get("model")
+        or route.get("reasoning_effort") != "max"
+        or evidence != expected_evidence
+        or requested.get("fallback_used") is not False
+    ):
+        raise WorkerContractError("benchmark registry source drifted from its binding")
+    return registry
 
 
 def _require_object(value: Any, field: str) -> dict[str, Any]:
@@ -146,10 +424,21 @@ class LocalAsyncWorker:
                 ],
             },
             "routing_status": "configured_unverified",
+            **(
+                {
+                    "benchmark_registry_source": validated.benchmark_registry_source,
+                }
+                if validated.benchmark_registry_source is not None
+                else {}
+            ),
         }
 
+        contract_anchor: dict[str, Any] = {}
+
         def before_spawn(job_id: str) -> None:
-            self.store.record_worker_contract(job_id, contract)
+            contract_anchor.update(
+                self.store.record_worker_contract(job_id, contract)
+            )
             self.store.arm_controlled_cancel(job_id, validated.controlled_cancel)
 
         submission = self.store.submit(
@@ -157,7 +446,7 @@ class LocalAsyncWorker:
             force=True,
             before_spawn=before_spawn,
         )
-        return self._handle_from_submission(submission, contract)
+        return self._handle_from_submission(submission, contract, contract_anchor)
 
     def wait(self, handle: dict[str, Any], deadline: str) -> dict[str, Any]:
         """Perform exactly one status read once the caller's deadline is due."""
@@ -253,6 +542,12 @@ class LocalAsyncWorker:
                 "status": "cancelled_before_result",
                 "cleanup": dict(cleanup),
                 "executor": {"kind": "local_async_job", "native_subagent": False},
+                **(
+                    {"registry_source": _copy_json(contract["requested"]["registry_source"])}
+                    if contract["requested"].get("binding_kind")
+                    == "local_codex_benchmark"
+                    else {}
+                ),
             }
             updated = self._update_contract(
                 handle["job_id"],
@@ -290,13 +585,32 @@ class LocalAsyncWorker:
             observed = self._benchmark_observed_binding(
                 contract["requested"],
                 execution_receipt.get("local_codex_benchmark_observation"),
+                execution_receipt.get("local_async_worker_registry_source"),
             )
         failures = self._verify_observed_binding(contract["requested"], observed)
         if failures:
             updated = self._update_contract(
                 handle["job_id"],
                 contract,
-                observed={"status": "incomplete", "missing_or_mismatched": failures},
+                observed={
+                    "status": "incomplete",
+                    "missing_or_mismatched": failures,
+                    **(
+                        {
+                            "registry_source": _copy_json(
+                                observed.get("registry_source")
+                                if isinstance(observed, dict)
+                                and isinstance(
+                                    observed.get("registry_source"), dict
+                                )
+                                else {}
+                            )
+                        }
+                        if contract["requested"].get("binding_kind")
+                        == "local_codex_benchmark"
+                        else {}
+                    ),
+                },
                 verification={"status": "failed_closed", "failures": failures},
                 routing_status="not_ready",
             )
@@ -744,6 +1058,11 @@ class LocalAsyncWorker:
             "workspace_sha256": _canonical_digest(workspace_binding),
             "request_sha256": _canonical_digest(request),
         }
+        benchmark_registry_source = (
+            _benchmark_registry_source(self.registry, backend_alias)
+            if benchmark_route
+            else None
+        )
         requested_binding = {
             "schema": LOCAL_ASYNC_WORKER_REQUESTED_BINDING_SCHEMA,
             "binding_kind": (
@@ -814,6 +1133,17 @@ class LocalAsyncWorker:
             **({"workspace": workspace_binding} if benchmark_route else {}),
             **(
                 {
+                    "registry_source": {
+                        "schema": benchmark_registry_source["schema"],
+                        "backend_id": benchmark_registry_source["backend_id"],
+                        "source_sha256": benchmark_registry_source["source_sha256"],
+                    }
+                }
+                if benchmark_registry_source is not None
+                else {}
+            ),
+            **(
+                {
                     "network": {
                         "policy": "forbidden",
                         "search": "disabled",
@@ -840,12 +1170,14 @@ class LocalAsyncWorker:
             request=request,
             requested_binding=requested_binding,
             controlled_cancel=controlled_cancel,
+            benchmark_registry_source=benchmark_registry_source,
         )
 
     def _handle_from_submission(
         self,
         submission: dict[str, Any],
         contract: dict[str, Any],
+        contract_anchor: dict[str, Any],
     ) -> dict[str, Any]:
         return {
             "schema": LOCAL_ASYNC_WORKER_HANDLE_SCHEMA,
@@ -856,6 +1188,7 @@ class LocalAsyncWorker:
             "recommended_check_utc": submission["recommended_check_utc"],
             "monitor_until_utc": submission["monitor_until_utc"],
             "routing_status": "configured_unverified",
+            "worker_contract_anchor": _copy_json(contract_anchor),
             "binding_receipt": self._binding_receipt(contract),
         }
 
@@ -866,9 +1199,28 @@ class LocalAsyncWorker:
         executor = _require_object(handle.get("executor"), "handle.executor")
         if executor != {"kind": "local_async_job", "native_subagent": False}:
             raise WorkerContractError("handle does not identify a local_async_job")
-        contract = self.store.read_worker_contract(job_id)
+        try:
+            contract, durable_anchor = self.store.read_worker_contract_binding(job_id)
+        except ValueError as exc:
+            raise WorkerContractError(
+                "durable local worker contract lost its creation binding"
+            ) from exc
         if contract.get("schema") != LOCAL_ASYNC_WORKER_CONTRACT_SCHEMA:
             raise WorkerContractError("durable local worker contract is incompatible")
+        handle_anchor = _require_object(
+            handle.get("worker_contract_anchor"),
+            "handle.worker_contract_anchor",
+        )
+        if handle_anchor != durable_anchor:
+            raise WorkerContractError(
+                "handle worker contract anchor does not match the durable job"
+            )
+        _validate_worker_contract_anchor(contract, durable_anchor)
+        if contract.get("requested", {}).get("binding_kind") == "local_codex_benchmark":
+            registry_from_worker_contract(
+                contract,
+                expected_anchor=durable_anchor,
+            )
         handle_receipt = _require_object(handle.get("binding_receipt"), "handle.binding_receipt")
         if handle_receipt.get("requested") != contract.get("requested"):
             raise WorkerContractError("handle requested binding does not match the durable job")
@@ -892,13 +1244,18 @@ class LocalAsyncWorker:
 
     @staticmethod
     def _binding_receipt(contract: dict[str, Any]) -> dict[str, Any]:
-        return {
+        receipt = {
             "schema": LOCAL_ASYNC_WORKER_BINDING_RECEIPT_SCHEMA,
             "requested": _copy_json(contract["requested"]),
             "observed": _copy_json(contract["observed"]),
             "verification": _copy_json(contract["verification"]),
             "routing_status": str(contract.get("routing_status") or "not_ready"),
         }
+        if contract["requested"].get("binding_kind") == "local_codex_benchmark":
+            receipt["registry_source"] = _copy_json(
+                contract["requested"].get("registry_source") or {}
+            )
+        return receipt
 
     @staticmethod
     def _state_name(state: dict[str, Any]) -> str:
@@ -957,6 +1314,7 @@ class LocalAsyncWorker:
     def _benchmark_observed_binding(
         requested: dict[str, Any],
         observation: Any,
+        registry_source: Any,
     ) -> dict[str, Any] | None:
         if not isinstance(observation, dict):
             return None
@@ -1068,6 +1426,9 @@ class LocalAsyncWorker:
                 "wire": str(evidence.get("wire") or ""),
                 "event_protocol": str(expected_harness.get("event_protocol") or ""),
             },
+            "registry_source": _copy_json(
+                registry_source if isinstance(registry_source, dict) else {}
+            ),
             "runtime_identity": _copy_json(runtime_identity),
             "network": _copy_json(network_proof),
             "budget_mode": str(observation.get("budget_mode") or ""),
@@ -1210,6 +1571,23 @@ class LocalAsyncWorker:
             if common_proof_invalid or benchmark_proof_invalid or legacy_proof_invalid:
                 failures.append("runtime_context_proof")
         if benchmark:
+            requested_source = requested.get("registry_source")
+            observed_source = observed.get("registry_source")
+            valid_source = bool(
+                isinstance(requested_source, dict)
+                and set(requested_source)
+                == {"schema", "backend_id", "source_sha256"}
+                and requested_source.get("schema")
+                == LOCAL_CODEX_BENCHMARK_REGISTRY_SOURCE_SCHEMA
+                and requested_source.get("backend_id")
+                == requested.get("backend", {}).get("alias")
+                and _SHA256.fullmatch(
+                    str(requested_source.get("source_sha256") or "")
+                )
+                and observed_source == requested_source
+            )
+            if not valid_source:
+                failures.append("registry_source")
             network = observed.get("network")
             requested_network = requested.get("network")
             runtime_identity = observed.get("runtime_identity")
