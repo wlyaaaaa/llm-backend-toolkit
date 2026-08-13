@@ -1425,6 +1425,42 @@ function groupWorkRecords(events) {
   return groups;
 }
 
+function coalesceWorkRecordEvents(events) {
+  const items = [];
+  const keyedIndexes = new Map();
+  const terminalStatuses = new Set([
+    "completed",
+    "succeeded",
+    "failed",
+    "declined",
+    "cancelled",
+    "timed_out",
+  ]);
+  for (const event of events) {
+    const hasOrdinal = Number.isFinite(event.workOrdinal) && event.workOrdinal > 0;
+    if (!hasOrdinal || !event.workType) {
+      items.push(event);
+      continue;
+    }
+    const key = `${event.workType}:${event.workOrdinal}`;
+    const existingIndex = keyedIndexes.get(key);
+    if (existingIndex === undefined) {
+      keyedIndexes.set(key, items.length);
+      items.push(event);
+      continue;
+    }
+    const existing = items[existingIndex];
+    if (
+      terminalStatuses.has(existing.workStatus) &&
+      !terminalStatuses.has(event.workStatus)
+    ) {
+      continue;
+    }
+    items[existingIndex] = event;
+  }
+  return items;
+}
+
 function appendWorkRecordItem(record, event) {
   const item = createElement("li", "work-record-item");
   item.dataset.tone = normalizedTone(event.tone);
@@ -1507,6 +1543,7 @@ function renderWorkRecords(events) {
       continue;
     }
     if (group.type === "work") {
+      const workItems = coalesceWorkRecordEvents(group.events);
       const record = createElement("section", "work-record");
       record.title = "仅展示安全状态、摘要和结果，不展示命令正文。";
       const header = createElement("div", "work-record-header");
@@ -1517,18 +1554,18 @@ function renderWorkRecords(events) {
       );
       header.append(
         heading,
-        createElement("span", "quiet-label", `${formatNumber(group.events.length)} 条事件`),
+        createElement("span", "quiet-label", `${formatNumber(workItems.length)} 项工作`),
       );
       record.append(header);
       record.append(
         createElement(
           "p",
           "work-record-summary",
-          summarizeWorkRecord(group.events),
+          summarizeWorkRecord(workItems),
         ),
       );
       const list = createElement("ol", "work-record-list");
-      for (const event of group.events) {
+      for (const event of workItems) {
         appendWorkRecordItem(list, event);
       }
       record.append(list);
@@ -2059,7 +2096,10 @@ elements.inspectorToggle.addEventListener("click", () =>
   setInspectorOpen(document.body.dataset.inspectorOpen !== "true"),
 );
 elements.inspectorCloseButton.addEventListener("click", () => setInspectorOpen(false));
-elements.conversationNewEvents.addEventListener("click", () => {
+elements.conversationNewEvents.addEventListener("click", async () => {
+  if (state.timelineBrowsingEarlier) {
+    await returnToLatestEvents();
+  }
   returnConversationToLatest({ behavior: "smooth" });
   state.conversationPendingCount = 0;
   elements.conversationNewEvents.hidden = true;

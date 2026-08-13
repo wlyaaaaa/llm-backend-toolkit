@@ -47,7 +47,7 @@ class ObserverUiTests(unittest.TestCase):
             parser.stylesheets,
         )
         self.assertEqual(
-            ["/assets/app.js?v=20260813-observer-remote-3"],
+            ["/assets/app.js?v=20260813-observer-remote-4"],
             parser.scripts,
         )
         self.assertIn('href="/assets/favicon.svg"', self.html)
@@ -93,7 +93,7 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("function renderConversation(detail)", self.js)
         self.assertIn("function groupWorkRecords(events)", self.js)
         self.assertIn('createElement("h3", "", "工作记录")', self.js)
-        self.assertIn("summarizeWorkRecord(group.events)", self.js)
+        self.assertIn("summarizeWorkRecord(workItems)", self.js)
         self.assertIn("运行 ${formatNumber(commandCount)} 个命令", self.js)
         self.assertIn("编辑 ${formatNumber(fileEditCount)} 个文件", self.js)
         self.assertIn("检测到 ${formatNumber(observedFileCount)} 个文件变化", self.js)
@@ -104,6 +104,8 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("新增 ${formatNumber(laterCount)} 条", self.js)
         self.assertIn("function conversationScrollContainer", self.js)
         self.assertIn("function returnConversationToLatest", self.js)
+        self.assertIn("if (state.timelineBrowsingEarlier)", self.js)
+        self.assertIn("await returnToLatestEvents()", self.js)
         self.assertIn("elements.conversationPane.addEventListener(\"scroll\"", self.js)
         self.assertIn('document.body.dataset.mobileView = "conversation"', self.js)
         self.assertIn('document.body.dataset.mobileView = "list"', self.js)
@@ -349,6 +351,20 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("不展示命令正文", self.js)
         self.assertIn("context-compaction-divider", self.js)
         self.assertIn("conversationWorkRecords.replaceChildren(fragment)", self.js)
+
+    def test_command_start_and_finish_render_as_one_work_item(self) -> None:
+        coalescing = self.js.split(
+            "function coalesceWorkRecordEvents(events)", 1
+        )[1].split("function appendWorkRecordItem", 1)[0]
+        rendering = self.js.split("function renderWorkRecords(events)", 1)[1].split(
+            "function renderConversation", 1
+        )[0]
+        self.assertIn("`${event.workType}:${event.workOrdinal}`", coalescing)
+        self.assertIn("terminalStatuses.has(existing.workStatus)", coalescing)
+        self.assertIn("items[existingIndex] = event", coalescing)
+        self.assertIn("const workItems = coalesceWorkRecordEvents(group.events)", rendering)
+        self.assertIn("summarizeWorkRecord(workItems)", rendering)
+        self.assertIn("for (const event of workItems)", rendering)
 
     def test_layout_handles_edge_app_window_and_long_content(self) -> None:
         self.assertIn("#17e04b", self.css.lower())
