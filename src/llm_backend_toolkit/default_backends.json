@@ -20,6 +20,18 @@
         "implicit_selection": false,
         "fallback_eligible": false,
         "receipt_required": true
+      },
+      "codex-qwen3-8-max-paygo": {
+        "backend_id": "cloud-qwen3-8-max-agent",
+        "model": "qwen3.8-max",
+        "transport": "responses",
+        "runner": "codex-cli",
+        "state": "unverified",
+        "selectable": false,
+        "implicit_selection": false,
+        "fallback_eligible": false,
+        "receipt_required": true,
+        "reason": "profile_missing_from_current_aicli_catalog"
       }
     }
   },
@@ -28,7 +40,6 @@
     "qwen-main-v1": "local-default",
     "qwen-review-v1": "local-crosscheck-27b",
     "qwen3.7-flash": "cloud-qwen-flash",
-    "qwen3.8-max": "cloud-qwen3-8-max-agent",
     "deepseek-v4-flash": "cloud-deepseek-v4-flash",
     "gpt-5.3-codex-spark": "fast-middle-agent"
   },
@@ -214,38 +225,6 @@
             "live_verified": true,
             "capability_acceptance": "failed_max_steps_80",
             "capability_score": "2/9"
-          }
-        }
-      }
-    },
-    "cloud-qwen3-8-max-agent": {
-      "adapter": "agent-only",
-      "model": "qwen3.8-max",
-      "cloud": true,
-      "supports_vision": true,
-      "context_window_tokens": 983616,
-      "routing_role": "high_capability_external_worker",
-      "data_destination": "Alibaba Cloud Model Studio Beijing Workspace via AICLI Responses",
-      "agent_routes": {
-        "codex-cli": {
-          "runner": "codex-cli",
-          "profile": "codex-qwen3-8-max-paygo",
-          "model": "qwen3.8-max",
-          "reasoning_effort": "max",
-          "evidence": {
-            "basis": "aicli_qwen38_full_access_task_live_2026-08-08",
-            "live_verified": true,
-            "evidence_state": "historical",
-            "receipt_schema": "aicli.agent.acceptance-receipt.v1",
-            "receipt_authority": "aicli",
-            "capability_acceptance_state": "historical_nontrivial_agent",
-            "stability_evidence": "not_required",
-            "stress_evidence": "not_required",
-            "standard_receipt_refresh": "pending",
-            "profile_fingerprint": "27707c249a471a662c894dc764d37dd42a00dd4216ff3a8db2839c7892534ea0",
-        "capability_acceptance": "passed_nontrivial_full_access",
-        "workspace_write_acceptance": "upstream_codex_0.146_windows_blocked",
-        "protocol": "responses"
           }
         }
       }

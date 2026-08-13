@@ -32,6 +32,7 @@ Evidence states remain separate:
 
 The reserved `codex-qwen3-7-plus-paygo` route is exact `qwen3.7-plus` and
 Responses/Workspace only; it remains unverified and non-selectable until its
-own receipt exists. Receipts for Max or Flash cannot be borrowed. Local and
-Qwen3.8 evidence stay bound to their own model, provider, endpoint, runner,
-Profile, and digest/fingerprint.
+own receipt exists. The withdrawn `codex-qwen3-8-max-paygo` binding is also
+reserved-only because that exact Profile is absent from the current AICLI
+catalog. Receipts for Max, Plus, or Flash cannot be borrowed; neither reserved
+entry is an executable Toolkit backend.

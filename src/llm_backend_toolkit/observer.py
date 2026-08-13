@@ -31,6 +31,8 @@ from .workspace_observer import (
 
 OBSERVER_HEALTH_SCHEMA = "llm-backend-toolkit.observer-health.v1"
 OBSERVER_LIST_SCHEMA = "llm-backend-toolkit.observer-runs.v1"
+OBSERVER_CONVERSATION_LIST_SCHEMA = "llm-backend-toolkit.observer-conversations.v1"
+OBSERVER_CONVERSATION_SCHEMA = "llm-backend-toolkit.observer-conversation.v1"
 OBSERVER_RUNTIME_SCHEMA = "llm-backend-toolkit.observer-runtime.v1"
 OBSERVER_MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 OBSERVER_MAX_RESULT_BYTES = 2 * 1024 * 1024
@@ -93,6 +95,43 @@ _USAGE_NUMBER_FIELDS = frozenset(
         "context_window_tokens",
     }
 )
+
+
+def _is_observer_job_id(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 24
+        and all(char in "0123456789abcdef" for char in value)
+    )
+
+
+def _conversation_root_id(state: dict[str, Any], fallback: str) -> str:
+    candidate = state.get("conversation_root")
+    return candidate if _is_observer_job_id(candidate) else fallback
+
+
+def _conversation_turn(state: dict[str, Any]) -> int:
+    value = state.get("conversation_turn")
+    if isinstance(value, bool):
+        return 1
+    try:
+        turn = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return turn if turn > 0 else 1
+
+
+def _conversation_max_turns(state: dict[str, Any]) -> int | None:
+    value = state.get("conversation_max_turns")
+    if isinstance(value, bool):
+        return None
+    try:
+        turns = int(value)
+    except (TypeError, ValueError):
+        return None
+    return turns if turns > 0 else None
+
+
 def _read_json(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
@@ -829,30 +868,33 @@ def _performance(
     elapsed_seconds: float,
 ) -> dict[str, Any]:
     usage = result.get("usage") or {}
-    prompt_tokens = usage.get("prompt_tokens")
-    completion_tokens = usage.get("completion_tokens")
+    input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
+    output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
+    reasoning_tokens = usage.get("reasoning_tokens")
+    cached_input_tokens = usage.get("cached_input_tokens", usage.get("cached_tokens"))
+    total_tokens = usage.get("total_tokens")
     duration_ns = usage.get("eval_duration_ns")
     runner_elapsed_seconds = usage.get("elapsed_seconds")
     tokens_per_second: float | None = None
     tokens_per_second_source = "unavailable"
     try:
-        if completion_tokens is not None and float(duration_ns or 0) > 0:
+        if output_tokens is not None and float(duration_ns or 0) > 0:
             tokens_per_second = round(
-                float(completion_tokens) / (float(duration_ns) / 1_000_000_000),
+                float(output_tokens) / (float(duration_ns) / 1_000_000_000),
                 1,
             )
             tokens_per_second_source = "eval_duration"
         elif (
-            completion_tokens is not None
+            output_tokens is not None
             and float(runner_elapsed_seconds or 0) > 0
         ):
             tokens_per_second = round(
-                float(completion_tokens) / float(runner_elapsed_seconds),
+                float(output_tokens) / float(runner_elapsed_seconds),
                 1,
             )
             tokens_per_second_source = "wall_clock_estimate"
-        elif completion_tokens is not None and elapsed_seconds > 0:
-            tokens_per_second = round(float(completion_tokens) / elapsed_seconds, 1)
+        elif output_tokens is not None and elapsed_seconds > 0:
+            tokens_per_second = round(float(output_tokens) / elapsed_seconds, 1)
             tokens_per_second_source = "wall_clock_estimate"
         elif progress:
             metrics = progress.get("metrics") or {}
@@ -864,8 +906,13 @@ def _performance(
     except (TypeError, ValueError, ZeroDivisionError):
         tokens_per_second = None
     return {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "total_tokens": total_tokens,
         "tokens_per_second": tokens_per_second,
         "tokens_per_second_source": tokens_per_second_source,
         "elapsed_seconds": elapsed_seconds,
@@ -1023,9 +1070,9 @@ class ObserverStore:
             "performance": _performance(result, progress, elapsed),
             "handoff": self._handoff(events),
             "conversation": {
-                "root_job_id": state.get("conversation_root") or directory.name,
-                "turn": int(state.get("conversation_turn") or 1),
-                "max_turns": state.get("conversation_max_turns"),
+                "root_job_id": _conversation_root_id(state, directory.name),
+                "turn": _conversation_turn(state),
+                "max_turns": _conversation_max_turns(state),
             },
         }
         with self._cache_lock:
@@ -1062,15 +1109,14 @@ class ObserverStore:
                 parts.append(f"{directory.name}:{name}:{stat.st_mtime_ns}:{stat.st_size}")
         return "|".join(sorted(parts))
 
-    def list_runs(self, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    def _run_candidates(self) -> list[tuple[str, str, Path, dict[str, Any]]]:
         candidates: list[tuple[str, str, Path, dict[str, Any]]] = []
         seen: set[str] = set()
         if self.root.is_dir():
             for directory in self.root.iterdir():
                 if (
                     not directory.is_dir()
-                    or len(directory.name) != 24
-                    or any(char not in "0123456789abcdef" for char in directory.name)
+                    or not _is_observer_job_id(directory.name)
                 ):
                     continue
                 seen.add(directory.name)
@@ -1092,6 +1138,10 @@ class ObserverStore:
             for job_id in set(self._state_cache) - seen:
                 self._state_cache.pop(job_id, None)
         candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return candidates
+
+    def list_runs(self, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        candidates = self._run_candidates()
         total = len(candidates)
         bounded_limit = max(1, min(limit, 500))
         bounded_offset = max(0, min(offset, total))
@@ -1115,8 +1165,131 @@ class ObserverStore:
             "runs": page,
         }
 
+    def list_conversations(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        grouped: dict[str, list[tuple[str, str, Path, dict[str, Any]]]] = {}
+        for candidate in self._run_candidates():
+            _updated, job_id, _directory, state = candidate
+            root_job_id = _conversation_root_id(state, job_id)
+            grouped.setdefault(root_job_id, []).append(candidate)
+
+        conversations: list[
+            tuple[str, str, str, Path, dict[str, Any], int, int | None]
+        ] = []
+        for root_job_id, members in grouped.items():
+            latest = max(members, key=lambda item: (item[0], item[1]))
+            updated_utc, latest_job_id, directory, state = latest
+            max_turns = max(
+                (
+                    value
+                    for _updated, _job_id, _directory, member_state in members
+                    if (value := _conversation_max_turns(member_state)) is not None
+                ),
+                default=None,
+            )
+            conversations.append(
+                (
+                    updated_utc,
+                    root_job_id,
+                    latest_job_id,
+                    directory,
+                    state,
+                    len(members),
+                    max_turns,
+                )
+            )
+        conversations.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+        total = len(conversations)
+        bounded_limit = max(1, min(limit, 500))
+        bounded_offset = max(0, min(offset, total))
+        selected = conversations[bounded_offset : bounded_offset + bounded_limit]
+        page: list[dict[str, Any]] = []
+        for (
+            _updated,
+            root_job_id,
+            _latest_job_id,
+            directory,
+            state,
+            turn_count,
+            max_turns,
+        ) in selected:
+            summary = self._run_summary(directory, state=state)
+            if summary is None:
+                continue
+            summary = dict(summary)
+            summary.pop("job_id", None)
+            summary["root_job_id"] = root_job_id
+            summary["turn_count"] = turn_count
+            summary["conversation"] = {
+                "root_job_id": root_job_id,
+                "turn_count": turn_count,
+                "max_turns": max_turns,
+            }
+            page.append(summary)
+        next_offset = bounded_offset + len(selected)
+        if next_offset >= total:
+            next_offset = None
+        return {
+            "schema": OBSERVER_CONVERSATION_LIST_SCHEMA,
+            "status": "ok",
+            "observed_utc": utc_now(),
+            "total": total,
+            "offset": bounded_offset,
+            "limit": bounded_limit,
+            "next_offset": next_offset,
+            "conversations": page,
+        }
+
+    def get_conversation(self, root_job_id: str) -> dict[str, Any]:
+        if not _is_observer_job_id(root_job_id):
+            raise ValueError("Invalid conversation root job ID")
+
+        members = [
+            candidate
+            for candidate in self._run_candidates()
+            if _conversation_root_id(candidate[3], candidate[1]) == root_job_id
+        ]
+        if not members:
+            raise FileNotFoundError(f"Unknown conversation: {root_job_id}")
+        members.sort(
+            key=lambda item: (
+                _conversation_turn(item[3]),
+                str(item[3].get("created_utc") or ""),
+                item[1],
+            )
+        )
+        turns = [
+            self.get_run(job_id)
+            for _updated, job_id, _directory, _state in members
+        ]
+        max_turns = max(
+            (
+                value
+                for _updated, _job_id, _directory, state in members
+                if (value := _conversation_max_turns(state)) is not None
+            ),
+            default=None,
+        )
+        return {
+            "schema": OBSERVER_CONVERSATION_SCHEMA,
+            "status": "ok",
+            "observed_utc": utc_now(),
+            "root_job_id": root_job_id,
+            "conversation": {
+                "root_job_id": root_job_id,
+                "turn_count": len(turns),
+                "max_turns": max_turns,
+            },
+            "turns": turns,
+        }
+
     def get_run(self, job_id: str) -> dict[str, Any]:
-        if len(job_id) != 24 or any(char not in "0123456789abcdef" for char in job_id):
+        if not _is_observer_job_id(job_id):
             raise ValueError("Invalid job ID")
         directory = self.root / job_id
         state = _read_json(directory / "state.json")
@@ -1167,9 +1340,9 @@ class ObserverStore:
             "monitor_until_utc": state.get("monitor_until_utc"),
             "display": _safe_display(state.get("display")),
             "conversation": {
-                "root_job_id": state.get("conversation_root") or job_id,
-                "turn": int(state.get("conversation_turn") or 1),
-                "max_turns": state.get("conversation_max_turns"),
+                "root_job_id": _conversation_root_id(state, job_id),
+                "turn": _conversation_turn(state),
+                "max_turns": _conversation_max_turns(state),
             },
             "progress": _project_progress(progress),
             "performance": _performance(result, progress, elapsed),
@@ -1202,7 +1375,7 @@ class ObserverStore:
         limit: int = OBSERVER_EVENT_PAGE_SIZE,
         before_sequence: int | None = None,
     ) -> dict[str, Any]:
-        if len(job_id) != 24 or any(char not in "0123456789abcdef" for char in job_id):
+        if not _is_observer_job_id(job_id):
             raise ValueError("Invalid job ID")
         directory = self.root / job_id
         if not (directory / "state.json").is_file():
@@ -1408,6 +1581,30 @@ def create_observer_server(
                     200,
                     store.list_runs(limit=limit, offset=offset),
                 )
+                return
+            if path == "/api/conversations":
+                query = urllib.parse.parse_qs(parsed.query)
+                try:
+                    limit = int((query.get("limit") or ["100"])[0])
+                except ValueError:
+                    limit = 100
+                try:
+                    offset = int((query.get("offset") or ["0"])[0])
+                except ValueError:
+                    offset = 0
+                self._send_json(
+                    200,
+                    store.list_conversations(limit=limit, offset=offset),
+                )
+                return
+            if path.startswith("/api/conversations/"):
+                root_job_id = path.removeprefix("/api/conversations/")
+                try:
+                    detail = store.get_conversation(root_job_id)
+                except (FileNotFoundError, ValueError):
+                    self._send_json(404, {"status": "not_found"})
+                    return
+                self._send_json(200, detail)
                 return
             if path.startswith("/api/runs/"):
                 suffix = path.removeprefix("/api/runs/")

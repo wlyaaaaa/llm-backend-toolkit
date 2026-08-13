@@ -896,12 +896,6 @@ class Toolkit:
         upstream_total = raw_usage.get("total_tokens")
         if type(upstream_total) is int and upstream_total >= 0:
             normalized["total_tokens"] = upstream_total
-        elif "prompt_tokens" in normalized and "completion_tokens" in normalized:
-            normalized["total_tokens"] = (
-                normalized["prompt_tokens"]
-                + normalized["completion_tokens"]
-                + normalized.get("reasoning_tokens", 0)
-            )
         duration_ms = getattr(response, "duration_ms", None)
         if (
             "completion_tokens" in normalized

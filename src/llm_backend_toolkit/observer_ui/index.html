@@ -11,209 +11,129 @@
     >
     <title>模型调用观察台</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/styles.css?v=20260813-observer-remote-3">
-    <script src="/assets/app.js?v=20260813-observer-remote-4" defer></script>
+    <link rel="stylesheet" href="/assets/styles.css?v=20260813-conversations-2">
+    <script src="/assets/app.js?v=20260813-conversations-2" defer></script>
   </head>
-  <body data-mobile-view="list" data-inspector-open="false">
-    <a class="skip-link" href="#workspace">跳到工作区</a>
-    <div class="app-shell">
-      <header class="app-header">
+  <body>
+    <a class="skip-link" href="#conversation-feed">跳到对话</a>
+    <main class="app-shell">
+      <nav class="conversation-sidebar" aria-label="对话列表">
         <div class="brand">
           <span class="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 24 24" role="img">
+            <svg viewBox="0 0 24 24">
               <path d="M7 4.75h6.1A4.9 4.9 0 0 1 18 9.65v5.6H11.9A4.9 4.9 0 0 1 7 10.35v-5.6Z"></path>
               <path d="M5 8.75h4v4.8a2.7 2.7 0 0 0 2.7 2.7H15v3H9.9A4.9 4.9 0 0 1 5 14.35v-5.6Z"></path>
             </svg>
           </span>
           <span class="brand-copy">
-            <strong>模型调用观察台</strong>
-            <span>LLM Backend Toolkit</span>
-          </span>
-          <span class="read-only-chip" title="不会提交任务、停止运行、重试或管理账户">只读观察</span>
-        </div>
-
-        <div class="header-status">
-          <span id="last-updated" class="updated-time">等待首次同步</span>
-          <button id="refresh-button" class="icon-button" type="button" title="立即同步" aria-label="立即同步">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M19 8a7.5 7.5 0 1 0 .42 7.1"></path>
-              <path d="M19 3v5h-5"></path>
-            </svg>
-          </button>
-          <span id="connection-state" class="connection-chip" role="status">
-            <span class="connection-dot" aria-hidden="true"></span>
-            <span>正在连接</span>
+            <strong>模型对话观察台</strong>
+            <small>LLM Backend Toolkit</small>
           </span>
         </div>
-      </header>
 
-      <main id="workspace" class="workspace">
-        <nav class="run-sidebar" aria-label="模型调用记录">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">Runs</p>
-              <h1>调用记录</h1>
+        <div class="sidebar-heading">
+          <h1>对话</h1>
+          <span id="conversation-count" class="count-badge">0</span>
+        </div>
+        <p class="sidebar-note">来自安全投影的只读记录</p>
+
+        <div id="conversation-list" class="conversation-list" aria-busy="true"></div>
+        <div id="list-empty" class="list-empty" hidden>
+          <span>暂无可观察对话</span>
+          <small>新的安全记录出现后会自动同步</small>
+        </div>
+        <button id="load-more" class="quiet-button load-more" type="button" hidden>加载更早对话</button>
+
+        <div class="sidebar-footer">
+          <span class="readonly-badge"><span aria-hidden="true"></span>只读观察</span>
+          <span id="connection-state" class="connection-state" role="status">正在连接</span>
+        </div>
+      </nav>
+
+      <section class="conversation-main" aria-label="连续对话">
+        <header class="conversation-header">
+          <div class="conversation-heading">
+            <div class="heading-line">
+              <span id="conversation-status" class="status-badge" data-tone="quiet">未选择</span>
+              <span id="turn-count-label" class="turn-count-label">—</span>
             </div>
-            <span id="run-count" class="count-badge" aria-label="调用数量">0</span>
+            <h2 id="conversation-title">选择一段对话</h2>
+            <p id="conversation-subtitle">查看真实的连续轮次、公开工作记录与回答。</p>
           </div>
-          <p class="sidebar-description">历史与连续对话，仅供查看。</p>
-
-          <label class="search-field" for="run-search">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <circle cx="11" cy="11" r="6.5"></circle>
-              <path d="m16 16 4 4"></path>
-            </svg>
-            <span class="visually-hidden">搜索调用</span>
-            <input id="run-search" type="search" placeholder="搜索公开标题或模型" autocomplete="off">
-          </label>
-
-          <div class="filter-row" role="group" aria-label="筛选调用状态">
-            <button class="filter-button is-active" type="button" data-filter="all" aria-pressed="true">全部</button>
-            <button class="filter-button" type="button" data-filter="active" aria-pressed="false">执行中</button>
-            <button class="filter-button" type="button" data-filter="completed" aria-pressed="false">已完成</button>
+          <div class="header-actions">
+            <span id="last-updated" class="last-updated">等待首次同步</span>
+            <button id="refresh-button" class="icon-button" type="button" aria-label="立即同步" title="立即同步">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M19 8a7.5 7.5 0 1 0 .42 7.1"></path>
+                <path d="M19 3v5h-5"></path>
+              </svg>
+            </button>
           </div>
+        </header>
 
-          <div id="run-list" class="run-list" aria-busy="true"></div>
-          <div id="run-list-empty" class="sidebar-empty" hidden>
-            <span>没有匹配的调用</span>
-            <small>调整搜索或筛选条件</small>
-          </div>
-          <button id="load-more-button" class="load-more-button" type="button" hidden>
-            加载更多历史
-          </button>
-        </nav>
-
-        <section class="conversation-pane" aria-label="连续任务流">
-          <div id="conversation-empty-state" class="empty-state">
-            <span class="empty-illustration" aria-hidden="true">
+        <div id="conversation-scroll" class="conversation-scroll">
+          <div id="conversation-empty" class="empty-state">
+            <span class="empty-mark" aria-hidden="true">
               <svg viewBox="0 0 80 80">
                 <path d="M22 18h25a12 12 0 0 1 12 12v24H34a12 12 0 0 1-12-12V18Z"></path>
                 <path d="M16 29h12v16a10 10 0 0 0 10 10h15v8H30a14 14 0 0 1-14-14V29Z"></path>
               </svg>
             </span>
-            <h2>选择一条调用开始观察</h2>
-            <p>这里只呈现安全投影出的任务历史、公开输出和回执。</p>
+            <h3>选择左侧对话开始观察</h3>
+            <p>不会在这里提交消息、停止任务、审批操作或改变模型设置。</p>
           </div>
 
-          <div id="conversation-content" class="conversation-content" hidden>
-            <header class="conversation-header">
-              <div class="conversation-heading">
-                <button id="mobile-back-button" class="back-button" type="button" aria-label="返回调用记录">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5.5-6 6 6 6"></path></svg>
-                  调用记录
-                </button>
-                <div class="conversation-kicker">
-                  <span id="run-status" class="status-badge">等待中</span>
-                  <span id="conversation-label" class="conversation-label">独立对话</span>
-                </div>
-                <h2 id="run-title">未命名任务</h2>
-                <p id="conversation-meta" class="conversation-meta">—</p>
-              </div>
-              <div class="conversation-actions">
-                <button id="copy-id-button" class="subtle-button" type="button">复制 ID</button>
-                <button
-                  id="inspector-toggle"
-                  class="subtle-button inspector-toggle"
-                  type="button"
-                  aria-controls="run-inspector"
-                  aria-expanded="false"
-                >检查器</button>
-              </div>
-            </header>
-
-            <div id="conversation-stream" class="conversation-stream" tabindex="-1">
-              <article class="conversation-system-note">
-                <span class="node-kind">任务流</span>
-                <p>只读观察：不会在此提交输入、停止或重试运行，也不会显示账户、额度、命令正文或隐藏推理。</p>
-              </article>
-
-              <button id="conversation-new-events" class="conversation-new-events" type="button" hidden></button>
-
-              <section id="conversation-work-records" class="work-records" aria-label="工作记录"></section>
-
-              <article id="draft-panel" class="assistant-output-node" aria-labelledby="conversation-output-title">
-                <header class="output-node-header">
-                  <div>
-                    <span class="node-kind">助手公开输出</span>
-                    <h3 id="conversation-output-title">实时草稿</h3>
-                  </div>
-                  <span id="conversation-output-state" class="output-state" role="status">等待公开输出</span>
-                </header>
-                <pre id="conversation-output" class="conversation-output" tabindex="0">尚未产生公开输出</pre>
-              </article>
-
-            </div>
+          <div id="conversation-feed" class="conversation-feed" hidden tabindex="-1">
+            <div id="turns" class="turns"></div>
           </div>
-        </section>
+        </div>
+        <footer class="readonly-composer" aria-label="只读状态">
+          <span class="readonly-composer__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M2.7 12s3.4-5.2 9.3-5.2 9.3 5.2 9.3 5.2-3.4 5.2-9.3 5.2S2.7 12 2.7 12Z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>
+          </span>
+          <span>只读观察：无法发送消息或控制任务</span>
+          <span class="readonly-composer__model">由实际运行配置决定模型</span>
+        </footer>
+      </section>
 
-        <aside id="run-inspector" class="inspector-pane" aria-label="运行检查器">
-          <header class="inspector-header">
-            <div>
-              <p class="eyebrow">Inspector</p>
-              <h2>运行检查器</h2>
-            </div>
-            <button id="inspector-close-button" class="icon-button inspector-close-button" type="button" aria-label="收起检查器">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 5.5 6 6-6 6"></path></svg>
-            </button>
-          </header>
-
-          <div id="inspector-empty-state" class="inspector-empty-state">
-            选择调用后查看详细时间线和校验回执。
-          </div>
-
-          <div id="inspector-content" class="inspector-content" hidden>
-            <section class="inspector-section inspector-overview" aria-labelledby="inspector-overview-title">
-              <h3 id="inspector-overview-title">运行概览</h3>
-              <dl class="metric-grid">
-                <div class="metric"><dt>模型</dt><dd id="metric-model">—</dd></div>
-                <div class="metric"><dt>执行方式</dt><dd id="metric-execution">—</dd></div>
-                <div class="metric"><dt>推理等级</dt><dd id="metric-reasoning">—</dd></div>
-                <div class="metric metric-token">
-                  <dt>Token</dt>
-                  <dd><details class="context-disclosure"><summary id="metric-tokens">—</summary><span id="metric-token-detail" class="context-detail">Token usage 不可用</span></details></dd>
-                </div>
-                <div class="metric metric-context">
-                  <dt>当前上下文</dt>
-                  <dd><details class="context-disclosure"><summary id="metric-context">暂不可用</summary><span id="metric-context-detail" class="context-detail">模型或运行时未提供上下文占用</span></details></dd>
-                </div>
-                <div class="metric metric-tps-card"><dt>TPS</dt><dd id="metric-tps">—</dd></div>
-                <div class="metric"><dt>耗时</dt><dd id="metric-duration">—</dd></div>
-                <div class="metric"><dt>GPU</dt><dd id="metric-gpu">—</dd></div>
-                <div class="metric"><dt>交付状态</dt><dd id="metric-delivery">—</dd></div>
-              </dl>
-            </section>
-
-            <section class="inspector-section timeline-section" aria-labelledby="timeline-title">
-              <div class="inspector-section-heading">
-                <div>
-                  <h3 id="timeline-title">详细时间线</h3>
-                  <p id="timeline-status" class="quiet-label">未选择</p>
-                </div>
-                <span id="run-id" class="run-id"></span>
+      <aside class="facts-pane" aria-label="对话信息">
+        <header class="facts-header">
+          <h2>对话信息</h2>
+        </header>
+        <div id="facts-empty" class="facts-empty">选择对话后查看可验证信息。</div>
+        <div id="facts-content" class="facts-content" hidden>
+          <section class="facts-section">
+            <h3>当前状态</h3>
+            <dl class="fact-list">
+              <div><dt>状态</dt><dd id="fact-status">—</dd></div>
+              <div><dt>轮次</dt><dd id="fact-turns">—</dd></div>
+              <div><dt>模型</dt><dd id="fact-model">—</dd></div>
+              <div><dt>执行方式</dt><dd id="fact-execution">—</dd></div>
+              <div><dt>推理</dt><dd id="fact-reasoning">不可用</dd></div>
+            </dl>
+          </section>
+          <section class="facts-section">
+            <h3>最近一轮</h3>
+            <dl class="fact-list">
+              <div><dt>耗时</dt><dd id="fact-duration">—</dd></div>
+              <div><dt>Token</dt><dd id="fact-tokens">不可用</dd></div>
+              <div><dt>输出速度</dt><dd id="fact-tps">不可用</dd></div>
+              <div class="context-fact">
+                <dt>上下文</dt><dd id="fact-context">不可用</dd>
+                <span class="context-track" aria-hidden="true"><span id="fact-context-bar"></span></span>
               </div>
-              <button id="load-earlier-events" class="load-more-button compact-button" type="button" hidden>加载更早事件</button>
-              <button id="return-latest-events" class="load-more-button compact-button" type="button" hidden>返回最新事件</button>
-              <ol id="timeline" class="timeline"></ol>
-            </section>
-
-            <section id="receipt-panel" class="inspector-section receipt-card" aria-labelledby="receipt-title">
-              <div class="inspector-section-heading">
-                <div>
-                  <h3 id="receipt-title">校验回执</h3>
-                  <p>结果侧确定性校验</p>
-                </div>
-                <span id="receipt-summary" class="receipt-summary">暂无校验</span>
-              </div>
-              <div id="receipt-checks" class="check-list"></div>
-              <details class="raw-receipt">
-                <summary>查看结构化回执</summary>
-                <pre id="receipt-content" class="content-block compact" tabindex="0">暂无回执</pre>
-              </details>
-            </section>
-          </div>
-        </aside>
-      </main>
-    </div>
+              <div><dt>交付</dt><dd id="fact-handoff">—</dd></div>
+              <div><dt>更新时间</dt><dd id="fact-updated">—</dd></div>
+            </dl>
+          </section>
+          <section class="identity-section">
+            <h3>标识</h3>
+            <code id="fact-root-id">—</code>
+          </section>
+          <p class="facts-footnote">模型名称来自计划或回执；没有供应商身份回读时不宣称为实际模型。工作区变化只表示被观察到，也不验证由哪次工具活动造成。</p>
+        </div>
+      </aside>
+    </main>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   </body>

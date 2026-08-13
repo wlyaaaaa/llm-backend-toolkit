@@ -88,12 +88,12 @@ python -m venv .venv
 
 ## 模型调用观察台
 
-`0.9.0` 提供正式的本机只读 GUI。它使用白底和纯绿主色，在一个常驻窗口中自动展示：
+`0.9.0` 提供正式的本机只读 GUI。它沿用封存 Local Remote 的白底纯绿桌面视觉，在一个常驻窗口中自动展示：
 
-- 多个模型调用和多轮 continuation，对话历史持久保留并可分页回看；
-- 中文工作时间线、AICLI 命令/文件编辑计数、OCR/ASR 阶段与公开输出；单个任务先显示最近 160 个事件，可按页加载更早记录，旧版逐片段事件会合并为一个摘要节点；
+- 多个模型调用和多轮 continuation，以“对话列表 / 连续对话 / 对话信息”三栏呈现；不包含项目、文件、设置、输入、停止或审批控制；
+- 中文工作记录、AICLI 命令/文件活动、OCR/ASR 阶段与公开输出；单轮先显示最近 160 个事件，可在最多 240 个节点的有界窗口中向前翻页并返回最新，旧版逐片段事件会合并为摘要；
 - AICLI 安全公开消息按增量通过 SSE 无刷新追加到草稿；增量不再逐条灌入耐久时间线，`output.completed` 用有界完整公开文本对齐草稿且不会重复追加。草稿最多保留 20,000 字，达到上限会明确提示并引导查看最终结果；
-- 实际模型、执行方式、推理模式或 reasoning effort；
+- 计划或回执中的模型名称、执行方式、推理模式或 reasoning effort；缺少供应商运行时身份回读时不会标成“实际模型”；
 - Token、耗时和 Token/s；Token 卡可展开显示输入、输出、推理输出和非零缓存（缓存是输入子集，不重复计入总数）。AICLI/Codex 的累计统计来自 `tokenUsage.total`，不会把 `TokenUsage.last.outputTokens` 误标为整场累计；缓存为零或缺失时不显示。执行中耗时每秒更新，静默阶段仍会低频复核服务端状态，终态或过期后冻结；Ollama 完成后以 `completion_tokens / eval_duration_ns` 显示模型评估时段的精确输出速度，AICLI agent 的安全真实输出 token 只除以从启动到完成的整段执行墙钟并明确标为估算；
 - Codex agent 同一条运行时通知实际同时上报当前上下文占用与上限后，显示例如“已用 202k / 共 258k”并实时更新；在完整实测到达前显示“等待 Codex 运行时实测”，不会显示 registry 配置值或结果回执替代品；自动压缩完成后同步回落并写入时间线；
 - 最终结果、确定性校验和 Codex 是否已取回结果。
@@ -143,7 +143,7 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 当前 `local-default` 解析到 `codex-ollama-main + qwen-main-v1`，已经过本机版本绑定验收。省略 backend 永远只走这个免费本地默认；`local-crosscheck-27b` 仍是非默认、`crosscheck_only`、no fallback 的显式路线，并保留 direct adapter。它的唯一 Agent/CACB 入口是 benchmark-only `codex-cli → codex-ollama-review / qwen-review-v1 / max`，必须由运行时重新解析为 exact non-cloud `routing_role=benchmark_only` 临时 backend；不能经 `data_factory`、其他 runner 或默认/fallback 选择。任何付费 API 都必须显式选择 exact backend 并同时允许云端传输。`cloud-qwen-flash` 与 `cloud-deepseek-v4-flash` 都是显式 direct-only backend，不会自动 fallback。DeepSeek 路由没有 Pro alias/backend，也不会读取 AICLI/OpenClaw credential。`qwen3.7-plus` 已于 2026-07-29 从别名、内置 backend 和专用 provider 退役，只保留历史评测证据。2026-07-28 的 Codex 云端 Agent 复测暴露 `workspace-write` 沙箱故障：模型可以返回文本，但无法写入验收 workspace，因此 4/30 记录作废且 Qwen Flash Agent route 继续禁用。将来只有连接合同经无付费本地测试和有界真实验收重新通过后才可恢复；历史报告不会自动继承到新指纹。
 `status` 会在不发模型生成请求的情况下返回当前 backend、模型指纹、agent 默认路由、证据状态和支持的 runner；实际任务回执同时记录精确 Profile、模型与是否采用默认。
 
-`cloud-qwen3-8-max-agent`（兼容 alias `qwen3.8-max`）是显式付费的高能力外部 Agent，不改变 `local-default`。它只开放 `codex-cli` route，精确绑定 `codex-qwen3-8-max-paygo + qwen3.8-max + max`，通过 AICLI 的北京 Workspace Responses 路径取用受管 SecretRef；Toolkit 不读取或复制 API Key。调用必须同时显式选择该 backend、`execution.mode=agent`、`execution.runner=codex-cli` 和 `privacy.cloud_allowed=true`。省略执行策略时 Codex 默认 `danger-full-access`；失败、欠费或限流不会自动改投本地模型。供应商 Responses 支持 `none/minimal/low/medium/high/xhigh/max` 且接口缺省为 `xhigh`，本高能力工作 route 明确推荐并固定 `max`；如需降低档位，应直接选择 AICLI Profile 的显式 effort，而不是伪造 Toolkit 档位。当前验收绑定 2026-08-08 的真实非平凡文件/命令任务及 Profile fingerprint，既不是原生 `spawn_agent` 子线程，也不冒充 Luna 血统。默认完全访问的实现、测试与 hidden verifier 已闭合；显式 `workspace-write` 在 AICLI 发送正确策略后仍受 Codex CLI 0.146.0 / Windows app-server 上游拒写缺陷限制，因此路线可用于可信任务，但不能宣称当前窄沙箱边界已通过。
+旧 `cloud-qwen3-8-max-agent` / `qwen3.8-max` 路线已从可选注册表移除：当前 AICLI catalog 不存在它所绑定的 `codex-qwen3-8-max-paygo` Profile，历史回执不能代替当前 Profile。保留的 reserved 记录为 `unverified/selectable=false`；旧请求会以 Unknown backend 失败关闭，不会静默改投 Qwen 3.7、其他付费模型或本地模型。当前存在的 `codex-qwen-paygo` Profile 只证明 Qwen 3.7 配置可解析，并没有可借用给 Toolkit 的新鲜付费 Agent 验收，因此本轮不把它登记成可执行 backend。
 
 `fast-middle-agent` 是显式 opt-in 的文本型 Agent 角色：`codex-spark-xhigh + gpt-5.3-codex-spark + xhigh`，catalog 将其标为 `routing_role=latency_crosscheck`。它只通过官方 Codex CLI/ChatGPT 登录链调用，不伪装成按调用计费的 OpenAI API，也不支持原生图片输入。2026-07-29 的真实源码链验证证明 `workspace-write` 路由已经生效，但 Spark 在冻结代码修复题上用到 81/80 步后硬停止，仅得 2/9；按“不因步数失败复测”的门禁，当前只保留显式候选，不作为自动任务推荐。选择它必须显式写 `backend=fast-middle-agent` 和 `privacy.cloud_allowed=true`；省略 backend 仍只走本地 Qwen。额度、限流、资格或预算失败会返回规范错误和 `invoke:local-default` 裁决选项，但不会自动重提；调用方如选择本地回退，必须保留两次独立回执和实际模型身份。
 

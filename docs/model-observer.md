@@ -4,13 +4,13 @@
 
 模型调用观察台是 `llm-backend-toolkit` 的本机只读可观察面。用户只需从桌面或开始菜单打开一次白底纯绿 GUI；此后 AI 通过受管 skill 发起的任务会自动出现并实时更新，不需要手动刷新，也不会由每次调用反复抢焦点。
 
-界面采用 Remote 风格的三栏只读工作区：
+界面采用封存 Local Remote Demo 的桌面三栏视觉，但移除本观察台不可提供的所有控制面：
 
-1. Runs：调用记录与历史，显示并发任务、独立对话和 continuation 轮次，支持筛选、搜索和分页加载旧历史。
-2. Conversation：连续任务流。一个助手公开输出节点在同一位置从流式草稿过渡到最终结果；连续命令和文件活动会合并为工作记录，自动上下文压缩保留独立分隔节点。这里不提供输入、停止、重试、账户或额度控制。
-3. Inspector：保留详细中文时间线、校验回执、经安全复验的本机完整路径和调用方 opt-in 的有界 diff，以及模型、推理等级、累计 Token、当前上下文、Token/s、耗时、GPU 与交付状态。
+1. 对话：受管 job 按 conversation root 聚合，多轮 continuation 共用一个入口，旧历史分页加载。
+2. 连续对话：按轮次显示已公开的用户标签、折叠工作记录、压缩分隔与回答；同一个回答节点从流式草稿原位过渡到最终结果。
+3. 对话信息：只显示状态、轮次、计划/回执模型、执行方式、累计 Token、实测上下文、耗时与交付状态。缺失字段显示“不可用”，不补造额度、子智能体、项目或设置。
 
-桌面窗口宽度不超过 1100px 时 Inspector 收为可打开侧栏，主任务流仍保持可读；本项目的正式验收范围是电脑端 Web 观察台。
+本项目的正式验收范围仅为电脑端 Web 观察台；布局保持最小 1120px 的桌面三栏，不维护手机交互。
 
 所有历史以耐久 job artifact 为准；读取 GUI 不增加轮询计数，也不等于 Codex 已取回结果。只有结果读取入口会记录 `handoff.collected`。
 
@@ -96,7 +96,7 @@ Toolkit 调用 OCR/ASR 时会把开始/完成阶段写入同一个模型 job。�
 
 千问、DeepSeek、Spark 或本地模型只有经 `llm-backend-toolkit submit` / `probe` 建立受管 job 时才会出现在观察台。受管 direct Ollama 可显示流式草稿与最终原生 usage；受管 OpenAI-compatible API 目前只在完成后显示该次请求的真实 usage；已登记的 Codex/AICLI agent route 才会获得 app-server 的公开消息、工具活动和上下文信号。直接运行 `aicli start/run`、Codex Desktop、同步 `llm-backend-toolkit invoke` 或任意第三方 API 客户端都不会写入 Toolkit JobStore，观察台不会全局嗅探或伪称已经记录。
 
-当前默认注册表中，本地 Ollama、云 Qwen/DeepSeek direct job 都能进入观察台；local Qwen Codex routes、`cloud-qwen3-8-max-agent` 与 Spark agent route 已接入 AICLI/Codex 事件链。`cloud-qwen-flash` 和 `cloud-deepseek-v4-flash` 当前是 direct-only，不能显示 Codex 工具/上下文事件；AICLI Profile Manager 自身存在某个 Profile 也不等于 Toolkit 已登记相应 agent route。
+当前默认注册表中，本地 Ollama、云 Qwen/DeepSeek direct job 都能进入观察台；local Qwen Codex routes 与 Spark agent route 已接入 AICLI/Codex 事件链。`cloud-qwen-flash` 和 `cloud-deepseek-v4-flash` 当前是 direct-only，只显示受管 job 生命周期、公开输出和实际存在的最终 usage，不能显示 Codex 工具/上下文事件。旧 `cloud-qwen3-8-max-agent` 已因当前 AICLI catalog 缺少精确 Profile 而撤出可选注册表，仅保留 `unverified/selectable=false` 的 reserved 记录；不会借用 Qwen 3.7 Profile 或历史回执。AICLI Profile Manager 自身存在某个 Profile 也不等于 Toolkit 已登记相应 agent route。
 
 ## 四基座边界
 
@@ -110,7 +110,7 @@ Toolkit 调用 OCR/ASR 时会把开始/完成阶段写入同一个模型 job。�
 - `/api/stream` 只发送 refresh 信号，详情仍由同源 loopback JSON API 读取；连接会持续发送 heartbeat，直到客户端主动断开，不会在任务仍运行时静默到期。
 - 浏览器断线时降级为有界轮询；SSE 恢复后停止通用轮询。选中的活跃任务仍用本地 1 秒 ticker 更新耗时，并每 5 秒低频复核详情，使静默工具阶段和 `monitor_until_utc` 过期仍能及时反映；终态耗时冻结。
 - GUI 首屏只加载最近 100 条，旧历史按页加载。
-- 单个任务详情只加载最近 160 个事件，`/api/runs/{job_id}/events` 以 `before_sequence` 向前分页；前端最多渲染 240 个节点，并将旧版连续 `agent.output.delta` 合并为一个公开片段摘要。Conversation 在用户离开底部时提示“新增 N 条”，而 Inspector 保留“返回最新事件”。
+- 单轮详情只加载最近 160 个事件，`/api/runs/{job_id}/events` 以 `before_sequence` 向前分页；前端浏览窗口最多保留 240 个事件，并可明确返回本轮最新记录。旧版连续 `agent.output.delta` 不作为工作行重复渲染。
 - 服务缓存未变化的终态摘要；活跃任务继续计算新鲜耗时。
 - 列表和详情分开请求，静态资源无外部依赖，长输出使用滚动容器和安全 `textContent`。
 

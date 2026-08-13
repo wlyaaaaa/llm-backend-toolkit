@@ -357,33 +357,27 @@ class BackendRegistryTests(unittest.TestCase):
         self.assertEqual("crosscheck_only", catalog_roles["local-crosscheck-27b"])
         self.assertEqual("latency_crosscheck", catalog_roles["fast-middle-agent"])
 
-    def test_qwen38_max_is_an_explicit_paid_codex_agent_with_supplier_max_default(self):
+    def test_missing_qwen38_profile_is_reserved_but_not_selectable(self):
         registry = BackendRegistry.load()
 
         default = registry.resolve(None)
-        qwen = registry.resolve("qwen3.8-max")
-
         self.assertEqual("local-default", default.backend_id)
-        self.assertEqual("cloud-qwen3-8-max-agent", qwen.backend_id)
-        self.assertTrue(qwen.alias_applied)
-        self.assertFalse(qwen.default_applied)
-        self.assertEqual("agent-only", qwen.config["adapter"])
-        self.assertEqual("qwen3.8-max", qwen.config["model"])
-        self.assertTrue(qwen.config["cloud"])
-        self.assertTrue(qwen.config["supports_vision"])
-        self.assertEqual(983_616, qwen.config["context_window_tokens"])
-        self.assertEqual(
-            "high_capability_external_worker",
-            qwen.config["routing_role"],
+        with self.assertRaisesRegex(ValueError, "Unknown backend"):
+            registry.resolve("qwen3.8-max")
+        self.assertNotIn(
+            "cloud-qwen3-8-max-agent",
+            {item["id"] for item in registry.catalog()["backends"]},
         )
-        self.assertNotIn("data_factory", qwen.config["agent_routes"])
-        route = qwen.config["agent_routes"]["codex-cli"]
-        self.assertEqual("codex-cli", route["runner"])
-        self.assertEqual("codex-qwen3-8-max-paygo", route["profile"])
-        self.assertEqual("qwen3.8-max", route["model"])
-        self.assertEqual("max", route["reasoning_effort"])
-        self.assertTrue(route["evidence"]["live_verified"])
-        self.assertEqual("responses", route["evidence"]["protocol"])
+        raw_registry = json.loads(Path(registry.source).read_text(encoding="utf-8"))
+        reserved = raw_registry["acceptance_contract"]["reserved_routes"][
+            "codex-qwen3-8-max-paygo"
+        ]
+        self.assertEqual("unverified", reserved["state"])
+        self.assertFalse(reserved["selectable"])
+        self.assertEqual(
+            "profile_missing_from_current_aicli_catalog",
+            reserved["reason"],
+        )
 
     def test_default_registry_uses_the_frozen_quality_profile_and_keeps_hard_role(self):
         registry = BackendRegistry.load()

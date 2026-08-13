@@ -2591,17 +2591,9 @@ class AgentExecutionTests(unittest.TestCase):
             self.assertFalse(receipt["fallback_used"])
             self.assertFalse(result["backend"]["default_applied"])
 
-    def test_qwen38_agent_pins_profile_model_max_and_full_access_default(self):
+    def test_withdrawn_qwen38_agent_route_fails_before_runner_invocation(self):
         with tempfile.TemporaryDirectory() as temp:
-            runner = FakeRunner(
-                AgentResponse(
-                    content='{"answer": 56}',
-                    runner="codex-cli",
-                    model="qwen3.8-max",
-                    exit_code=0,
-                    duration_ms=321,
-                )
-            )
+            runner = FakeRunner()
             toolkit = Toolkit(runners={"codex-cli": runner})
             request = agent_request(Path(temp))
             request["backend"] = "qwen3.8-max"
@@ -2611,21 +2603,10 @@ class AgentExecutionTests(unittest.TestCase):
             request["execution"].pop("budget")
 
             result = toolkit.invoke(request)
-
-            self.assertEqual("ok", result["status"])
-            execution = runner.calls[0]["execution"]
-            self.assertEqual("codex-qwen3-8-max-paygo", execution["profile"])
-            self.assertEqual("qwen3.8-max", execution["model"])
-            self.assertEqual("danger-full-access", execution["policy"])
-            receipt = result["execution_receipt"]
-            self.assertEqual("max", receipt["reasoning_effort"])
-            self.assertEqual(
-                "aicli_qwen38_full_access_task_live_2026-08-08",
-                receipt["route_basis"],
-            )
-            self.assertTrue(receipt["route_live_verified"])
-            self.assertFalse(receipt["fallback_used"])
-            self.assertFalse(result["backend"]["default_applied"])
+            self.assertEqual("blocked", result["status"])
+            self.assertEqual("invalid_request", result["error"]["category"])
+            self.assertIn("Unknown backend", result["error"]["summary"])
+            self.assertEqual([], runner.calls)
 
     def test_cloud_agent_rejects_a_runner_without_an_exact_cloud_profile(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -2711,7 +2692,7 @@ class AgentExecutionTests(unittest.TestCase):
             )
             self.assertNotIn("eval_duration_ns", result["usage"])
 
-    def test_agent_usage_fallback_total_includes_reasoning_without_upstream_total(self):
+    def test_agent_usage_does_not_invent_total_without_upstream_total(self):
         usage = Toolkit._agent_usage(
             AgentResponse(
                 content='{"answer": 56}',
@@ -2727,7 +2708,7 @@ class AgentExecutionTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(172, usage["total_tokens"])
+        self.assertNotIn("total_tokens", usage)
         self.assertEqual(12, usage["reasoning_tokens"])
 
     def test_zero_tool_call_budget_is_preserved_instead_of_replaced_by_the_default(self):

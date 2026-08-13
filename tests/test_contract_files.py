@@ -83,11 +83,15 @@ class ContractFileTests(unittest.TestCase):
         ]["evidence"]
         self.assertEqual("historical", local_evidence["evidence_state"])
         self.assertEqual("not_required", local_evidence["stability_evidence"])
-        qwen38_evidence = registry["backends"]["cloud-qwen3-8-max-agent"][
-            "agent_routes"
-        ]["codex-cli"]["evidence"]
-        self.assertEqual("historical", qwen38_evidence["evidence_state"])
-        self.assertEqual("pending", qwen38_evidence["standard_receipt_refresh"])
+        reserved_qwen38 = registry["acceptance_contract"]["reserved_routes"][
+            "codex-qwen3-8-max-paygo"
+        ]
+        self.assertEqual("unverified", reserved_qwen38["state"])
+        self.assertFalse(reserved_qwen38["selectable"])
+        self.assertEqual(
+            "profile_missing_from_current_aicli_catalog",
+            reserved_qwen38["reason"],
+        )
         self.assertIn("cache_identity", response_schema["properties"])
         cache_identities = response_schema["properties"]["cache_identity"][
             "oneOf"

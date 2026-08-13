@@ -1,2124 +1,883 @@
 "use strict";
 
 const POLL_INTERVAL_MS = 5000;
-const ACTIVE_REFRESH_INTERVAL_MS = 5000;
-const REFRESH_DEBOUNCE_MS = 180;
-const HISTORY_PAGE_SIZE = 100;
+const PAGE_SIZE = 100;
 const EVENT_PAGE_SIZE = 160;
-const MAX_TIMELINE_EVENTS = 240;
+const MAX_EVENTS_PER_TURN = 240;
+const MAX_PINNED_EVENTS_PER_TURN = 8;
 
 const state = {
-  runs: [],
-  selectedJobId: null,
-  selectedDetail: null,
-  filter: "all",
-  query: "",
-  eventSource: null,
-  pollingTimer: null,
-  refreshTimer: null,
-  toastTimer: null,
-  detailRequestSerial: 0,
-  listRequestInFlight: false,
-  refreshQueued: false,
-  appendQueued: false,
-  historyTotal: 0,
+  conversations: [],
+  total: 0,
   nextOffset: null,
-  timelineJobId: null,
-  timelineEvents: [],
-  timelinePage: null,
-  eventPageLoading: false,
-  timelineBrowsingEarlier: false,
-  draftJobId: null,
-  draftText: "",
-  conversationJobId: null,
-  conversationLatestSequence: 0,
-  conversationPendingCount: 0,
-  activeTimer: null,
-  lastActiveRefresh: 0,
-  durationObservedAt: 0,
+  selectedRootId: null,
+  selectedDetail: null,
+  eventPages: new Map(),
+  eventSource: null,
+  pollTimer: null,
+  durationTimer: null,
+  durationObservation: null,
+  refreshTimer: null,
 };
 
 const elements = {
-  connectionState: document.querySelector("#connection-state"),
+  list: document.querySelector("#conversation-list"),
+  count: document.querySelector("#conversation-count"),
+  listEmpty: document.querySelector("#list-empty"),
+  loadMore: document.querySelector("#load-more"),
+  connection: document.querySelector("#connection-state"),
+  refresh: document.querySelector("#refresh-button"),
   lastUpdated: document.querySelector("#last-updated"),
-  refreshButton: document.querySelector("#refresh-button"),
-  runCount: document.querySelector("#run-count"),
-  runSearch: document.querySelector("#run-search"),
-  runList: document.querySelector("#run-list"),
-  runListEmpty: document.querySelector("#run-list-empty"),
-  loadMoreButton: document.querySelector("#load-more-button"),
-  filterButtons: [...document.querySelectorAll(".filter-button")],
-  conversationEmptyState: document.querySelector("#conversation-empty-state"),
-  conversationContent: document.querySelector("#conversation-content"),
-  conversationPane: document.querySelector(".conversation-pane"),
-  conversationStream: document.querySelector("#conversation-stream"),
-  conversationLabel: document.querySelector("#conversation-label"),
-  conversationMeta: document.querySelector("#conversation-meta"),
-  conversationOutputNode: document.querySelector(".assistant-output-node"),
-  conversationOutputTitle: document.querySelector("#conversation-output-title"),
-  conversationOutputState: document.querySelector("#conversation-output-state"),
-  conversationOutput: document.querySelector("#conversation-output"),
-  conversationWorkRecords: document.querySelector("#conversation-work-records"),
-  conversationNewEvents: document.querySelector("#conversation-new-events"),
-  mobileBackButton: document.querySelector("#mobile-back-button"),
-  inspectorToggle: document.querySelector("#inspector-toggle"),
-  inspectorCloseButton: document.querySelector("#inspector-close-button"),
-  inspectorEmptyState: document.querySelector("#inspector-empty-state"),
-  inspectorContent: document.querySelector("#inspector-content"),
-  timeline: document.querySelector("#timeline"),
-  timelineStatus: document.querySelector("#timeline-status"),
-  loadEarlierEvents: document.querySelector("#load-earlier-events"),
-  returnLatestEvents: document.querySelector("#return-latest-events"),
-  runStatus: document.querySelector("#run-status"),
-  runId: document.querySelector("#run-id"),
-  runTitle: document.querySelector("#run-title"),
-  copyIdButton: document.querySelector("#copy-id-button"),
-  receiptSummary: document.querySelector("#receipt-summary"),
-  receiptChecks: document.querySelector("#receipt-checks"),
-  receiptContent: document.querySelector("#receipt-content"),
+  status: document.querySelector("#conversation-status"),
+  turnCount: document.querySelector("#turn-count-label"),
+  title: document.querySelector("#conversation-title"),
+  subtitle: document.querySelector("#conversation-subtitle"),
+  scroll: document.querySelector("#conversation-scroll"),
+  empty: document.querySelector("#conversation-empty"),
+  feed: document.querySelector("#conversation-feed"),
+  turns: document.querySelector("#turns"),
+  factsEmpty: document.querySelector("#facts-empty"),
+  factsContent: document.querySelector("#facts-content"),
+  factStatus: document.querySelector("#fact-status"),
+  factTurns: document.querySelector("#fact-turns"),
+  factModel: document.querySelector("#fact-model"),
+  factExecution: document.querySelector("#fact-execution"),
+  factReasoning: document.querySelector("#fact-reasoning"),
+  factDuration: document.querySelector("#fact-duration"),
+  factTokens: document.querySelector("#fact-tokens"),
+  factTps: document.querySelector("#fact-tps"),
+  factContext: document.querySelector("#fact-context"),
+  factContextBar: document.querySelector("#fact-context-bar"),
+  factHandoff: document.querySelector("#fact-handoff"),
+  factUpdated: document.querySelector("#fact-updated"),
+  factRootId: document.querySelector("#fact-root-id"),
   toast: document.querySelector("#toast"),
-  metrics: {
-    model: document.querySelector("#metric-model"),
-    execution: document.querySelector("#metric-execution"),
-    reasoning: document.querySelector("#metric-reasoning"),
-    tokens: document.querySelector("#metric-tokens"),
-    context: document.querySelector("#metric-context"),
-    tps: document.querySelector("#metric-tps"),
-    duration: document.querySelector("#metric-duration"),
-    gpu: document.querySelector("#metric-gpu"),
-    delivery: document.querySelector("#metric-delivery"),
-  },
-  contextDetail: document.querySelector("#metric-context-detail"),
-  tokenDetail: document.querySelector("#metric-token-detail"),
 };
 
-const runItemCache = new Map();
-const timelineItemCache = new Map();
-
-const STATUS_MAP = {
-  accepted: { label: "已接收", tone: "neutral" },
-  queued: { label: "排队中", tone: "active" },
-  running: { label: "执行中", tone: "active" },
-  cancellation_requested: { label: "取消中", tone: "active" },
-  completed: { label: "已完成", tone: "success" },
-  succeeded: { label: "已完成", tone: "success" },
-  ok: { label: "已完成", tone: "success" },
-  partial: { label: "部分完成", tone: "warning" },
-  blocked: { label: "已阻塞", tone: "danger" },
-  failed: { label: "失败", tone: "danger" },
-  error: { label: "异常", tone: "danger" },
-  cancelled: { label: "已取消", tone: "danger" },
-  stale: { label: "已过期", tone: "danger" },
+const STATUS = {
+  accepted: ["已接受", "live"],
+  queued: ["排队中", "live"],
+  running: ["执行中", "live"],
+  cancellation_requested: ["正在结束", "warning"],
+  completed: ["已完成", "quiet"],
+  failed: ["失败", "danger"],
+  cancelled: ["已取消", "warning"],
+  stale: ["已失联", "warning"],
 };
 
-const RESULT_STATUS_PRIORITY = new Set([
-  "failed",
-  "error",
-  "blocked",
-  "stale",
-  "cancelled",
-  "partial",
-]);
+function createElement(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
 
-function firstDefined(...values) {
+function first(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "");
 }
 
-function pick(object, ...paths) {
-  for (const path of paths) {
-    let current = object;
-    for (const key of path.split(".")) {
-      if (current === null || current === undefined || typeof current !== "object") {
-        current = undefined;
-        break;
-      }
-      current = current[key];
-    }
-    if (current !== undefined && current !== null && current !== "") {
-      return current;
-    }
-  }
-  return undefined;
-}
-
-function normalizedStatus(run) {
-  const resultStatus = String(
-    firstDefined(
-      run.result_status,
-      pick(run, "result.status"),
-      pick(run, "result.delivery_receipt.status"),
-      pick(run, "delivery.status"),
-      "",
-    ),
-  ).toLowerCase();
-  if (RESULT_STATUS_PRIORITY.has(resultStatus)) {
-    return resultStatus;
-  }
-  return String(firstDefined(run.job_status, run.status, resultStatus, "unknown")).toLowerCase();
-}
-
-function statusInfo(run) {
-  const status = normalizedStatus(run);
-  if (STATUS_MAP[status]) {
-    return STATUS_MAP[status];
-  }
-  return { label: status === "unknown" ? "状态未知" : status, tone: "neutral" };
-}
-
-function isActive(run) {
-  return ["accepted", "queued", "running", "cancellation_requested"].includes(
-    normalizedStatus(run),
+function nested(object, path) {
+  return path.split(".").reduce(
+    (value, key) => (value && typeof value === "object" ? value[key] : undefined),
+    object,
   );
 }
 
-function isCompleted(run) {
-  return ["completed", "succeeded", "ok"].includes(normalizedStatus(run));
+function pick(object, ...paths) {
+  return first(...paths.map((path) => nested(object, path)));
 }
 
-function formatStructured(value, fallback = "—") {
-  if (value === undefined || value === null || value === "") {
-    return fallback;
+function statusName(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function conversationStatus(conversation) {
+  return statusName(first(conversation?.job_status, conversation?.result_status, "unknown"));
+}
+
+function statusInfo(value) {
+  return STATUS[statusName(value)] || [value ? String(value) : "未知", "quiet"];
+}
+
+function isActive(value) {
+  return ["accepted", "queued", "running", "cancellation_requested"].includes(statusName(value));
+}
+
+function formatDate(value, mode = "time") {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  if (mode === "short") {
+    return new Intl.DateTimeFormat("zh-CN", {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(date);
   }
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (
-      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
-      (trimmed.startsWith("[") && trimmed.endsWith("]"))
-    ) {
-      try {
-        return JSON.stringify(JSON.parse(trimmed), null, 2);
-      } catch {
-        return value;
-      }
-    }
-    return value;
-  }
-  if (typeof value === "object") {
-    try {
-      return JSON.stringify(value, null, 2);
-    } catch {
-      return String(value);
-    }
-  }
-  return String(value);
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(date);
+}
+
+function formatDuration(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) return "不可用";
+  if (value < 1) return `${Math.round(value * 1000)} ms`;
+  if (value < 60) return `${value < 10 ? value.toFixed(1) : Math.round(value)} 秒`;
+  const roundedSeconds = Math.round(value);
+  const minutes = Math.floor(roundedSeconds / 60);
+  const remainder = roundedSeconds % 60;
+  return `${minutes} 分 ${remainder} 秒`;
 }
 
 function formatNumber(value) {
   const number = Number(value);
-  return Number.isFinite(number) ? new Intl.NumberFormat("zh-CN").format(number) : "—";
+  return Number.isFinite(number) ? new Intl.NumberFormat("zh-CN").format(number) : "不可用";
 }
 
-function formatCompactTokens(value) {
+function optionalNumber(value) {
+  if (value === undefined || value === null || value === "") return null;
   const number = Number(value);
-  if (!Number.isFinite(number) || number < 0) {
-    return "—";
-  }
-  if (number < 1000) {
-    return formatNumber(number);
-  }
-  const thousands = number / 1000;
-  const precision = thousands < 10 && !Number.isInteger(thousands) ? 1 : 0;
-  return `${thousands.toFixed(precision)}k`;
+  return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
-function formatDuration(value, unitHint = "") {
-  const number = Number(value);
-  if (!Number.isFinite(number) || number < 0) {
-    return "—";
-  }
-  let milliseconds = number;
-  if (unitHint === "ns") {
-    milliseconds = number / 1_000_000;
-  } else if (unitHint === "seconds") {
-    milliseconds = number * 1000;
-  }
-  if (milliseconds < 1000) {
-    return `${Math.round(milliseconds)} ms`;
-  }
-  const seconds = milliseconds / 1000;
-  if (seconds < 10) {
-    return `${seconds.toFixed(1)} 秒`;
-  }
-  const roundedSeconds = Math.round(milliseconds / 1000);
-  if (roundedSeconds < 60) {
-    return `${roundedSeconds} 秒`;
-  }
-  const minutes = Math.floor(roundedSeconds / 60);
-  const remaining = roundedSeconds % 60;
-  return `${minutes} 分 ${remaining} 秒`;
+function modelName(value) {
+  return String(first(
+    value?.model,
+    pick(value, "display.model", "result.model", "result.provider.actual", "result.backend.model", "provider.actual", "backend.model"),
+    "模型不可用",
+  ));
 }
 
-function calculateDuration(detail) {
-  const elapsedSeconds = pick(
-    detail,
-    "performance.elapsed_seconds",
-    "progress.metrics.elapsed_seconds",
-  );
-  if (elapsedSeconds !== undefined) {
-    return formatDuration(elapsedSeconds, "seconds");
-  }
-  const direct = pick(
-    detail,
-    "duration_ms",
-    "result.duration_ms",
-    "result.execution_receipt.duration_ms",
-    "display.duration_ms",
-  );
-  if (direct !== undefined) {
-    return formatDuration(direct);
-  }
-  const nanoseconds = pick(detail, "result.usage.total_duration_ns", "usage.total_duration_ns");
-  if (nanoseconds !== undefined) {
-    return formatDuration(nanoseconds, "ns");
-  }
-  const seconds = pick(detail, "duration_seconds", "result.duration_seconds");
-  if (seconds !== undefined) {
-    return formatDuration(seconds, "seconds");
-  }
-  const start = Date.parse(firstDefined(detail.started_utc, detail.created_utc));
-  const end = Date.parse(firstDefined(detail.completed_utc, detail.updated_utc));
-  return Number.isFinite(start) && Number.isFinite(end) && end >= start
-    ? formatDuration(end - start)
-    : "—";
+function executionName(value) {
+  return String(first(
+    pick(value, "display.runner", "display.execution_mode", "result.execution_receipt.runner", "result.execution_receipt.mode"),
+    "不可用",
+  ));
 }
 
-function calculateTps(detail) {
-  const explicit = pick(
-    detail,
-    "result.usage.tps",
-    "usage.tps",
-    "result.tps",
-    "tps",
-    "performance.tokens_per_second",
-  );
-  const completionTokens = Number(
-    pick(
-      detail,
-      "result.usage.completion_tokens",
-      "result.usage.output_tokens",
-      "usage.completion_tokens",
-      "usage.output_tokens",
-    ),
-  );
-  const evalDurationNs = Number(
-    pick(detail, "result.usage.eval_duration_ns", "usage.eval_duration_ns"),
-  );
-  if (
-    Number.isFinite(completionTokens) &&
-    Number.isFinite(evalDurationNs) &&
-    evalDurationNs > 0
-  ) {
-    const exact = completionTokens / (evalDurationNs / 1_000_000_000);
-    return `${exact.toFixed(exact < 10 ? 1 : 0)} 输出 token/秒（模型评估时段精确）`;
-  }
-  const source = String(
-    firstDefined(
-      pick(detail, "result.usage.tps_source"),
-      pick(detail, "usage.tps_source"),
-      pick(detail, "tps_source"),
-      pick(detail, "performance.tokens_per_second_source"),
-      "",
-    ),
-  ).toLowerCase();
-  if (Number.isFinite(Number(explicit)) && source) {
-    const value = Number(explicit).toFixed(Number(explicit) < 10 ? 1 : 0);
-    if (["exact", "eval_duration"].includes(source)) {
-      return `${value} 输出 token/秒（模型评估时段精确）`;
-    }
-    if (source === "wall_clock_estimate") {
-      return `≈ ${value} 输出 token/秒（整段墙钟估算）`;
-    }
-    if (source === "public_content_estimate") {
-      return `≈ ${value} 输出 token/秒（公开内容估算）`;
-    }
-    return `≈ ${value} 输出 token/秒（来源：${source}）`;
-  }
-  const durationNs = Number(pick(detail, "result.usage.total_duration_ns", "usage.total_duration_ns"));
-  if (Number.isFinite(completionTokens) && Number.isFinite(durationNs) && durationNs > 0) {
-    const estimate = completionTokens / (durationNs / 1_000_000_000);
-    return `≈ ${estimate.toFixed(estimate < 10 ? 1 : 0)} 输出 token/秒（总耗时估算）`;
-  }
-  return "—";
+function reasoningName(value) {
+  const effort = pick(value, "display.reasoning_effort", "result.execution_receipt.reasoning_effort");
+  if (effort !== undefined && effort !== null && effort !== "") return String(effort);
+  const mode = statusName(pick(value, "display.reasoning_mode"));
+  if (mode === "on") return "开启";
+  if (mode === "off") return "关闭";
+  return "不可用";
 }
 
-function tokenSummary(detail) {
-  const suppliedTotal = firstDefined(
-    pick(detail, "result.usage.total_tokens"),
-    pick(detail, "usage.total_tokens"),
-  );
-  const promptTokens = pick(
-    detail,
-    "result.usage.prompt_tokens",
-    "result.usage.input_tokens",
-    "usage.prompt_tokens",
-    "usage.input_tokens",
-  );
-  const completionTokens = pick(
-    detail,
-    "result.usage.completion_tokens",
-    "result.usage.output_tokens",
-    "usage.completion_tokens",
-    "usage.output_tokens",
-  );
-  const cachedTokens = pick(
-    detail,
-    "result.usage.cached_tokens",
-    "result.usage.cached_input_tokens",
-    "usage.cached_tokens",
-    "usage.cached_input_tokens",
-  );
-  const reasoningTokens = pick(
-    detail,
-    "result.usage.reasoning_tokens",
-    "result.usage.reasoning_output_tokens",
-    "usage.reasoning_tokens",
-    "usage.reasoning_output_tokens",
-  );
-  const numericPrompt = Number(promptTokens);
-  const numericCompletion = Number(completionTokens);
-  const numericReasoning = Number(reasoningTokens);
-  const calculatedTotal =
-    Number.isFinite(numericPrompt) && Number.isFinite(numericCompletion)
-      ? numericPrompt + numericCompletion +
-        (Number.isFinite(numericReasoning) && numericReasoning > 0
-          ? numericReasoning
-          : 0)
-      : undefined;
-  const totalTokens = suppliedTotal ?? calculatedTotal;
-  if (totalTokens !== undefined) {
-    const parts = [`总计 ${formatNumber(totalTokens)}`];
-    if (promptTokens !== undefined) {
-      parts.push(`输入 ${formatNumber(promptTokens)}`);
-    }
-    if (completionTokens !== undefined) {
-      parts.push(`输出 ${formatNumber(completionTokens)}`);
-    }
-    if (reasoningTokens !== undefined && Number(reasoningTokens) > 0) {
-      parts.push(`推理 ${formatNumber(reasoningTokens)}`);
-    }
-    if (cachedTokens !== undefined && Number(cachedTokens) > 0) {
-      parts.push(`缓存 ${formatNumber(cachedTokens)}`);
-    }
-    return {
-      label: `总计 ${formatNumber(totalTokens)}`,
-      detail: parts.join(" · "),
-    };
-  }
-  const estimatedOutputTokens = pick(
-    detail,
-    "progress.metrics.estimated_output_tokens",
-    "metrics.estimated_output_tokens",
-  );
-  if (estimatedOutputTokens !== undefined && Number(estimatedOutputTokens) > 0) {
-    if (!pick(detail, "progress.public_preview")) {
-      return { label: "—", detail: "Token usage 不可用" };
-    }
-    const label = `≈ ${formatNumber(estimatedOutputTokens)} 输出`;
-    return { label, detail: `${label} token（公开内容估算）` };
-  }
-  const tokenEvents = pick(
-    detail,
-    "progress.metrics.token_events",
-    "metrics.token_events",
-    "progress.token_events",
-  );
-  if (tokenEvents !== undefined) {
-    return {
-      label: "暂无 Token",
-      detail: `尚无 Token usage；已观察 ${formatNumber(tokenEvents)} 个公开片段`,
-    };
-  }
-  return { label: "—", detail: "Token usage 不可用" };
-}
-
-function contextSummary(detail) {
-  const current = pick(detail, "context.current_tokens");
-  const contextWindow = pick(detail, "context.context_window_tokens");
-  const hasCurrent = Number.isFinite(Number(current)) && Number(current) >= 0;
-  const hasWindow =
-    Number.isFinite(Number(contextWindow)) && Number(contextWindow) > 0;
-  const label = hasCurrent && hasWindow
-    ? `已用 ${formatCompactTokens(current)} / 共 ${formatCompactTokens(contextWindow)}`
-    : hasCurrent || hasWindow
-      ? "Codex 运行时数据不完整"
-      : "等待 Codex 运行时实测";
-  const percentage =
-    hasCurrent && hasWindow
-      ? Math.min(100, (Number(current) / Number(contextWindow)) * 100)
-      : undefined;
-  const currentDetail = hasCurrent
-    ? `${formatNumber(current)} token（Codex 运行时实测）`
-    : "等待 Codex 运行时上报当前占用";
-  const windowDetail = hasWindow
-    ? `${formatNumber(contextWindow)} token（Codex 运行时实测）`
-    : "等待 Codex 运行时上报总上下文上限";
-  const percentageDetail =
-    percentage === undefined ? "" : `\n占用：${Math.round(percentage)}%。`;
-  return {
-    label,
-    detail:
-      `已用：${currentDetail}\n共：${windowDetail}${percentageDetail}\n` +
-      "说明：不把累计输入 Token 当成当前占用。",
-  };
-}
-
-function formatDateTime(value, style = "time") {
-  if (!value) {
-    return "—";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return String(value);
-  }
-  const options =
-    style === "relative"
-      ? { hour: "2-digit", minute: "2-digit" }
-      : { hour: "2-digit", minute: "2-digit", second: "2-digit" };
-  return new Intl.DateTimeFormat("zh-CN", options).format(date);
-}
-
-function runTitle(run) {
-  return String(
-    firstDefined(
-      pick(run, "display.task_label"),
-      run.task_label,
-      "历史模型任务",
-    ),
-  );
-}
-
-function modelName(run) {
-  return String(
-    firstDefined(
-      pick(run, "result.backend.model"),
-      pick(run, "backend.model"),
-      pick(run, "result.provider.actual"),
-      run.model,
-      run.backend,
-      run.provider,
-      "—",
-    ),
-  );
-}
-
-function executionMode(detail) {
-  const value = String(
-    firstDefined(
-      pick(detail, "display.execution_mode"),
-      pick(detail, "result.execution_receipt.resolved_runner"),
-      pick(detail, "result.execution_receipt.runner"),
-      pick(detail, "request.execution.mode"),
-      "—",
-    ),
-  );
-  const labels = {
-    direct: "直接调用",
-    agent: "智能体",
-    "codex-cli": "Codex CLI",
-    "qwen-code": "Qwen Code",
-    data_factory: "数据工厂",
-  };
-  return labels[value] || value;
-}
-
-function reasoningLevel(detail) {
-  const value = String(
-    firstDefined(
-      pick(detail, "display.reasoning_effort"),
-      pick(detail, "result.execution_receipt.reasoning_effort"),
-      pick(detail, "request.reasoning.effort"),
-      pick(detail, "display.reasoning_mode"),
-      pick(detail, "request.reasoning.mode"),
-      "—",
-    ),
-  ).toLowerCase();
-  const labels = {
-    off: "关闭",
-    on: "开启",
-    low: "低",
-    medium: "中",
-    high: "高",
-    max: "最高",
-    xhigh: "超高",
-    ultra: "极高",
-  };
-  return labels[value] || value;
-}
-
-function gpuLabel(detail) {
-  const value = firstDefined(
-    pick(detail, "gpu.status"),
-    pick(detail, "display.gpu"),
-    pick(detail, "result.execution_receipt.gpu"),
-    pick(detail, "result.backend.gpu"),
-  );
-  if (value === undefined) {
-    const local = String(firstDefined(detail.backend, "")).toLowerCase().includes("local");
-    return local ? "本地 GPU" : "—";
-  }
-  if (typeof value === "boolean") {
-    return value ? "使用中" : "未使用";
-  }
-  return typeof value === "object" ? formatStructured(value) : String(value);
-}
-
-function deliveryLabel(detail) {
-  return statusInfo(detail).label;
-}
-
-function normalizedRuns(payload) {
-  if (Array.isArray(payload)) {
-    return payload;
-  }
-  for (const key of ["runs", "jobs", "items", "results"]) {
-    if (Array.isArray(payload?.[key])) {
-      return payload[key];
-    }
-  }
-  return [];
-}
-
-function createElement(tag, className, text) {
-  const element = document.createElement(tag);
-  if (className) {
-    element.className = className;
-  }
-  if (text !== undefined) {
-    element.textContent = text;
-  }
-  return element;
-}
-
-function filteredRuns() {
-  const query = state.query.trim().toLocaleLowerCase("zh-CN");
-  return state.runs.filter((run) => {
-    const matchesFilter =
-      state.filter === "all" ||
-      (state.filter === "active" && isActive(run)) ||
-      (state.filter === "completed" && isCompleted(run));
-    const haystack =
-      `${runTitle(run)} ${modelName(run)} ${conversationLabel(run)} ${run.job_id || ""}`.toLocaleLowerCase(
-        "zh-CN",
-      );
-    return matchesFilter && (!query || haystack.includes(query));
-  });
-}
-
-function conversationLabel(run) {
-  const root = String(pick(run, "conversation.root_job_id") || "");
-  const turn = Number(pick(run, "conversation.turn") || 1);
-  if (!root) {
-    return "独立对话";
-  }
-  return `对话 #${root.slice(0, 5)} · 第${turn}轮`;
-}
-
-function runJobId(run) {
-  return String(firstDefined(run.job_id, run.id, ""));
-}
-
-function createRunItem(jobId) {
-  const button = createElement("button", "run-item");
-  button.type = "button";
-  button.dataset.jobId = jobId;
-
-  const top = createElement("span", "run-item-top");
-  const status = createElement("span", "mini-status");
-  const time = createElement("span", "run-item-time");
-  top.append(status, time);
-
-  const title = createElement("span", "run-item-title");
-  const meta = createElement("span", "run-item-meta");
-  const model = createElement("span", "run-item-model");
-  const conversation = createElement("span", "run-item-conversation");
-  const id = createElement("span", "run-item-id");
-  meta.append(model, conversation, id);
-  button.append(top, title, meta);
-  button.addEventListener("click", () =>
-    selectRun(button.dataset.jobId, { revealConversation: true }),
-  );
-
-  const entry = { button, status, time, title, model, conversation, id };
-  runItemCache.set(jobId, entry);
-  return entry;
-}
-
-function updateRunItem(entry, run, jobId) {
-  const info = statusInfo(run);
-  entry.button.dataset.jobId = jobId;
-  entry.button.setAttribute("aria-current", String(jobId === state.selectedJobId));
-  entry.status.textContent = info.label;
-  entry.status.dataset.tone = info.tone;
-  entry.time.textContent = formatDateTime(run.updated_utc, "relative");
-  entry.title.textContent = runTitle(run);
-  entry.model.textContent = modelName(run);
-  entry.conversation.textContent = conversationLabel(run);
-  entry.id.textContent = jobId ? `#${jobId.slice(0, 7)}` : "—";
-}
-
-function captureRunListViewport() {
-  const containerRect = elements.runList.getBoundingClientRect();
-  const anchor =
-    elements.runList.scrollTop > 1
-      ? [...elements.runList.children].find(
-          (item) => item.getBoundingClientRect().bottom > containerRect.top,
-        )
-      : null;
-  return {
-    scrollTop: elements.runList.scrollTop,
-    anchorJobId: anchor?.dataset.jobId || null,
-    anchorTop: anchor ? anchor.getBoundingClientRect().top - containerRect.top : 0,
-    focusedJobId:
-      document.activeElement?.classList?.contains("run-item")
-        ? document.activeElement.dataset.jobId
-        : null,
-  };
-}
-
-function restoreRunListViewport(viewport) {
-  const anchor = viewport.anchorJobId
-    ? runItemCache.get(viewport.anchorJobId)?.button
-    : null;
-  if (anchor?.isConnected) {
-    const containerTop = elements.runList.getBoundingClientRect().top;
-    const anchorTop = anchor.getBoundingClientRect().top - containerTop;
-    elements.runList.scrollTop = viewport.scrollTop + anchorTop - viewport.anchorTop;
-  } else {
-    elements.runList.scrollTop = viewport.scrollTop;
-  }
-
-  const focused = viewport.focusedJobId
-    ? runItemCache.get(viewport.focusedJobId)?.button
-    : null;
-  if (focused?.isConnected && document.activeElement !== focused) {
-    focused.focus({ preventScroll: true });
-  }
-}
-
-function renderRunList() {
-  const runs = filteredRuns();
-  const viewport = captureRunListViewport();
-  elements.runCount.textContent =
-    state.runs.length < state.historyTotal
-      ? `${state.runs.length}/${state.historyTotal}`
-      : String(state.historyTotal || state.runs.length);
-  elements.runListEmpty.hidden = runs.length !== 0;
-  elements.loadMoreButton.hidden = state.nextOffset === null;
-
-  const knownJobIds = new Set(state.runs.map(runJobId));
-  for (const [jobId, entry] of runItemCache) {
-    if (!knownJobIds.has(jobId)) {
-      entry.button.remove();
-      runItemCache.delete(jobId);
-    }
-  }
-
-  let cursor = elements.runList.firstElementChild;
-  for (const run of runs) {
-    const jobId = runJobId(run);
-    const entry = runItemCache.get(jobId) || createRunItem(jobId);
-    updateRunItem(entry, run, jobId);
-    if (entry.button !== cursor) {
-      elements.runList.insertBefore(entry.button, cursor);
-    }
-    cursor = entry.button.nextElementSibling;
-  }
-  while (cursor) {
-    const next = cursor.nextElementSibling;
-    cursor.remove();
-    cursor = next;
-  }
-
-  restoreRunListViewport(viewport);
-  elements.runList.setAttribute("aria-busy", "false");
-}
-
-function timelineEventKey(item, sourceIndex) {
-  const explicitId = firstDefined(
-    item.event_id,
-    item.id,
-    item.sequence_id,
-    item.sequence,
-    item.seq,
-    pick(item, "payload.item_id"),
-    pick(item, "payload.call_id"),
-  );
-  if (explicitId !== undefined) {
-    return `event:${explicitId}`;
-  }
-  const kind = String(firstDefined(item.kind, item.type, "event"));
-  return `event:${sourceIndex}:${kind}`;
-}
-
-function eventSequence(item) {
-  const value = Number(firstDefined(item?.sequence, item?.seq, item?.sequence_id));
-  return Number.isFinite(value) ? value : 0;
-}
-
-function mergeTimelineEvents(existing, incoming) {
-  const merged = new Map();
-  for (const item of [...existing, ...incoming]) {
-    const key = String(
-      firstDefined(item?.event_id, item?.id, `sequence:${eventSequence(item)}`),
-    );
-    merged.set(key, item);
-  }
-  return [...merged.values()].sort((left, right) => eventSequence(left) - eventSequence(right));
-}
-
-function collapseOutputDeltas(events) {
-  const collapsed = [];
-  let batch = null;
-  const flush = () => {
-    if (!batch) {
-      return;
-    }
-    collapsed.push({
-      schema: "llm-backend-toolkit.observer-ui-event.v1",
-      event_id: `delta:${batch.first}:${batch.last}`,
-      sequence: batch.last,
-      occurred_utc: batch.time,
-      kind: "agent.output.delta.batch",
-      visibility: "public",
-      summary_zh:
-        `已接收 ${batch.count} 个公开片段；` +
-        "完整内容已在“实时草稿”中逐段追加。",
-      payload: { count: batch.count },
-    });
-    batch = null;
-  };
-
-  for (const item of events) {
-    if (item?.kind === "agent.output.delta") {
-      const sequence = eventSequence(item);
-      if (!batch) {
-        batch = {
-          count: 0,
-          first: sequence,
-          last: sequence,
-          time: item.occurred_utc,
-        };
-      }
-      batch.count += 1;
-      batch.last = sequence;
-      batch.time = item.occurred_utc || batch.time;
-      continue;
-    }
-    flush();
-    collapsed.push(item);
-  }
-  flush();
-  return collapsed;
-}
-
-function toolActivityTitle(payload) {
-  const toolNumber = Number(payload?.tool_calls);
-  const numbered = Number.isFinite(toolNumber) && toolNumber > 0;
-  if (payload?.item_type === "command_execution") {
-    const prefix = numbered ? `第 ${toolNumber} 个命令` : "命令活动";
-    const stateLabel = {
-      in_progress: "正在执行",
-      succeeded: "执行成功",
-      failed: "执行失败",
-      declined: "已拒绝",
-    }[payload?.command_status] || "状态更新";
-    return `${prefix} · ${stateLabel}`;
-  }
-  if (payload?.item_type === "file_change") {
-    const prefix = numbered ? `第 ${toolNumber} 个工具活动` : "文件编辑";
-    return `${prefix} · ${payload?.status === "completed" ? "完成编辑文件" : "正在编辑文件"}`;
-  }
-  const activityLabel = {
-    web_search: "查询公开资料",
-    mcp_tool_call: "调用 MCP 工具",
-    computer_use: "操作计算机",
-    dynamic_tool_call: "调用动态工具",
-    tool_call: "调用工具",
-  }[payload?.item_type] || "工具活动";
-  const prefix = numbered ? `第 ${toolNumber} 个工具 · ` : "";
-  const stateLabel = payload?.status === "completed" ? "已完成" : "进行中";
-  return `${prefix}${activityLabel} · ${stateLabel}`;
-}
-
-function timelineEvents(detail) {
-  const provided = firstDefined(
-    pick(detail, "events"),
-    pick(detail, "progress.events"),
-    pick(detail, "timeline"),
-  );
-  if (!Array.isArray(provided)) {
-    return [];
-  }
-  const kindLabels = {
-    accepted: "调用已接收",
-    queued: "等待执行资源",
-    started: "开始执行",
-    progress: "工作进展",
-    tool: "工具活动",
-    output: "产生公开输出",
-    completed: "结果已交付",
-    failed: "执行失败",
-    cancelled: "执行已取消",
-    "run.created": "创建可见运行",
-    "run.started": "开始执行",
-    "queue.entered": "等待 GPU 通道",
-    "work.preparing": "整理输入与约束",
-    "model.connecting": "连接模型与 Broker",
-    "reasoning.activity": "推理活动",
-    "output.started": "开始公开输出",
-    "validation.started": "校验结果",
-    "run.completed": "运行完成",
-    "run.failed": "运行失败",
-    "cache.hit": "复用已完成结果",
-    "handoff.collected": "结果已取回",
-    "handoff.disposition": "结果接管状态",
-    "agent.observability": "AICLI 可观察性",
-    "agent.thread.started": "建立智能体线程",
-    "agent.turn.started": "智能体开始本轮",
-    "agent.turn.completed": "智能体完成本轮",
-    "agent.turn.failed": "智能体本轮失败",
-    "agent.run.failed": "智能体运行失败",
-    "agent.limit.hit": "智能体达到执行限制",
-    "agent.reasoning.activity": "智能体分析活动",
-    "agent.planning.activity": "智能体计划更新",
-    "agent.tool.activity": "智能体工具活动",
-    "agent.output.delta": "智能体公开进度",
-    "agent.output.delta.batch": "智能体公开进度",
-    "agent.output.completed": "智能体公开输出",
-    "agent.context.usage.updated": "实时上下文更新",
-    "agent.context.compaction.completed": "Codex 已自动压缩上下文",
-    "context.compaction.completed": "已压缩调用输入",
-    "workspace.change.observed": "检测到工作区变化",
-    "media.ocr.started": "LocalOCR 开始",
-    "media.ocr.completed": "LocalOCR 完成",
-    "media.asr.started": "ChineseASR 开始",
-    "media.asr.completed": "ChineseASR 完成",
-  };
-  const visible = collapseOutputDeltas(provided)
-    .map((item, sourceIndex) => ({ item, sourceIndex }))
-    .filter(({ item }) => item?.kind !== "agent.context.usage.updated")
-    .map(({ item, sourceIndex }) => {
-    const kind = String(firstDefined(item.kind, item.type, "event"));
-    const metrics = item.metrics && typeof item.metrics === "object" ? item.metrics : undefined;
-    const payload = item.payload && typeof item.payload === "object" ? item.payload : undefined;
-    let title = String(firstDefined(item.title, item.label, kindLabels[kind], kind));
-    if (kind === "agent.tool.activity") {
-      title = toolActivityTitle(payload);
-    }
-    let detailText = formatStructured(
-      firstDefined(item.summary_zh, item.public_summary, item.summary, metrics, ""),
-    );
-    const workspacePaths = [];
-    let tone = String(firstDefined(item.tone, item.status, kind)).toLowerCase();
-    if (kind === "context.compaction.completed") {
-      const before = Number(payload?.estimated_tokens_before);
-      const after = Number(payload?.estimated_tokens_after);
-      const lines = [detailText];
-      if (Number.isFinite(before) && Number.isFinite(after)) {
-        lines.push(`预计 ${formatNumber(before)} → ${formatNumber(after)} Token。`);
-      }
-      if (Number(payload?.duplicates_removed) > 0) {
-        lines.push(`移除 ${formatNumber(payload.duplicates_removed)} 个重复项。`);
-      }
-      if (payload?.lossy === true) {
-        lines.push("为满足目标，已裁剪过长输入。");
-        tone = "warning";
-      } else {
-        tone = "success";
-      }
-      detailText = lines.filter(Boolean).join("\n");
-    }
-    if (kind === "agent.context.compaction.completed") {
-      const compactionCount = Number(payload?.compaction_count);
-      const currentTokens = Number(payload?.current_tokens);
-      const contextWindow = Number(payload?.context_window_tokens);
-      const lines = [detailText];
-      if (Number.isFinite(compactionCount) && compactionCount > 0) {
-        lines.push(`第 ${compactionCount} 次自动压缩。`);
-      }
-      if (Number.isFinite(currentTokens) && Number.isFinite(contextWindow)) {
-        lines.push(
-          `压缩后约 ${formatNumber(currentTokens)} / ${formatNumber(contextWindow)} Token。`,
-        );
-      }
-      detailText = lines.filter(Boolean).join("\n");
-      tone = "success";
-    }
-    if (kind === "agent.output.completed") {
-      detailText = "公开输出已完成；完整内容请查看“最终结果”。";
-      tone = "success";
-    }
-    if (kind === "workspace.change.observed") {
-      const lines = [detailText];
-      const changeLabels = {
-        added: "新增",
-        deleted: "删除",
-        modified: "修改",
-        metadata: "仅元数据变化",
-      };
-      for (const change of Array.isArray(payload?.changes) ? payload.changes : []) {
-        lines.push(
-          `${change.relative_path} · ${changeLabels[change.change_kind] || "变化"} · ` +
-            `+${change.lines_added ?? 0} -${change.lines_deleted ?? 0}`,
-        );
-        const absolutePath =
-          typeof change.absolute_path === "string" ? change.absolute_path : "";
-        if (absolutePath) {
-          lines.push(`完整路径：${absolutePath}`);
-          workspacePaths.push({
-            relativePath: String(change.relative_path || "文件"),
-            absolutePath,
-          });
-        }
-        if (change.unified_diff) {
-          lines.push(String(change.unified_diff));
-        }
-      }
-      if (Number(payload?.details_omitted) > 0) {
-        lines.push(
-          `另有 ${payload.details_omitted} 个文件详情：未在本次公开名单内，或因安全、大小上限未展示。`,
-        );
-      }
-      lines.push("来源：工作区前后快照；归因：运行时窗观察，未验证由单一进程造成。");
-      detailText = lines.filter(Boolean).join("\n");
-    }
-    const toolOrdinal = Number(payload?.tool_calls);
-    const workspaceChangeCount = kind === "workspace.change.observed"
-      ? (Array.isArray(payload?.changes) ? payload.changes.length : 0) +
-        Math.max(0, Number(payload?.details_omitted) || 0)
-      : 0;
-    return {
-      key: timelineEventKey(item, sourceIndex),
-      kind,
-      title,
-      detail: detailText,
-      time: firstDefined(
-        item.occurred_utc,
-        item.timestamp_utc,
-        item.timestamp,
-        item.updated_utc,
-        item.time,
-      ),
-      tone,
-      workspacePaths,
-      workType: kind === "workspace.change.observed"
-        ? "workspace_change"
-        : String(payload?.item_type || ""),
-      workOrdinal: Number.isFinite(toolOrdinal) && toolOrdinal > 0
-        ? toolOrdinal
-        : null,
-      workStatus: String(payload?.command_status || payload?.status || ""),
-      workCount: workspaceChangeCount,
-    };
-    });
-  const start = state.timelineBrowsingEarlier
-    ? 0
-    : Math.max(0, visible.length - MAX_TIMELINE_EVENTS);
-  return visible.slice(start, start + MAX_TIMELINE_EVENTS);
-}
-
-function normalizedTone(value) {
-  if (["running", "active", "queued", "progress"].includes(value)) {
-    return "active";
-  }
-  if (["completed", "success", "succeeded", "ok", "passed"].includes(value)) {
-    return "success";
-  }
-  if (["warning", "partial"].includes(value)) {
-    return "warning";
-  }
-  if (["failed", "error", "danger", "cancelled", "stale"].includes(value)) {
-    return "danger";
-  }
-  return "neutral";
-}
-
-function timelineIcon(tone) {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("aria-hidden", "true");
-  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute(
-    "d",
-    tone === "success"
-      ? "m6 12 4 4 8-9"
-      : tone === "danger"
-        ? "M12 7v6m0 4h.01"
-        : "M12 7v5l3 2",
-  );
-  svg.append(path);
-  return svg;
-}
-
-function timelineIconPath(tone) {
-  return tone === "success"
-    ? "m6 12 4 4 8-9"
-    : tone === "danger"
-      ? "M12 7v6m0 4h.01"
-      : "M12 7v5l3 2";
-}
-
-function createTimelineItem(eventKey) {
-  const item = createElement("li", "timeline-item");
-  item.dataset.eventKey = eventKey;
-  const marker = createElement("span", "timeline-marker");
-  const icon = timelineIcon("neutral");
-  marker.append(icon);
-  const copy = createElement("div", "timeline-copy");
-  const title = createElement("h3");
-  const time = createElement("time");
-  copy.append(title, time);
-  item.append(marker, copy);
-
-  const entry = {
-    item,
-    iconPath: icon.firstElementChild,
-    copy,
-    title,
-    detail: null,
-    pathButtons: [],
-    time,
-    signature: null,
-  };
-  timelineItemCache.set(eventKey, entry);
-  return entry;
-}
-
-function updateTimelineItem(entry, event) {
-  const tone = normalizedTone(event.tone);
-  const signature = JSON.stringify([
-    tone,
-    event.kind,
-    event.title,
-    event.detail,
-    event.time,
-    event.workspacePaths,
-  ]);
-  if (signature === entry.signature) {
-    return;
-  }
-
-  entry.signature = signature;
-  entry.item.dataset.tone = tone;
-  entry.iconPath?.setAttribute("d", timelineIconPath(tone));
-  entry.title.textContent = event.title;
-
-  if (event.detail) {
-    if (!entry.detail) {
-      entry.detail = createElement("p");
-      entry.copy.insertBefore(entry.detail, entry.time);
-    }
-    entry.detail.className =
-      event.kind === "workspace.change.observed" ? "workspace-change-detail" : "";
-    entry.detail.textContent = event.detail;
-  } else if (entry.detail) {
-    entry.detail.remove();
-    entry.detail = null;
-  }
-
-  for (const button of entry.pathButtons) {
-    button.remove();
-  }
-  entry.pathButtons = [];
-  for (const path of event.workspacePaths || []) {
-    const button = createElement(
-      "button",
-      "copy-button",
-      `复制完整路径：${path.relativePath}`,
-    );
-    button.type = "button";
-    button.setAttribute("aria-label", `复制 ${path.relativePath} 的完整路径`);
-    button.addEventListener("click", () =>
-      copyText(path.absolutePath, "完整路径已复制"),
-    );
-    entry.copy.insertBefore(button, entry.time);
-    entry.pathButtons.push(button);
-  }
-  entry.time.textContent = formatDateTime(event.time);
-}
-
-function clearTimelineItems() {
-  for (const entry of timelineItemCache.values()) {
-    entry.item.remove();
-  }
-  timelineItemCache.clear();
-}
-
-function shouldFollowTimelineEnd(runChanged) {
-  if (runChanged || timelineItemCache.size === 0) {
-    return true;
-  }
-  const distanceFromEnd =
-    elements.timeline.scrollHeight -
-    elements.timeline.clientHeight -
-    elements.timeline.scrollTop;
-  return distanceFromEnd <= 48;
-}
-
-function renderTimeline(detail) {
-  const sourceDetail = { ...detail, events: state.timelineEvents };
-  const events = timelineEvents(sourceDetail);
-  const rawCount = state.timelineEvents.length;
-  const earlierCount = Number(state.timelinePage?.earlier_count || 0);
-  const latestSequence = Number(state.timelinePage?.latest_sequence || 0);
-  const loadedLast = eventSequence(state.timelineEvents.at(-1));
-  const laterCount = Math.max(0, latestSequence - loadedLast);
-  elements.timelineStatus.textContent = events.length
-    ? `${rawCount} 个事件 · ${events.length} 个节点` +
-      (earlierCount > 0 ? ` · 更早 ${formatNumber(earlierCount)} 个` : "") +
-      (laterCount > 0 ? ` · 更晚 ${formatNumber(laterCount)} 个` : "")
-    : "暂无事件";
-  elements.loadEarlierEvents.hidden = !state.timelinePage?.has_earlier;
-  elements.loadEarlierEvents.disabled = state.eventPageLoading;
-  elements.returnLatestEvents.hidden = laterCount === 0;
-  const timelineJobId = String(firstDefined(detail.job_id, detail.id, state.selectedJobId, ""));
-  const runChanged = timelineJobId !== state.timelineJobId;
-  const followLatest = shouldFollowTimelineEnd(runChanged);
-  state.timelineJobId = timelineJobId;
-
-  if (!events.length) {
-    clearTimelineItems();
-    if (!elements.timeline.querySelector(".timeline-placeholder")) {
-      const placeholder = createElement("li", "timeline-placeholder");
-      placeholder.append(
-        createElement("strong", "", "等待公开进展"),
-        createElement("span", "", "服务端尚未提供可展示的时间线事件"),
-      );
-      elements.timeline.append(placeholder);
-    }
-    return;
-  }
-
-  elements.timeline.querySelector(".timeline-placeholder")?.remove();
-  const currentKeys = new Set(events.map((event) => event.key));
-  for (const [eventKey, entry] of timelineItemCache) {
-    if (!currentKeys.has(eventKey)) {
-      entry.item.remove();
-      timelineItemCache.delete(eventKey);
-    }
-  }
-
-  let cursor = elements.timeline.firstElementChild;
-  for (const event of events) {
-    const entry = timelineItemCache.get(event.key) || createTimelineItem(event.key);
-    updateTimelineItem(entry, event);
-    if (entry.item !== cursor) {
-      elements.timeline.insertBefore(entry.item, cursor);
-    }
-    cursor = entry.item.nextElementSibling;
-  }
-
-  if (followLatest) {
-    elements.timeline.scrollTop = elements.timeline.scrollHeight;
-  }
-}
-
-function updateTimelineState(detail) {
-  const jobId = String(firstDefined(detail.job_id, detail.id, state.selectedJobId, ""));
-  const incoming = Array.isArray(detail.events) ? detail.events : [];
-  if (jobId !== state.timelineJobId) {
-    state.timelineEvents = incoming.slice(-MAX_TIMELINE_EVENTS);
-    state.timelinePage = detail.event_page || null;
-    state.timelineBrowsingEarlier = false;
-    return;
-  }
-  if (!state.timelineBrowsingEarlier) {
-    state.timelineEvents = mergeTimelineEvents(state.timelineEvents, incoming).slice(
-      -MAX_TIMELINE_EVENTS,
-    );
-    state.timelinePage = detail.event_page || state.timelinePage;
-  } else if (detail.event_page) {
-    state.timelinePage = {
-      ...state.timelinePage,
-      latest_sequence: detail.event_page.latest_sequence,
-    };
-  }
-}
-
-function extractDraft(detail) {
-  return pick(detail, "progress.public_preview");
-}
-
-function renderDraft(detail) {
-  const jobId = String(firstDefined(detail.job_id, detail.id, state.selectedJobId, ""));
-  const result = extractResult(detail);
-  const hasFinalResult = result !== undefined && result !== null && result !== "";
-  const active = isActive(detail);
-  const truncated = pick(detail, "progress.public_preview_truncated") === true;
-  const outputState = hasFinalResult
-    ? "final"
-    : active || extractDraft(detail)
-      ? "draft"
-      : "terminal-empty";
-  const fallback = hasFinalResult
-    ? "任务已完成，但没有返回结果"
-    : active
-      ? "尚未产生公开输出"
-      : "任务已结束，但没有可展示结果";
-  const nextText = formatStructured(
-    hasFinalResult ? result : extractDraft(detail),
-    fallback,
-  );
-  const runChanged = jobId !== state.draftJobId;
-  const distanceFromEnd =
-    elements.conversationOutput.scrollHeight -
-    elements.conversationOutput.clientHeight -
-    elements.conversationOutput.scrollTop;
-  const followEnd = runChanged || distanceFromEnd <= 32;
-
-  if (!runChanged && nextText.startsWith(state.draftText)) {
-    const suffix = nextText.slice(state.draftText.length);
-    if (suffix) {
-      elements.conversationOutput.append(document.createTextNode(suffix));
-    }
-  } else if (runChanged || nextText !== state.draftText) {
-    elements.conversationOutput.textContent = nextText;
-  }
-
-  state.draftJobId = jobId;
-  state.draftText = nextText;
-  if (followEnd) {
-    elements.conversationOutput.scrollTop = elements.conversationOutput.scrollHeight;
-  }
-
-  elements.conversationOutputNode.dataset.outputState = outputState;
-  elements.conversationOutputTitle.textContent = hasFinalResult ? "最终结果" : "实时草稿";
-  elements.conversationOutputState.textContent = hasFinalResult
-    ? "最终结果"
-    : truncated
-      ? "草稿预览已截断"
-      : active
-        ? "逐段更新中"
-        : "等待公开输出";
-  elements.conversationOutputState.title = truncated
-    ? "草稿预览已达到安全上限；任务完成后请查看最终结果"
-    : hasFinalResult
-      ? "已在同一输出节点原位切换为最终结果"
-      : "公开草稿正在按模型原文逐段追加";
-}
-
-function extractResult(detail) {
-  return firstDefined(
-    pick(detail, "result.output"),
-    pick(detail, "result.result"),
-    detail.output,
-    isCompleted(detail) ? detail.result : undefined,
-  );
-}
-
-function receiptPayload(detail) {
-  const result = detail.result || {};
-  const receipt = {};
-  for (const key of [
-    "context_receipt",
-    "delegation_receipt",
-    "source_receipt",
-    "execution_receipt",
-    "delivery_receipt",
-  ]) {
-    if (result[key] !== undefined) {
-      receipt[key] = result[key];
-    }
-  }
-  if (result.checks !== undefined) {
-    receipt.checks = result.checks;
-  } else if (detail.checks !== undefined) {
-    receipt.checks = detail.checks;
-  }
-  if (detail.error !== undefined) {
-    receipt.error = detail.error;
-  }
-  return receipt;
-}
-
-function normalizedChecks(detail) {
-  const checks = firstDefined(pick(detail, "result.checks"), detail.checks, []);
-  if (!Array.isArray(checks)) {
-    return [];
-  }
-  return checks.map((check, index) => {
-    if (typeof check === "string") {
-      return { id: `check-${index + 1}`, passed: true, summary: check };
-    }
-    return {
-      id: String(firstDefined(check.label, check.id, check.name, `校验 ${index + 1}`)),
-      passed: Boolean(firstDefined(check.passed, check.ok, check.status === "passed")),
-      summary: String(
-        firstDefined(check.summary, check.message, check.detail) ?? "",
-      ),
-    };
-  });
-}
-
-function renderChecks(detail) {
-  const checks = normalizedChecks(detail);
-  elements.receiptChecks.replaceChildren();
-  const passed = checks.filter((check) => check.passed).length;
-  elements.receiptSummary.textContent = checks.length ? `${passed}/${checks.length} 通过` : "暂无校验";
-  elements.receiptSummary.dataset.tone =
-    checks.length === 0 ? "neutral" : passed === checks.length ? "success" : "danger";
-
-  for (const check of checks) {
-    const item = createElement("div", "check-item");
-    item.dataset.passed = String(check.passed);
-    const icon = createElement("span", "check-icon", check.passed ? "✓" : "!");
-    icon.setAttribute("aria-hidden", "true");
-    const copy = createElement("span", "check-copy");
-    copy.append(createElement("strong", "", check.id));
-    if (check.summary) {
-      copy.append(createElement("span", "", check.summary));
-    }
-    item.append(icon, copy);
-    elements.receiptChecks.append(item);
-  }
-}
-
-function isOutputEvent(event) {
-  return event.kind === "agent.output.delta" ||
-    event.kind === "agent.output.delta.batch" ||
-    event.kind === "agent.output.completed";
-}
-
-function isWorkRecordEvent(event) {
-  return event.kind === "agent.tool.activity" ||
-    event.kind === "workspace.change.observed";
-}
-
-function isContextCompactionEvent(event) {
-  return event.kind === "context.compaction.completed" ||
-    event.kind === "agent.context.compaction.completed";
-}
-
-function isAmbientWorkProgress(event) {
-  return event.kind === "work.waiting" ||
-    event.kind === "reasoning.activity" ||
-    event.kind === "agent.reasoning.activity" ||
-    event.kind === "agent.planning.activity";
-}
-
-function groupWorkRecords(events) {
-  const groups = [];
-  let workRecord = null;
-  for (const event of events) {
-    if (isOutputEvent(event) || event.kind === "agent.context.usage.updated") {
-      continue;
-    }
-    if (isContextCompactionEvent(event)) {
-      workRecord = null;
-      groups.push({ type: "compaction", event });
-      continue;
-    }
-    if (isWorkRecordEvent(event)) {
-      if (!workRecord) {
-        workRecord = { type: "work", events: [] };
-        groups.push(workRecord);
-      }
-      workRecord.events.push(event);
-      continue;
-    }
-    if (workRecord && isAmbientWorkProgress(event)) {
-      continue;
-    }
-    workRecord = null;
-    groups.push({ type: "activity", event });
-  }
-  return groups;
-}
-
-function coalesceWorkRecordEvents(events) {
-  const items = [];
-  const keyedIndexes = new Map();
-  const terminalStatuses = new Set([
-    "completed",
-    "succeeded",
-    "failed",
-    "declined",
-    "cancelled",
-    "timed_out",
-  ]);
-  for (const event of events) {
-    const hasOrdinal = Number.isFinite(event.workOrdinal) && event.workOrdinal > 0;
-    if (!hasOrdinal || !event.workType) {
-      items.push(event);
-      continue;
-    }
-    const key = `${event.workType}:${event.workOrdinal}`;
-    const existingIndex = keyedIndexes.get(key);
-    if (existingIndex === undefined) {
-      keyedIndexes.set(key, items.length);
-      items.push(event);
-      continue;
-    }
-    const existing = items[existingIndex];
-    if (
-      terminalStatuses.has(existing.workStatus) &&
-      !terminalStatuses.has(event.workStatus)
-    ) {
-      continue;
-    }
-    items[existingIndex] = event;
-  }
-  return items;
-}
-
-function appendWorkRecordItem(record, event) {
-  const item = createElement("li", "work-record-item");
-  item.dataset.tone = normalizedTone(event.tone);
-  item.append(createElement("span", "work-record-dot"));
-  const copy = createElement("span", "work-record-copy");
-  copy.append(createElement("strong", "", event.title));
-  if (event.detail) {
-    copy.append(createElement("span", "", event.detail));
-  }
-  item.append(copy, createElement("time", "", formatDateTime(event.time)));
-  record.append(item);
-}
-
-function countToolActivities(events, type) {
-  const matching = events.filter((event) => event.workType === type);
-  if (!matching.length) {
-    return 0;
-  }
-  const ordinals = new Set(
-    matching
-      .map((event) => event.workOrdinal)
-      .filter((value) => Number.isFinite(value) && value > 0),
-  );
-  if (ordinals.size) {
-    return ordinals.size;
-  }
-  const terminal = matching.filter((event) =>
-    ["completed", "succeeded", "failed", "declined"].includes(event.workStatus),
-  );
-  return terminal.length || 1;
-}
-
-function summarizeWorkRecord(events) {
-  const parts = [];
-  const commandCount = countToolActivities(events, "command_execution");
-  const observedFileCount = events
-    .filter((event) => event.workType === "workspace_change")
-    .reduce((sum, event) => sum + Math.max(0, Number(event.workCount) || 0), 0);
-  const workspaceEventCount = events.filter(
-    (event) => event.workType === "workspace_change",
-  ).length;
-  const fileEditCount = countToolActivities(events, "file_change");
-  const webSearchCount = countToolActivities(events, "web_search");
-  const mcpCount = countToolActivities(events, "mcp_tool_call");
-  const computerUseCount = countToolActivities(events, "computer_use");
-  if (commandCount) {
-    parts.push(`运行 ${formatNumber(commandCount)} 个命令`);
-  }
-  if (fileEditCount) {
-    parts.push(`编辑 ${formatNumber(fileEditCount)} 个文件`);
-  }
-  if (observedFileCount) {
-    parts.push(`检测到 ${formatNumber(observedFileCount)} 个文件变化`);
-  } else if (workspaceEventCount) {
-    parts.push(`检测工作区变化 ${formatNumber(workspaceEventCount)} 次`);
-  }
-  if (webSearchCount) {
-    parts.push(`查询公开资料 ${formatNumber(webSearchCount)} 次`);
-  }
-  if (mcpCount) {
-    parts.push(`调用 MCP 工具 ${formatNumber(mcpCount)} 次`);
-  }
-  if (computerUseCount) {
-    parts.push(`操作计算机 ${formatNumber(computerUseCount)} 次`);
-  }
-  return parts.length
-    ? parts.join(" · ")
-    : `${formatNumber(events.length)} 条安全工具活动`;
-}
-
-function renderWorkRecords(events) {
-  const fragment = document.createDocumentFragment();
-  for (const group of groupWorkRecords(events)) {
-    if (group.type === "compaction") {
-      const divider = createElement("div", "context-compaction-divider");
-      divider.textContent = group.event.detail
-        ? `${group.event.title} · ${group.event.detail}`
-        : group.event.title;
-      fragment.append(divider);
-      continue;
-    }
-    if (group.type === "work") {
-      const workItems = coalesceWorkRecordEvents(group.events);
-      const record = createElement("section", "work-record");
-      record.title = "仅展示安全状态、摘要和结果，不展示命令正文。";
-      const header = createElement("div", "work-record-header");
-      const heading = createElement("div");
-      heading.append(createElement("span", "node-kind", "工作记录"));
-      heading.append(
-        createElement("h3", "", "工作记录"),
-      );
-      header.append(
-        heading,
-        createElement("span", "quiet-label", `${formatNumber(workItems.length)} 项工作`),
-      );
-      record.append(header);
-      record.append(
-        createElement(
-          "p",
-          "work-record-summary",
-          summarizeWorkRecord(workItems),
-        ),
-      );
-      const list = createElement("ol", "work-record-list");
-      for (const event of workItems) {
-        appendWorkRecordItem(list, event);
-      }
-      record.append(list);
-      fragment.append(record);
-      continue;
-    }
-
-    const event = group.event;
-    const activity = createElement("article", "conversation-activity");
-    activity.dataset.tone = normalizedTone(event.tone);
-    const header = createElement("div", "conversation-activity-header");
-    const heading = createElement("div");
-    heading.append(createElement("span", "node-kind", "运行状态"));
-    heading.append(createElement("h3", "", event.title));
-    header.append(heading, createElement("time", "", formatDateTime(event.time)));
-    activity.append(header);
-    if (event.detail) {
-      activity.append(createElement("p", "", event.detail));
-    }
-    fragment.append(activity);
-  }
-  elements.conversationWorkRecords.replaceChildren(fragment);
-}
-
-function conversationTimelineEvents(detail) {
-  return timelineEvents({ ...detail, events: state.timelineEvents });
-}
-
-function conversationScrollContainer() {
-  return window.matchMedia("(max-width: 680px)").matches
-    ? document.scrollingElement || elements.conversationPane
-    : elements.conversationPane;
-}
-
-function conversationDistanceFromEnd() {
-  const container = conversationScrollContainer();
-  return container.scrollHeight - container.clientHeight - container.scrollTop;
-}
-
-function returnConversationToLatest({ behavior = "auto" } = {}) {
-  const container = conversationScrollContainer();
-  container.scrollTo({ top: container.scrollHeight, behavior });
-}
-
-function clearConversationNewEventsIfAtEnd() {
-  if (conversationDistanceFromEnd() <= 48 && state.conversationPendingCount > 0) {
-    state.conversationPendingCount = 0;
-    elements.conversationNewEvents.hidden = true;
-  }
-}
-
-function updateConversationNewEvents(detail, events, { runChanged, followEnd }) {
-  const latestSequence = Number(
-    state.timelinePage?.latest_sequence || eventSequence(state.timelineEvents.at(-1)),
-  );
-  if (runChanged) {
-    state.conversationLatestSequence = Number.isFinite(latestSequence) ? latestSequence : 0;
-    state.conversationPendingCount = 0;
-    elements.conversationNewEvents.hidden = true;
-    return;
-  }
-  const newlyArrived = Number.isFinite(latestSequence)
-    ? Math.max(0, latestSequence - state.conversationLatestSequence)
-    : 0;
-  state.conversationLatestSequence = Math.max(
-    state.conversationLatestSequence,
-    Number.isFinite(latestSequence) ? latestSequence : 0,
-  );
-  if (followEnd) {
-    state.conversationPendingCount = 0;
-    elements.conversationNewEvents.hidden = true;
-    return;
-  }
-  if (newlyArrived > 0) {
-    state.conversationPendingCount += newlyArrived;
-  }
-  const laterCount = state.conversationPendingCount;
-  elements.conversationNewEvents.hidden = laterCount === 0 || events.length === 0;
-  if (laterCount > 0) {
-    elements.conversationNewEvents.textContent = `新增 ${formatNumber(laterCount)} 条`;
-  }
-}
-
-function renderConversation(detail) {
-  state.selectedDetail = detail;
-  state.durationObservedAt = Date.now();
-  if (isActive(detail)) {
-    state.lastActiveRefresh = Date.now();
-  }
-  const jobId = String(firstDefined(detail.job_id, detail.id, state.selectedJobId, ""));
-  const runChanged = jobId !== state.conversationJobId;
-  const followEnd = runChanged || conversationDistanceFromEnd() <= 48;
-  state.conversationJobId = jobId;
-
-  const info = statusInfo(detail);
-  elements.conversationEmptyState.hidden = true;
-  elements.conversationContent.hidden = false;
-  elements.inspectorEmptyState.hidden = true;
-  elements.inspectorContent.hidden = false;
-  elements.runStatus.textContent = info.label;
-  elements.runStatus.dataset.tone = info.tone;
-  elements.runId.textContent = jobId;
-  elements.runTitle.textContent = runTitle(detail);
-  elements.conversationLabel.textContent = conversationLabel(detail);
-  elements.conversationMeta.textContent = `${modelName(detail)} · ${executionMode(detail)} · ${formatDateTime(
-    firstDefined(detail.updated_utc, detail.created_utc),
-  )}`;
-
-  const tokens = tokenSummary(detail);
-  const context = contextSummary(detail);
-  const tps = calculateTps(detail);
-
-  elements.metrics.model.textContent = modelName(detail);
-  elements.metrics.execution.textContent = executionMode(detail);
-  elements.metrics.reasoning.textContent = reasoningLevel(detail);
-  elements.metrics.tokens.textContent = tokens.label;
-  elements.metrics.context.textContent = context.label;
-  elements.metrics.tps.textContent = tps;
-  elements.metrics.duration.textContent = calculateDuration(detail);
-  elements.metrics.gpu.textContent = gpuLabel(detail);
-  elements.metrics.delivery.textContent = deliveryLabel(detail);
-  for (const metric of Object.values(elements.metrics)) {
-    metric.title = metric.textContent;
-  }
-  elements.metrics.tokens.title = tokens.detail;
-  elements.tokenDetail.textContent = tokens.detail;
-  elements.metrics.context.title = context.detail;
-  elements.contextDetail.textContent = context.detail;
-  elements.metrics.tps.title = tps;
-
-  updateTimelineState(detail);
-  renderDraft(detail);
-  const events = conversationTimelineEvents(detail);
-  renderWorkRecords(events);
-  renderTimeline(detail);
-  renderChecks(detail);
-  elements.receiptContent.textContent = formatStructured(receiptPayload(detail), "暂无回执");
-  updateConversationNewEvents(detail, events, { runChanged, followEnd });
-  if (followEnd) {
-    returnConversationToLatest();
-  }
-}
-
-function renderDetail(detail) {
-  renderConversation(detail);
-}
-
-function renderNoSelection() {
-  state.selectedDetail = null;
-  elements.conversationEmptyState.hidden = false;
-  elements.conversationContent.hidden = true;
-  elements.inspectorEmptyState.hidden = false;
-  elements.inspectorContent.hidden = true;
-  clearTimelineItems();
-  elements.timeline.querySelector(".timeline-placeholder")?.remove();
-  state.timelineJobId = null;
-  state.timelineEvents = [];
-  state.timelinePage = null;
-  state.timelineBrowsingEarlier = false;
-  state.draftJobId = null;
-  state.draftText = "";
-  state.conversationJobId = null;
-  state.conversationLatestSequence = 0;
-  state.conversationPendingCount = 0;
-  elements.conversationNewEvents.hidden = true;
-  elements.conversationWorkRecords.replaceChildren();
-  elements.timelineStatus.textContent = "未选择";
-}
-
-function setConnection(stateName, label) {
-  elements.connectionState.dataset.state = stateName;
-  elements.connectionState.lastElementChild.textContent = label;
+function taskLabel(value) {
+  return String(first(
+    pick(value, "display.task_label", "task_label"),
+    "未命名对话",
+  ));
 }
 
 function showToast(message) {
-  clearTimeout(state.toastTimer);
   elements.toast.textContent = message;
   elements.toast.hidden = false;
-  state.toastTimer = setTimeout(() => {
-    elements.toast.hidden = true;
-  }, 2200);
+  window.clearTimeout(showToast.timer);
+  showToast.timer = window.setTimeout(() => { elements.toast.hidden = true; }, 2600);
+}
+
+function setConnection(name, text) {
+  elements.connection.dataset.state = name;
+  elements.connection.textContent = text;
 }
 
 async function requestJson(url) {
-  const response = await fetch(url, {
-    headers: { Accept: "application/json" },
-    cache: "no-store",
-  });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
+  const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
 
-function mergeRunPage(existing, incoming, { prepend = false } = {}) {
-  if (prepend) {
-    const incomingIds = new Set(incoming.map(runJobId));
-    return [...incoming, ...existing.filter((run) => !incomingIds.has(runJobId(run)))];
-  }
+function renderList() {
+  const fragment = document.createDocumentFragment();
+  for (const conversation of state.conversations) {
+    const rootId = String(conversation.root_job_id || "");
+    const button = createElement("button", "conversation-item");
+    button.type = "button";
+    button.dataset.rootId = rootId;
+    button.setAttribute("aria-current", String(rootId === state.selectedRootId));
 
-  const merged = [...existing];
-  const indexes = new Map(merged.map((run, index) => [runJobId(run), index]));
-  for (const run of incoming) {
-    const jobId = runJobId(run);
-    if (indexes.has(jobId)) {
-      merged[indexes.get(jobId)] = run;
-    } else {
-      indexes.set(jobId, merged.length);
-      merged.push(run);
-    }
-  }
-  return merged;
-}
+    const top = createElement("span", "item-top");
+    const title = createElement("span", "item-title", taskLabel(conversation));
+    const dot = createElement("span", "item-status");
+    dot.dataset.tone = statusInfo(conversationStatus(conversation))[1];
+    top.append(title, dot);
 
-async function loadRuns({ quiet = false, append = false } = {}) {
-  if (state.listRequestInFlight) {
-    if (append) {
-      state.appendQueued = true;
-    } else {
-      state.refreshQueued = true;
-    }
-    return;
-  }
-  if (append && state.nextOffset === null) {
-    return;
-  }
-
-  state.listRequestInFlight = true;
-  if (!quiet) {
-    elements.refreshButton.classList.add("is-loading");
-  }
-  if (append) {
-    elements.loadMoreButton.disabled = true;
-  }
-  try {
-    const offset = append ? state.nextOffset : 0;
-    const limit = HISTORY_PAGE_SIZE;
-    const payload = await requestJson(`/api/runs?limit=${limit}&offset=${offset}`);
-    const incoming = normalizedRuns(payload);
-    const hadRuns = state.runs.length > 0;
-    const previousTotal = state.historyTotal;
-    if (append) {
-      state.runs = mergeRunPage(state.runs, incoming);
-    } else if (hadRuns) {
-      state.runs = mergeRunPage(state.runs, incoming, { prepend: true });
-    } else {
-      state.runs = incoming;
-    }
-    state.historyTotal = Number(firstDefined(payload.total, state.runs.length));
-    if (Number.isFinite(state.historyTotal) && state.runs.length > state.historyTotal) {
-      state.runs = state.runs.slice(0, state.historyTotal);
-    }
-    const responseNextOffset =
-      payload.next_offset === null || payload.next_offset === undefined
-        ? null
-        : Number(payload.next_offset);
-    if (append || !hadRuns) {
-      state.nextOffset = responseNextOffset;
-    } else if (state.runs.length >= state.historyTotal) {
-      state.nextOffset = null;
-    } else {
-      const totalIncrease = Math.max(0, state.historyTotal - previousTotal);
-      state.nextOffset =
-        totalIncrease > incoming.length || state.nextOffset === null
-          ? responseNextOffset
-          : Math.min(state.historyTotal, state.nextOffset + totalIncrease);
-    }
-    renderRunList();
-
-    if (append) {
-      // Loading older history must not disturb the currently observed run.
-    } else if (!state.selectedJobId && state.runs.length) {
-      const firstId = String(firstDefined(state.runs[0].job_id, state.runs[0].id, ""));
-      if (firstId) {
-        await selectRun(firstId, { quiet: true });
-      }
-    } else if (state.selectedJobId) {
-      await loadDetail(state.selectedJobId, { quiet: true });
-    } else {
-      renderNoSelection();
-    }
-    elements.lastUpdated.textContent = `更新于 ${formatDateTime(new Date().toISOString())}`;
-    if (!state.eventSource) {
-      setConnection("polling", "轮询同步");
-    }
-  } catch (error) {
-    setConnection("offline", "连接中断");
-    if (!quiet) {
-      showToast(`刷新失败：${error.message}`);
-    }
-    startPolling();
-  } finally {
-    state.listRequestInFlight = false;
-    elements.refreshButton.classList.remove("is-loading");
-    elements.loadMoreButton.disabled = false;
-    let scheduledAppend = false;
-    if (state.appendQueued) {
-      state.appendQueued = false;
-      if (state.nextOffset !== null) {
-        void loadRuns({ quiet: true, append: true });
-        scheduledAppend = true;
-      }
-    }
-    if (!scheduledAppend && state.refreshQueued) {
-      state.refreshQueued = false;
-      void loadRuns({ quiet: true });
-    }
-  }
-}
-
-async function loadDetail(jobId, { quiet = false } = {}) {
-  const serial = ++state.detailRequestSerial;
-  try {
-    const detail = await requestJson(`/api/runs/${encodeURIComponent(jobId)}`);
-    if (serial !== state.detailRequestSerial || state.selectedJobId !== jobId) {
-      return;
-    }
-    renderDetail(detail);
-  } catch (error) {
-    if (!quiet) {
-      showToast(`详情加载失败：${error.message}`);
-    }
-  }
-}
-
-async function loadEarlierEvents() {
-  if (
-    state.eventPageLoading ||
-    !state.selectedJobId ||
-    !state.timelinePage?.has_earlier
-  ) {
-    return;
-  }
-  const before = Number(state.timelinePage.next_before_sequence);
-  if (!Number.isFinite(before) || before <= 1) {
-    return;
-  }
-  state.eventPageLoading = true;
-  elements.loadEarlierEvents.disabled = true;
-  const previousHeight = elements.timeline.scrollHeight;
-  const previousTop = elements.timeline.scrollTop;
-  const anchor = [...elements.timeline.querySelectorAll(".timeline-item")].find(
-    (item) => item.offsetTop + item.offsetHeight >= previousTop,
-  );
-  const anchorKey = anchor?.dataset.eventKey;
-  const anchorOffset = anchor ? anchor.offsetTop - previousTop : 0;
-  try {
-    const page = await requestJson(
-      `/api/runs/${encodeURIComponent(state.selectedJobId)}/events` +
-        `?limit=${EVENT_PAGE_SIZE}&before_sequence=${before}`,
+    const summary = createElement(
+      "span",
+      "item-summary",
+      String(conversation.summary_zh || "暂无公开进度摘要"),
     );
-    if (state.selectedJobId !== page.job_id) {
-      return;
-    }
-    state.timelineEvents = mergeTimelineEvents(
-      state.timelineEvents,
-      Array.isArray(page.events) ? page.events : [],
-    ).slice(0, MAX_TIMELINE_EVENTS);
-    state.timelinePage = {
-      ...(page.event_page || {}),
-      latest_sequence: state.timelinePage?.latest_sequence,
-    };
-    state.timelineBrowsingEarlier = true;
-    renderConversation(state.selectedDetail || { job_id: state.selectedJobId });
-    const retainedAnchor = anchorKey ? timelineItemCache.get(anchorKey)?.item : null;
-    elements.timeline.scrollTop = retainedAnchor
-      ? retainedAnchor.offsetTop - anchorOffset
-      : previousTop + Math.max(0, elements.timeline.scrollHeight - previousHeight);
-  } catch (error) {
-    showToast(`加载更早事件失败：${error.message}`);
-  } finally {
-    state.eventPageLoading = false;
-    elements.loadEarlierEvents.disabled = false;
+    const meta = createElement("span", "item-meta");
+    meta.append(
+      createElement("span", "item-model", modelName(conversation)),
+      createElement("span", "item-turns", `${Number(conversation.turn_count || 1)} 轮 · ${formatDate(conversation.updated_utc, "short")}`),
+    );
+    button.append(top, summary, meta);
+    button.addEventListener("click", () => selectConversation(rootId));
+    fragment.append(button);
   }
+  elements.list.replaceChildren(fragment);
+  elements.list.setAttribute("aria-busy", "false");
+  elements.count.textContent = String(state.total || state.conversations.length);
+  elements.listEmpty.hidden = state.conversations.length > 0;
+  elements.loadMore.hidden = state.nextOffset === null;
 }
 
-async function returnToLatestEvents() {
-  if (!state.selectedJobId) {
-    return;
-  }
-  state.timelineBrowsingEarlier = false;
-  state.timelineEvents = [];
-  state.timelinePage = null;
-  state.timelineJobId = null;
-  await loadDetail(state.selectedJobId);
-}
-
-function tickActiveDetail() {
-  const detail = state.selectedDetail;
-  if (!detail || !isActive(detail)) {
-    return;
-  }
-  const baseSeconds = Number(
-    pick(
-      detail,
-      "performance.elapsed_seconds",
-      "progress.metrics.elapsed_seconds",
-    ),
+function mergeConversations(existing, incoming) {
+  const merged = new Map(existing.map((item) => [String(item.root_job_id), item]));
+  for (const item of incoming) merged.set(String(item.root_job_id), item);
+  return [...merged.values()].sort((a, b) =>
+    String(b.updated_utc || "").localeCompare(String(a.updated_utc || "")),
   );
-  const observedAt = Number(state.durationObservedAt);
-  if (Number.isFinite(baseSeconds) && Number.isFinite(observedAt)) {
-    const liveSeconds = baseSeconds + Math.max(0, Date.now() - observedAt) / 1000;
-    elements.metrics.duration.textContent = formatDuration(liveSeconds, "seconds");
-    elements.metrics.duration.title = elements.metrics.duration.textContent;
-  }
-  const now = Date.now();
-  if (
-    !document.hidden &&
-    now - state.lastActiveRefresh >= ACTIVE_REFRESH_INTERVAL_MS
-  ) {
-    state.lastActiveRefresh = now;
-    void loadRuns({ quiet: true });
-  }
 }
 
-async function selectRun(
-  jobId,
-  { quiet = false, revealConversation = false } = {},
-) {
-  if (!jobId) {
-    return;
-  }
-  state.selectedJobId = jobId;
-  renderRunList();
-  if (revealConversation && window.matchMedia("(max-width: 680px)").matches) {
-    document.body.dataset.mobileView = "conversation";
-  }
-  await loadDetail(jobId, { quiet });
-}
-
-function setInspectorOpen(open) {
-  const isOpen = Boolean(open);
-  document.body.dataset.inspectorOpen = String(isOpen);
-  elements.inspectorToggle.setAttribute("aria-expanded", String(isOpen));
-}
-
-function scheduleRefresh() {
-  clearTimeout(state.refreshTimer);
-  state.refreshTimer = setTimeout(() => loadRuns({ quiet: true }), REFRESH_DEBOUNCE_MS);
-}
-
-function startPolling() {
-  if (state.pollingTimer) {
-    return;
-  }
-  setConnection("polling", "轮询同步");
-  state.pollingTimer = setInterval(() => loadRuns({ quiet: true }), POLL_INTERVAL_MS);
-}
-
-function stopPolling() {
-  if (state.pollingTimer) {
-    clearInterval(state.pollingTimer);
-    state.pollingTimer = null;
-  }
-}
-
-function connectStream() {
-  if (!("EventSource" in window)) {
-    startPolling();
-    return;
-  }
-  if (state.eventSource) {
-    state.eventSource.close();
-  }
-
-  const eventSource = new EventSource("/api/stream");
-  state.eventSource = eventSource;
-  eventSource.onopen = () => {
-    if (state.eventSource !== eventSource) {
-      return;
-    }
-    stopPolling();
-    setConnection("live", "实时同步");
-  };
-  eventSource.onmessage = () => scheduleRefresh();
-  eventSource.addEventListener("refresh", () => scheduleRefresh());
-  eventSource.onerror = () => {
-    if (state.eventSource === eventSource) {
-      startPolling();
-      setConnection("polling", "正在重连");
-    }
-  };
-}
-
-async function copyText(text, successMessage) {
+async function loadConversations({ append = false, quiet = false } = {}) {
+  if (!quiet) elements.refresh.classList.add("is-loading");
   try {
-    await navigator.clipboard.writeText(text);
-    showToast(successMessage);
-  } catch {
-    showToast("复制失败，请手动选择文本");
+    const offset = append ? Number(state.nextOffset || state.conversations.length) : 0;
+    const payload = await requestJson(`/api/conversations?limit=${PAGE_SIZE}&offset=${offset}`);
+    const incoming = Array.isArray(payload.conversations) ? payload.conversations : [];
+    state.conversations = append ? mergeConversations(state.conversations, incoming) : incoming;
+    state.total = Number(payload.total || state.conversations.length);
+    state.nextOffset = Number.isInteger(payload.next_offset) ? payload.next_offset : null;
+    renderList();
+    setConnection("live", "已同步");
+    elements.lastUpdated.textContent = `${formatDate(payload.observed_utc || new Date())} 更新`;
+
+    if (!state.selectedRootId && state.conversations.length) {
+      await selectConversation(String(state.conversations[0].root_job_id), { preserveScroll: false });
+    } else if (state.selectedRootId && !append) {
+      await loadConversation(state.selectedRootId, { quiet: true, preserveScroll: true });
+    }
+  } catch (error) {
+    setConnection("offline", "同步中断");
+    if (!quiet) showToast(`暂时无法读取对话：${error.message}`);
+  } finally {
+    elements.refresh.classList.remove("is-loading");
   }
 }
 
-elements.refreshButton.addEventListener("click", () => loadRuns());
-elements.loadMoreButton.addEventListener("click", () =>
-  loadRuns({ quiet: true, append: true }),
-);
-elements.loadEarlierEvents.addEventListener("click", loadEarlierEvents);
-elements.returnLatestEvents.addEventListener("click", returnToLatestEvents);
-elements.runSearch.addEventListener("input", (event) => {
-  state.query = event.target.value;
-  renderRunList();
-});
+function eventSequence(event) {
+  const value = Number(event?.sequence);
+  return Number.isFinite(value) ? value : 0;
+}
 
-for (const button of elements.filterButtons) {
-  button.addEventListener("click", () => {
-    state.filter = button.dataset.filter;
-    for (const item of elements.filterButtons) {
-      const active = item === button;
-      item.classList.toggle("is-active", active);
-      item.setAttribute("aria-pressed", String(active));
+function mergeEvents(...groups) {
+  const merged = new Map();
+  for (const event of groups.flat()) {
+    if (!event || typeof event !== "object") continue;
+    const key = eventSequence(event) || `${event.kind}:${event.observed_utc}:${JSON.stringify(event.payload || {})}`;
+    merged.set(String(key), event);
+  }
+  return [...merged.values()].sort((a, b) => eventSequence(a) - eventSequence(b));
+}
+
+function eventsForTurn(turn) {
+  const jobId = String(turn.job_id || turn.id || "");
+  const page = state.eventPages.get(jobId);
+  if (page?.browsingEarlier) {
+    const pinned = (Array.isArray(turn.events) ? turn.events : [])
+      .filter((event) => isCompaction(event) || isOutcomeEvent(event))
+      .slice(-MAX_PINNED_EVENTS_PER_TURN);
+    return mergeEvents(page.events, pinned);
+  }
+  return mergeEvents(page?.events || [], Array.isArray(turn.events) ? turn.events : []);
+}
+
+function isCompaction(event) {
+  const kind = String(event.kind || "").toLowerCase();
+  return kind.includes("compact") || kind === "context.compacted" || kind === "context.compaction.completed";
+}
+
+function isOutputEvent(event) {
+  const kind = String(event.kind || "").toLowerCase();
+  return kind.includes("output.delta") || kind.includes("message.delta") || kind === "agent.output.updated";
+}
+
+function isOutcomeEvent(event) {
+  const kind = String(event.kind || "").toLowerCase();
+  return kind === "run.failed"
+    || kind === "run.cancelled"
+    || kind === "agent.run.failed"
+    || kind === "agent.turn.failed"
+    || kind === "agent.limit.hit"
+    || kind === "limit.hit"
+    || kind === "handoff.collected";
+}
+
+function toolType(event) {
+  const payload = event.payload || {};
+  const raw = String(first(
+    payload.item_type,
+    payload.tool_type,
+    payload.type,
+    payload.tool,
+    payload.operation_type,
+    "",
+  )).toLowerCase();
+  if (raw.includes("command") || raw.includes("shell") || raw.includes("exec")) return "command";
+  if (raw.includes("mcp")) return "mcp";
+  if (raw.includes("computer")) return "computer";
+  if (raw.includes("web") || raw.includes("browser")) return "web";
+  return raw || (String(event.kind).includes("tool") ? "tool" : "");
+}
+
+function eventStatus(event) {
+  const payload = event.payload || {};
+  return statusName(first(payload.command_status, payload.status, payload.state, ""));
+}
+
+function eventOrdinal(event) {
+  const payload = event.payload || {};
+  const value = Number(first(
+    payload.tool_calls,
+    payload.tool_ordinal,
+    payload.ordinal,
+    payload.call_index,
+  ));
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function workLabel(type, event) {
+  const safeSummary = String(first(event.summary_zh, event.payload?.summary_zh, "")).trim();
+  const genericSummary = /^(智能体)?(正在|已)?(执行)?(命令|工具|网页|浏览器|mcp|电脑|计算机)(活动|调用|操作|执行)?[。.]?$/i;
+  if (safeSummary && !genericSummary.test(safeSummary)) return safeSummary;
+  const ordinal = eventOrdinal(event);
+  const suffix = ordinal ? ` ${ordinal}` : "";
+  if (type === "command") return `命令${suffix}`;
+  if (type === "web") return `网页操作${suffix}`;
+  if (type === "mcp") return `MCP 调用${suffix}`;
+  if (type === "computer") return `电脑操作${suffix}`;
+  if (type === "tool") return `工具活动${suffix}`;
+  return "工作进度";
+}
+
+function workStatusLabel(value) {
+  const labels = {
+    started: "开始",
+    running: "进行中",
+    completed: "已完成",
+    succeeded: "成功",
+    success: "成功",
+    in_progress: "进行中",
+    failed: "失败",
+    declined: "未执行",
+    cancelled: "已取消",
+  };
+  return labels[value] || (value ? value : "已记录");
+}
+
+function workStatusDetail(item) {
+  const parts = [workStatusLabel(item.status)];
+  if (Number.isFinite(item.durationMs) && item.durationMs >= 0) {
+    parts.push(formatDuration(item.durationMs / 1000));
+  }
+  if (Number.isInteger(item.exitCode)) parts.push(`退出码 ${item.exitCode}`);
+  return parts.join(" · ");
+}
+
+function workTone(value) {
+  if (["failed", "declined"].includes(value)) return "danger";
+  if (["started", "running", "in_progress"].includes(value)) return "live";
+  return "quiet";
+}
+
+function normalizedWork(events) {
+  const rows = [];
+  const indexed = new Map();
+  const workspace = [];
+  const compactions = [];
+  const outcomes = [];
+
+  for (const event of events) {
+    if (isOutputEvent(event)) continue;
+    if (isCompaction(event)) {
+      compactions.push(event);
+      continue;
     }
-    renderRunList();
+    if (isOutcomeEvent(event)) {
+      outcomes.push(event);
+      continue;
+    }
+    if (event.kind === "workspace.change.observed") {
+      const changes = Array.isArray(event.payload?.changes) ? event.payload.changes : [];
+      workspace.push(...changes);
+      continue;
+    }
+
+    if (event.kind !== "agent.tool.activity") continue;
+    const type = toolType(event);
+    const ordinal = eventOrdinal(event);
+    if (!type) continue;
+
+    const key = type && ordinal ? `${type}:${ordinal}` : `event:${eventSequence(event) || rows.length}`;
+    const row = {
+      key,
+      type,
+      label: workLabel(type, event),
+      status: eventStatus(event),
+      durationMs: Number.isFinite(Number(event.payload?.duration_ms))
+        ? Number(event.payload.duration_ms)
+        : null,
+      exitCode: Number.isInteger(Number(event.payload?.exit_code))
+        ? Number(event.payload.exit_code)
+        : null,
+    };
+    if (indexed.has(key)) {
+      Object.assign(indexed.get(key), row);
+    } else {
+      indexed.set(key, row);
+      rows.push(row);
+    }
+  }
+  return { rows, workspace, compactions, outcomes };
+}
+
+function compactionText(event) {
+  const payload = event.payload || {};
+  const kind = String(event.kind || "").toLowerCase();
+  const base = String(first(
+    event.summary_zh,
+    payload.summary_zh,
+    kind.startsWith("agent.") ? "Codex 已自动压缩上下文" : "已压缩调用输入",
+  )).replace(/[。.;；]+$/u, "");
+  const facts = [];
+  const count = Number(payload.compaction_count);
+  if (Number.isInteger(count) && count > 0) facts.push(`第 ${count} 次`);
+  const before = Number(payload.estimated_tokens_before);
+  const after = Number(payload.estimated_tokens_after);
+  if (Number.isFinite(before) && Number.isFinite(after)) {
+    facts.push(`${formatNumber(before)} → ${formatNumber(after)} Token`);
+  } else {
+    const current = Number(payload.current_tokens);
+    const windowTokens = Number(payload.context_window_tokens);
+    if (Number.isFinite(current) && Number.isFinite(windowTokens) && windowTokens > 0) {
+      facts.push(`${formatNumber(current)} / ${formatNumber(windowTokens)} Token`);
+    }
+  }
+  return facts.length ? `${base} · ${facts.join(" · ")}` : base;
+}
+
+function appendWorkspaceNote(container, changes) {
+  if (!changes.length) return;
+  const note = createElement("div", "workspace-note");
+  note.append(createElement(
+    "span",
+    "",
+    `观察到工作区变化 ${changes.length} 项；变化归因未验证。`,
+  ));
+  const visibleChanges = changes
+    .filter((change) => change && change.relative_path)
+    .slice(0, 8);
+  if (visibleChanges.length) {
+    const changeList = createElement("div", "workspace-paths");
+    const kindLabels = { added: "新增", modified: "修改", deleted: "删除", renamed: "重命名" };
+    for (const change of visibleChanges) {
+      const row = createElement("div", "workspace-change-row");
+      row.append(
+        createElement("span", "workspace-change-kind", kindLabels[String(change.kind || "").toLowerCase()] || "变化"),
+        createElement("code", "", String(change.relative_path)),
+      );
+      const added = optionalNumber(first(change.added_lines, change.added));
+      const removed = optionalNumber(first(change.removed_lines, change.removed));
+      if (added !== null || removed !== null) {
+        const counts = createElement("span", "workspace-change-counts");
+        if (added !== null) counts.append(createElement("span", "is-added", `+${formatNumber(added)}`));
+        if (removed !== null) counts.append(createElement("span", "is-removed", `-${formatNumber(removed)}`));
+        row.append(counts);
+      }
+      changeList.append(row);
+    }
+    note.append(changeList);
+  }
+  container.append(note);
+}
+
+function outputData(turn) {
+  const raw = turn.result?.output;
+  let finalText = "";
+  let finalTruncated = false;
+  if (typeof raw === "string") finalText = raw;
+  else if (raw && typeof raw === "object") {
+    finalText = String(first(raw.preview, raw.output, ""));
+    finalTruncated = raw.truncated === true;
+  }
+  const draft = String(turn.progress?.public_preview || "");
+  const terminal = ["completed", "failed", "cancelled", "stale", "blocked"].includes(statusName(turn.job_status));
+  if (finalText) return { text: finalText, final: true, truncated: finalTruncated };
+  if (draft) return {
+    text: draft,
+    final: terminal,
+    truncated: turn.progress?.public_preview_truncated === true,
+  };
+  return {
+    text: terminal ? "本轮未提供公开答复。" : "等待公开答复…",
+    final: terminal,
+    truncated: false,
+    empty: true,
+  };
+}
+
+function renderTurn(turn, index) {
+  const article = createElement("article", "turn");
+  const jobId = String(turn.job_id || turn.id || "");
+  article.dataset.jobId = jobId;
+
+  const heading = createElement("div", "turn-heading");
+  heading.append(
+    createElement("span", "turn-index", `第 ${Number(pick(turn, "conversation.turn") || index + 1)} 轮`),
+    createElement("time", "turn-time", formatDate(turn.created_utc, "short")),
+  );
+  article.append(heading);
+
+  const publicTask = String(first(pick(turn, "display.task_label"), "")).trim();
+  if (publicTask) {
+    const task = createElement("section", "task-message");
+    task.append(
+      createElement("span", "message-label", "你"),
+      createElement("p", "", publicTask),
+    );
+    article.append(task);
+  } else {
+    article.append(createElement("p", "task-withheld", "本轮任务正文未公开"));
+  }
+
+  const events = eventsForTurn(turn);
+  const work = normalizedWork(events);
+  if (work.rows.length || work.workspace.length || turn.event_page?.has_earlier || state.eventPages.get(jobId)?.hasEarlier) {
+    const log = createElement("details", "work-log");
+    log.open = work.rows.some((item) =>
+      ["started", "running", "in_progress"].includes(item.status));
+    const logHeading = createElement("summary", "work-log-heading");
+    const summaryParts = [];
+    if (work.rows.length) summaryParts.push(`${work.rows.length} 项活动`);
+    if (work.workspace.length) summaryParts.push(`${work.workspace.length} 个文件`);
+    logHeading.append(
+      createElement("strong", "", log.open ? "正在工作" : "工作记录"),
+      createElement("span", "", summaryParts.join(" · ") || "观察到工作区变化"),
+    );
+    log.append(logHeading);
+    if (work.rows.length) {
+      const rows = createElement("div", "work-rows");
+      for (const item of work.rows) {
+        const row = createElement("div", "work-row");
+        row.dataset.tone = workTone(item.status);
+        row.append(
+          createElement("span", "work-row-main", item.label),
+          createElement("span", "work-row-status", workStatusDetail(item)),
+        );
+        rows.append(row);
+      }
+      log.append(rows);
+    }
+    appendWorkspaceNote(log, work.workspace);
+
+    const page = state.eventPages.get(jobId);
+    const hasEarlier = page ? page.hasEarlier : turn.event_page?.has_earlier;
+    if (hasEarlier) {
+      const earlier = createElement("button", "older-events", "加载本轮更早的工作记录");
+      earlier.type = "button";
+      earlier.addEventListener("click", () => loadEarlierEvents(turn, earlier));
+      log.append(earlier);
+    }
+    if (page?.browsingEarlier) {
+      const latest = createElement("button", "older-events", "返回本轮最新记录");
+      latest.type = "button";
+      latest.addEventListener("click", () => {
+        state.eventPages.delete(jobId);
+        renderConversation(state.selectedDetail, { preserveScroll: true });
+      });
+      log.append(latest);
+    }
+    article.append(log);
+  }
+
+  for (const event of work.compactions) {
+    article.append(createElement(
+      "div",
+      "compaction-divider",
+      compactionText(event),
+    ));
+  }
+
+  for (const event of work.outcomes) {
+    const kind = String(event.kind || "").toLowerCase();
+    const tone = kind.includes("failed") || kind.includes("limit") ? "danger" : "quiet";
+    const fallback = kind === "handoff.collected" ? "Codex 已取回本轮结果" : "本轮运行未成功完成";
+    const outcome = createElement(
+      "div",
+      "outcome-note",
+      String(first(event.summary_zh, event.payload?.summary_zh, fallback)),
+    );
+    outcome.dataset.tone = tone;
+    article.append(outcome);
+  }
+
+  const output = outputData(turn);
+  const assistant = createElement("section", "assistant-message");
+  assistant.dataset.outputState = output.final ? "final" : "draft";
+  assistant.append(createElement("span", "assistant-avatar", "›_"));
+  const assistantHeader = createElement("div", "assistant-message-header");
+  const outputStatus = createElement(
+    "span",
+    "assistant-state",
+    output.final ? "最终答复" : "实时草稿",
+  );
+  outputStatus.dataset.live = String(!output.final);
+  assistantHeader.append(createElement("strong", "", "回复"), outputStatus);
+  const outputBody = createElement("div", `assistant-output${output.empty ? " is-empty" : ""}`, output.text);
+  outputBody.dataset.truncated = String(output.truncated);
+  assistant.append(assistantHeader, outputBody);
+  article.append(assistant);
+
+  const errorCategory = turn.result?.error?.category;
+  if (errorCategory) article.append(createElement("div", "turn-error", `错误类别：${errorCategory}`));
+  return article;
+}
+
+function latestTurn(detail) {
+  const turns = Array.isArray(detail?.turns) ? detail.turns : [];
+  return turns.at(-1) || {};
+}
+
+function renderFacts(detail) {
+  const conversation = detail.conversation || {};
+  const latest = latestTurn(detail);
+  const latestSummary = state.conversations.find(
+    (item) => String(item.root_job_id) === state.selectedRootId,
+  ) || {};
+  const status = first(latest.job_status, latestSummary.job_status, latest.result?.status);
+  const statusDisplay = statusInfo(status)[0];
+  const performance = latest.performance || latestSummary.performance || {};
+  const usage = latest.result?.usage || {};
+  const prompt = first(usage.prompt_tokens, usage.input_tokens);
+  const completion = first(usage.completion_tokens, usage.output_tokens);
+  const reasoning = first(usage.reasoning_tokens, usage.reasoning_output_tokens);
+  const cached = first(usage.cached_tokens, usage.cached_input_tokens);
+  const total = usage.total_tokens;
+  const tokenParts = [];
+  if (total !== undefined) tokenParts.push(`总计 ${formatNumber(total)}`);
+  if (prompt !== undefined) tokenParts.push(`输入 ${formatNumber(prompt)}`);
+  if (completion !== undefined) tokenParts.push(`输出 ${formatNumber(completion)}`);
+  if (reasoning !== undefined && Number(reasoning) > 0) tokenParts.push(`推理 ${formatNumber(reasoning)}`);
+  if (cached !== undefined && Number(cached) > 0) tokenParts.push(`缓存 ${formatNumber(cached)}（已含于输入）`);
+  const tokenText = tokenParts.length ? tokenParts.join(" · ") : "不可用";
+  const tpsValue = optionalNumber(performance.tokens_per_second);
+  const tpsSourceLabels = {
+    eval_duration: "模型评估时段",
+    wall_clock_estimate: "整段墙钟估算",
+    public_content_estimate: "公开内容估算",
+  };
+  const tpsText = tpsValue === null
+    ? "不可用"
+    : `${tpsValue.toFixed(1)} Token/s${tpsSourceLabels[performance.tokens_per_second_source] ? `（${tpsSourceLabels[performance.tokens_per_second_source]}）` : ""}`;
+  const handoff = latest.handoff || latestSummary.handoff || {};
+  const context = latest.context || {};
+  const currentContext = optionalNumber(context.current_tokens);
+  const contextWindow = optionalNumber(context.context_window_tokens);
+  let contextText = "不可用";
+  if (currentContext !== null && contextWindow !== null && contextWindow > 0) {
+    contextText = `${formatNumber(currentContext)} / ${formatNumber(contextWindow)}（${Math.round(currentContext / contextWindow * 100)}%）`;
+  } else if (currentContext !== null) {
+    contextText = formatNumber(currentContext);
+  }
+  const handoffLabels = {
+    collected: "已取回",
+    not_collected: "未取回",
+    pending: "等待取回",
+    unavailable: "不可用",
+  };
+  const duration = Number(performance.elapsed_seconds);
+  const active = isActive(status);
+
+  elements.factsEmpty.hidden = true;
+  elements.factsContent.hidden = false;
+  elements.factStatus.textContent = statusDisplay;
+  elements.factTurns.textContent = `${Number(conversation.turn_count || detail.turns?.length || 0)} 轮`;
+  elements.factModel.textContent = modelName(latest.model ? latest : latestSummary);
+  elements.factExecution.textContent = executionName(latest);
+  elements.factReasoning.textContent = reasoningName(latest);
+  elements.factDuration.textContent = formatDuration(duration);
+  elements.factTokens.textContent = tokenText;
+  elements.factTps.textContent = tpsText;
+  elements.factContext.textContent = contextText;
+  const contextPercent = currentContext !== null && contextWindow !== null && contextWindow > 0
+    ? Math.max(0, Math.min(100, currentContext / contextWindow * 100))
+    : null;
+  elements.factContextBar.parentElement.hidden = contextPercent === null;
+  elements.factContextBar.style.width = contextPercent === null ? "0%" : `${contextPercent}%`;
+  const handoffStatus = statusName(first(handoff.status, "unavailable"));
+  elements.factHandoff.textContent = handoffLabels[handoffStatus] || String(first(handoff.status, "不可用"));
+  elements.factUpdated.textContent = formatDate(first(latest.updated_utc, latestSummary.updated_utc), "short");
+  elements.factRootId.textContent = String(detail.root_job_id || conversation.root_job_id || "—");
+  elements.factRootId.title = elements.factRootId.textContent;
+  state.durationObservation = Number.isFinite(duration) && duration >= 0
+    ? { base: duration, observedAt: Date.now(), active }
+    : null;
+}
+
+function tickDuration() {
+  const observation = state.durationObservation;
+  if (!observation?.active) return;
+  const elapsed = observation.base + Math.max(0, Date.now() - observation.observedAt) / 1000;
+  elements.factDuration.textContent = formatDuration(elapsed);
+}
+
+function renderConversation(detail, { preserveScroll = true } = {}) {
+  const previousTop = elements.scroll.scrollTop;
+  const wasNearEnd = elements.scroll.scrollHeight - elements.scroll.clientHeight - previousTop < 56;
+  const turns = Array.isArray(detail.turns) ? detail.turns : [];
+  const conversation = detail.conversation || {};
+  const listItem = state.conversations.find(
+    (item) => String(item.root_job_id) === state.selectedRootId,
+  ) || {};
+  const latest = turns.at(-1) || listItem;
+  const [statusText, tone] = statusInfo(first(latest.job_status, listItem.job_status, latest.result?.status));
+
+  elements.empty.hidden = true;
+  elements.feed.hidden = false;
+  elements.status.textContent = statusText;
+  elements.status.dataset.tone = tone;
+  elements.turnCount.textContent = `${Number(conversation.turn_count || turns.length)} 轮对话`;
+  elements.title.textContent = taskLabel(first(turns[0], listItem));
+  elements.subtitle.textContent = `${modelName(latest)} · ${executionName(latest)} · 最近更新 ${formatDate(first(latest.updated_utc, listItem.updated_utc), "short")}`;
+
+  const priorOutputs = new Map();
+  const priorWorkOpen = new Map();
+  for (const article of elements.turns.querySelectorAll(".turn[data-job-id]")) {
+    const jobId = String(article.dataset.jobId || "");
+    const output = article.querySelector(".assistant-output");
+    if (jobId && output) priorOutputs.set(jobId, output);
+    const workLog = article.querySelector(".work-log");
+    if (jobId && workLog) priorWorkOpen.set(jobId, workLog.open);
+  }
+
+  const fragment = document.createDocumentFragment();
+  turns.forEach((turn, index) => {
+    const article = renderTurn(turn, index);
+    const jobId = String(article.dataset.jobId || "");
+    const nextOutput = article.querySelector(".assistant-output");
+    const priorOutput = priorOutputs.get(jobId);
+    if (nextOutput && priorOutput) {
+      const nextText = nextOutput.textContent || "";
+      const priorText = priorOutput.textContent || "";
+      priorOutput.className = nextOutput.className;
+      priorOutput.dataset.truncated = nextOutput.dataset.truncated;
+      if (nextText.startsWith(priorText)) {
+        priorOutput.append(document.createTextNode(nextText.slice(priorText.length)));
+      } else if (nextText !== priorText) {
+        priorOutput.textContent = nextText;
+      }
+      nextOutput.replaceWith(priorOutput);
+    }
+    const workLog = article.querySelector(".work-log");
+    if (workLog && priorWorkOpen.has(jobId)) workLog.open = priorWorkOpen.get(jobId);
+    fragment.append(article);
+  });
+  elements.turns.replaceChildren(fragment);
+  renderFacts(detail);
+
+  window.requestAnimationFrame(() => {
+    if (!preserveScroll || wasNearEnd) elements.scroll.scrollTop = elements.scroll.scrollHeight;
+    else elements.scroll.scrollTop = previousTop;
   });
 }
 
-elements.copyIdButton.addEventListener("click", () => {
-  if (state.selectedJobId) {
-    copyText(state.selectedJobId, "调用 ID 已复制");
+async function loadConversation(rootId, { quiet = false, preserveScroll = true } = {}) {
+  try {
+    const detail = await requestJson(`/api/conversations/${encodeURIComponent(rootId)}`);
+    if (state.selectedRootId !== rootId) return;
+    state.selectedDetail = detail;
+    renderConversation(detail, { preserveScroll });
+    setConnection("live", "已同步");
+  } catch (error) {
+    setConnection("offline", "同步中断");
+    if (!quiet) showToast(`暂时无法读取对话：${error.message}`);
   }
-});
+}
 
-elements.mobileBackButton.addEventListener("click", () => {
-  document.body.dataset.mobileView = "list";
-  elements.runSearch.focus({ preventScroll: true });
-});
-elements.inspectorToggle.addEventListener("click", () =>
-  setInspectorOpen(document.body.dataset.inspectorOpen !== "true"),
-);
-elements.inspectorCloseButton.addEventListener("click", () => setInspectorOpen(false));
-elements.conversationNewEvents.addEventListener("click", async () => {
-  if (state.timelineBrowsingEarlier) {
-    await returnToLatestEvents();
+async function selectConversation(rootId, { preserveScroll = false } = {}) {
+  state.selectedRootId = rootId;
+  state.selectedDetail = null;
+  state.eventPages.clear();
+  renderList();
+  await loadConversation(rootId, { preserveScroll });
+}
+
+async function loadEarlierEvents(turn, button) {
+  const jobId = String(turn.job_id || turn.id || "");
+  if (!jobId) return;
+  const current = state.eventPages.get(jobId);
+  const page = current || {
+    events: Array.isArray(turn.events) ? turn.events : [],
+    hasEarlier: Boolean(turn.event_page?.has_earlier),
+    nextBefore: turn.event_page?.next_before_sequence,
+  };
+  if (!page.hasEarlier) return;
+  button.disabled = true;
+  button.textContent = "正在加载…";
+  try {
+    const before = Number(page.nextBefore);
+    const query = Number.isFinite(before) ? `&before_sequence=${before}` : "";
+    const payload = await requestJson(
+      `/api/runs/${encodeURIComponent(jobId)}/events?limit=${EVENT_PAGE_SIZE}${query}`,
+    );
+    const metadata = payload.event_page || {};
+    state.eventPages.set(jobId, {
+      events: mergeEvents(payload.events || [], page.events)
+        .slice(0, MAX_EVENTS_PER_TURN - MAX_PINNED_EVENTS_PER_TURN),
+      hasEarlier: Boolean(metadata.has_earlier),
+      nextBefore: metadata.next_before_sequence,
+      browsingEarlier: true,
+    });
+    renderConversation(state.selectedDetail, { preserveScroll: true });
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "加载本轮更早的工作记录";
+    showToast(`无法加载更早记录：${error.message}`);
   }
-  returnConversationToLatest({ behavior: "smooth" });
-  state.conversationPendingCount = 0;
-  elements.conversationNewEvents.hidden = true;
-});
-elements.conversationPane.addEventListener("scroll", clearConversationNewEventsIfAtEnd);
-window.addEventListener("scroll", clearConversationNewEventsIfAtEnd, { passive: true });
+}
 
+function scheduleRefresh() {
+  window.clearTimeout(state.refreshTimer);
+  state.refreshTimer = window.setTimeout(() => loadConversations({ quiet: true }), 180);
+}
+
+function connectStream() {
+  if (!("EventSource" in window)) return;
+  state.eventSource?.close();
+  const source = new EventSource("/api/stream");
+  state.eventSource = source;
+  source.addEventListener("open", () => setConnection("live", "实时同步"));
+  source.addEventListener("update", scheduleRefresh);
+  source.onmessage = scheduleRefresh;
+  source.onerror = () => setConnection("offline", "轮询同步");
+}
+
+function startPolling() {
+  window.clearInterval(state.pollTimer);
+  state.pollTimer = window.setInterval(() => loadConversations({ quiet: true }), POLL_INTERVAL_MS);
+  window.clearInterval(state.durationTimer);
+  state.durationTimer = window.setInterval(tickDuration, 1000);
+}
+
+elements.refresh.addEventListener("click", () => loadConversations());
+elements.loadMore.addEventListener("click", () => loadConversations({ append: true }));
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) {
-    scheduleRefresh();
-  }
+  if (document.visibilityState === "visible") scheduleRefresh();
 });
-
 window.addEventListener("beforeunload", () => {
   state.eventSource?.close();
-  stopPolling();
-  clearInterval(state.activeTimer);
+  window.clearInterval(state.pollTimer);
+  window.clearInterval(state.durationTimer);
 });
 
-state.activeTimer = setInterval(tickActiveDetail, 1000);
-loadRuns();
+loadConversations();
 connectStream();
+startPolling();

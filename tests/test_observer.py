@@ -5,6 +5,7 @@ import math
 import tempfile
 import threading
 import time
+import urllib.error
 import unittest
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -326,12 +327,18 @@ class ObserverStoreTests(unittest.TestCase):
             )
 
             usage = ObserverStore(root).get_run(job_id)["result"]["usage"]
+            performance = ObserverStore(root).get_run(job_id)["performance"]
 
             self.assertEqual(120, usage["input_tokens"])
             self.assertEqual(30, usage["output_tokens"])
             self.assertEqual(7, usage["reasoning_tokens"])
             self.assertEqual(80, usage["cached_input_tokens"])
             self.assertEqual(157, usage["total_tokens"])
+            self.assertEqual(120, performance["input_tokens"])
+            self.assertEqual(30, performance["output_tokens"])
+            self.assertEqual(7, performance["reasoning_tokens"])
+            self.assertEqual(80, performance["cached_input_tokens"])
+            self.assertEqual(157, performance["total_tokens"])
 
     def test_command_activity_detail_preserves_only_safe_status_and_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1382,6 +1389,90 @@ class ObserverStoreTests(unittest.TestCase):
                 ]["root_job_id"],
             )
 
+    def test_conversations_group_turns_and_keep_projected_turn_details(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = JobStore(root, spawner=lambda *_: None)
+            first = store.submit(request(), force=True)
+            store.claim(first["job_id"])
+            store.complete(
+                first["job_id"],
+                {
+                    "status": "ok",
+                    "output": "第一轮公开答复",
+                    "usage": {"input_tokens": 12, "output_tokens": 8},
+                },
+            )
+            continuation = request()
+            continuation["continuation"] = {
+                "from_job_id": first["job_id"],
+                "max_turns": 3,
+            }
+            second = store.submit(continuation, force=True)
+            store.claim(second["job_id"])
+            store.complete(
+                second["job_id"],
+                {"status": "ok", "output": "第二轮公开答复"},
+            )
+            independent = store.submit(request(), force=True)
+
+            private_canary = "PRIVATE_CONVERSATION_STATE_CANARY"
+            state_path = root / first["job_id"] / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["private_raw_input"] = private_canary
+            state_path.write_text(
+                json.dumps(state, ensure_ascii=False), encoding="utf-8"
+            )
+
+            observer = ObserverStore(root)
+            page_one = observer.list_conversations(limit=1, offset=0)
+            page_two = observer.list_conversations(limit=1, offset=1)
+            all_conversations = observer.list_conversations(limit=10, offset=0)
+            detail = observer.get_conversation(first["job_id"])
+
+            self.assertEqual(2, page_one["total"])
+            self.assertEqual(1, len(page_one["conversations"]))
+            self.assertEqual(1, page_one["next_offset"])
+            self.assertEqual(1, len(page_two["conversations"]))
+            self.assertIsNone(page_two["next_offset"])
+            self.assertEqual(
+                {first["job_id"], independent["job_id"]},
+                {
+                    item["root_job_id"]
+                    for item in all_conversations["conversations"]
+                },
+            )
+            grouped = next(
+                item
+                for item in all_conversations["conversations"]
+                if item["root_job_id"] == first["job_id"]
+            )
+            self.assertEqual(2, grouped["turn_count"])
+            self.assertEqual(first["job_id"], detail["root_job_id"])
+            self.assertEqual(2, detail["conversation"]["turn_count"])
+            self.assertEqual(
+                [first["job_id"], second["job_id"]],
+                [turn["job_id"] for turn in detail["turns"]],
+            )
+            required_turn_fields = {
+                "job_id",
+                "job_status",
+                "display",
+                "progress",
+                "result",
+                "events",
+                "event_page",
+                "performance",
+                "context",
+            }
+            for turn in detail["turns"]:
+                self.assertTrue(required_turn_fields.issubset(turn))
+            self.assertNotIn(
+                private_canary,
+                json.dumps(all_conversations, ensure_ascii=False),
+            )
+            self.assertNotIn(private_canary, json.dumps(detail, ensure_ascii=False))
+
     def test_unchanged_history_reuses_cached_summaries(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = JobStore(Path(temp), spawner=lambda *_: None)
@@ -1446,6 +1537,25 @@ class ObserverStoreTests(unittest.TestCase):
                     timeout=3,
                 ) as response:
                     event_page = json.load(response)
+                with urllib.request.urlopen(
+                    f"{base}/api/conversations?limit=1&offset=0",
+                    timeout=3,
+                ) as response:
+                    conversations = json.load(response)
+                with urllib.request.urlopen(
+                    f"{base}/api/conversations/{receipt['job_id']}",
+                    timeout=3,
+                ) as response:
+                    conversation = json.load(response)
+                with self.assertRaises(urllib.error.HTTPError) as posted:
+                    urllib.request.urlopen(
+                        urllib.request.Request(
+                            f"{base}/api/conversations",
+                            data=b"{}",
+                            method="POST",
+                        ),
+                        timeout=3,
+                    )
                 with urllib.request.urlopen(f"{base}/", timeout=3) as response:
                     html = response.read().decode("utf-8")
             finally:
@@ -1462,7 +1572,14 @@ class ObserverStoreTests(unittest.TestCase):
             self.assertEqual(receipt["job_id"], detail["job_id"])
             self.assertEqual(receipt["job_id"], event_page["job_id"])
             self.assertIn("events", event_page)
-            self.assertIn("模型调用观察台", html)
+            self.assertEqual(1, conversations["total"])
+            self.assertEqual(receipt["job_id"], conversations["conversations"][0]["root_job_id"])
+            self.assertEqual(receipt["job_id"], conversation["root_job_id"])
+            self.assertEqual(1, conversation["conversation"]["turn_count"])
+            self.assertEqual(receipt["job_id"], conversation["turns"][0]["job_id"])
+            self.assertIn(posted.exception.code, {405, 501})
+            posted.exception.close()
+            self.assertIn("模型对话观察台", html)
 
 
 if __name__ == "__main__":
