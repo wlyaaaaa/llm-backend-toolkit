@@ -1,8 +1,11 @@
 "use strict";
 
 const POLL_INTERVAL_MS = 5000;
+const ACTIVE_REFRESH_INTERVAL_MS = 5000;
 const REFRESH_DEBOUNCE_MS = 180;
 const HISTORY_PAGE_SIZE = 100;
+const EVENT_PAGE_SIZE = 160;
+const MAX_TIMELINE_EVENTS = 240;
 
 const state = {
   runs: [],
@@ -22,6 +25,15 @@ const state = {
   historyTotal: 0,
   nextOffset: null,
   timelineJobId: null,
+  timelineEvents: [],
+  timelinePage: null,
+  eventPageLoading: false,
+  timelineBrowsingEarlier: false,
+  draftJobId: null,
+  draftText: "",
+  activeTimer: null,
+  lastActiveRefresh: 0,
+  durationObservedAt: 0,
 };
 
 const elements = {
@@ -38,6 +50,8 @@ const elements = {
   detailContent: document.querySelector("#detail-content"),
   timeline: document.querySelector("#timeline"),
   timelineStatus: document.querySelector("#timeline-status"),
+  loadEarlierEvents: document.querySelector("#load-earlier-events"),
+  returnLatestEvents: document.querySelector("#return-latest-events"),
   runStatus: document.querySelector("#run-status"),
   runId: document.querySelector("#run-id"),
   runTitle: document.querySelector("#run-title"),
@@ -63,6 +77,7 @@ const elements = {
     delivery: document.querySelector("#metric-delivery"),
   },
   contextDetail: document.querySelector("#metric-context-detail"),
+  tokenDetail: document.querySelector("#metric-token-detail"),
 };
 
 const runItemCache = new Map();
@@ -72,6 +87,7 @@ const STATUS_MAP = {
   accepted: { label: "已接收", tone: "neutral" },
   queued: { label: "排队中", tone: "active" },
   running: { label: "执行中", tone: "active" },
+  cancellation_requested: { label: "取消中", tone: "active" },
   completed: { label: "已完成", tone: "success" },
   succeeded: { label: "已完成", tone: "success" },
   ok: { label: "已完成", tone: "success" },
@@ -138,7 +154,9 @@ function statusInfo(run) {
 }
 
 function isActive(run) {
-  return ["accepted", "queued", "running"].includes(normalizedStatus(run));
+  return ["accepted", "queued", "running", "cancellation_requested"].includes(
+    normalizedStatus(run),
+  );
 }
 
 function isCompleted(run) {
@@ -206,15 +224,27 @@ function formatDuration(value, unitHint = "") {
     return `${Math.round(milliseconds)} ms`;
   }
   const seconds = milliseconds / 1000;
-  if (seconds < 60) {
-    return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} 秒`;
+  if (seconds < 10) {
+    return `${seconds.toFixed(1)} 秒`;
   }
-  const minutes = Math.floor(seconds / 60);
-  const remaining = Math.round(seconds % 60);
+  const roundedSeconds = Math.round(milliseconds / 1000);
+  if (roundedSeconds < 60) {
+    return `${roundedSeconds} 秒`;
+  }
+  const minutes = Math.floor(roundedSeconds / 60);
+  const remaining = roundedSeconds % 60;
   return `${minutes} 分 ${remaining} 秒`;
 }
 
 function calculateDuration(detail) {
+  const elapsedSeconds = pick(
+    detail,
+    "performance.elapsed_seconds",
+    "progress.metrics.elapsed_seconds",
+  );
+  if (elapsedSeconds !== undefined) {
+    return formatDuration(elapsedSeconds, "seconds");
+  }
   const direct = pick(
     detail,
     "duration_ms",
@@ -304,7 +334,13 @@ function tokenSummary(detail) {
     pick(detail, "result.usage.total_tokens"),
     pick(detail, "usage.total_tokens"),
   );
-  const promptTokens = pick(detail, "result.usage.prompt_tokens", "usage.prompt_tokens");
+  const promptTokens = pick(
+    detail,
+    "result.usage.prompt_tokens",
+    "result.usage.input_tokens",
+    "usage.prompt_tokens",
+    "usage.input_tokens",
+  );
   const completionTokens = pick(
     detail,
     "result.usage.completion_tokens",
@@ -348,6 +384,9 @@ function tokenSummary(detail) {
     "metrics.estimated_output_tokens",
   );
   if (estimatedOutputTokens !== undefined && Number(estimatedOutputTokens) > 0) {
+    if (!pick(detail, "progress.public_preview")) {
+      return { label: "—", detail: "Token usage 不可用" };
+    }
     const label = `≈ ${formatNumber(estimatedOutputTokens)} 输出`;
     return { label, detail: `${label} token（公开内容估算）` };
   }
@@ -683,6 +722,87 @@ function timelineEventKey(item, sourceIndex) {
   return `event:${sourceIndex}:${kind}`;
 }
 
+function eventSequence(item) {
+  const value = Number(firstDefined(item?.sequence, item?.seq, item?.sequence_id));
+  return Number.isFinite(value) ? value : 0;
+}
+
+function mergeTimelineEvents(existing, incoming) {
+  const merged = new Map();
+  for (const item of [...existing, ...incoming]) {
+    const key = String(
+      firstDefined(item?.event_id, item?.id, `sequence:${eventSequence(item)}`),
+    );
+    merged.set(key, item);
+  }
+  return [...merged.values()].sort((left, right) => eventSequence(left) - eventSequence(right));
+}
+
+function collapseOutputDeltas(events) {
+  const collapsed = [];
+  let batch = null;
+  const flush = () => {
+    if (!batch) {
+      return;
+    }
+    collapsed.push({
+      schema: "llm-backend-toolkit.observer-ui-event.v1",
+      event_id: `delta:${batch.first}:${batch.last}`,
+      sequence: batch.last,
+      occurred_utc: batch.time,
+      kind: "agent.output.delta.batch",
+      visibility: "public",
+      summary_zh:
+        `已接收 ${batch.count} 个公开片段；` +
+        "完整内容已在“实时草稿”中逐段追加。",
+      payload: { count: batch.count },
+    });
+    batch = null;
+  };
+
+  for (const item of events) {
+    if (item?.kind === "agent.output.delta") {
+      const sequence = eventSequence(item);
+      if (!batch) {
+        batch = {
+          count: 0,
+          first: sequence,
+          last: sequence,
+          time: item.occurred_utc,
+        };
+      }
+      batch.count += 1;
+      batch.last = sequence;
+      batch.time = item.occurred_utc || batch.time;
+      continue;
+    }
+    flush();
+    collapsed.push(item);
+  }
+  flush();
+  return collapsed;
+}
+
+function toolActivityTitle(payload) {
+  const toolNumber = Number(payload?.tool_calls);
+  const numbered = Number.isFinite(toolNumber) && toolNumber > 0;
+  if (payload?.item_type === "command_execution") {
+    const prefix = numbered ? `第 ${toolNumber} 个命令` : "命令活动";
+    const stateLabel = {
+      in_progress: "正在执行",
+      succeeded: "执行成功",
+      failed: "执行失败",
+      declined: "已拒绝",
+    }[payload?.command_status] || "状态更新";
+    return `${prefix} · ${stateLabel}`;
+  }
+  if (payload?.item_type === "file_change") {
+    const prefix = numbered ? `第 ${toolNumber} 个工具活动` : "文件编辑";
+    return `${prefix} · ${payload?.status === "completed" ? "完成编辑文件" : "正在编辑文件"}`;
+  }
+  return "智能体工具活动";
+}
+
 function timelineEvents(detail) {
   const provided = firstDefined(
     pick(detail, "events"),
@@ -712,10 +832,21 @@ function timelineEvents(detail) {
     "validation.started": "校验结果",
     "run.completed": "运行完成",
     "run.failed": "运行失败",
+    "cache.hit": "复用已完成结果",
+    "handoff.collected": "结果已取回",
+    "handoff.disposition": "结果接管状态",
     "agent.observability": "AICLI 可观察性",
+    "agent.thread.started": "建立智能体线程",
+    "agent.turn.started": "智能体开始本轮",
+    "agent.turn.completed": "智能体完成本轮",
+    "agent.turn.failed": "智能体本轮失败",
+    "agent.run.failed": "智能体运行失败",
+    "agent.limit.hit": "智能体达到执行限制",
     "agent.reasoning.activity": "智能体分析活动",
+    "agent.planning.activity": "智能体计划更新",
     "agent.tool.activity": "智能体工具活动",
     "agent.output.delta": "智能体公开进度",
+    "agent.output.delta.batch": "智能体公开进度",
     "agent.output.completed": "智能体公开输出",
     "agent.context.usage.updated": "实时上下文更新",
     "agent.context.compaction.completed": "Codex 已自动压缩上下文",
@@ -726,7 +857,7 @@ function timelineEvents(detail) {
     "media.asr.started": "ChineseASR 开始",
     "media.asr.completed": "ChineseASR 完成",
   };
-  return provided
+  const visible = collapseOutputDeltas(provided)
     .map((item, sourceIndex) => ({ item, sourceIndex }))
     .filter(({ item }) => item?.kind !== "agent.context.usage.updated")
     .map(({ item, sourceIndex }) => {
@@ -734,8 +865,8 @@ function timelineEvents(detail) {
     const metrics = item.metrics && typeof item.metrics === "object" ? item.metrics : undefined;
     const payload = item.payload && typeof item.payload === "object" ? item.payload : undefined;
     let title = String(firstDefined(item.title, item.label, kindLabels[kind], kind));
-    if (kind === "agent.tool.activity" && payload?.item_type === "file_change") {
-      title = payload.status === "completed" ? "完成编辑文件" : "正在编辑文件";
+    if (kind === "agent.tool.activity") {
+      title = toolActivityTitle(payload);
     }
     let detailText = formatStructured(
       firstDefined(item.summary_zh, item.public_summary, item.summary, metrics, ""),
@@ -759,6 +890,26 @@ function timelineEvents(detail) {
         tone = "success";
       }
       detailText = lines.filter(Boolean).join("\n");
+    }
+    if (kind === "agent.context.compaction.completed") {
+      const compactionCount = Number(payload?.compaction_count);
+      const currentTokens = Number(payload?.current_tokens);
+      const contextWindow = Number(payload?.context_window_tokens);
+      const lines = [detailText];
+      if (Number.isFinite(compactionCount) && compactionCount > 0) {
+        lines.push(`第 ${compactionCount} 次自动压缩。`);
+      }
+      if (Number.isFinite(currentTokens) && Number.isFinite(contextWindow)) {
+        lines.push(
+          `压缩后约 ${formatNumber(currentTokens)} / ${formatNumber(contextWindow)} Token。`,
+        );
+      }
+      detailText = lines.filter(Boolean).join("\n");
+      tone = "success";
+    }
+    if (kind === "agent.output.completed") {
+      detailText = "公开输出已完成；完整内容请查看“最终结果”。";
+      tone = "success";
     }
     if (kind === "workspace.change.observed") {
       const lines = [detailText];
@@ -810,6 +961,10 @@ function timelineEvents(detail) {
       workspacePaths,
     };
     });
+  const start = state.timelineBrowsingEarlier
+    ? 0
+    : Math.max(0, visible.length - MAX_TIMELINE_EVENTS);
+  return visible.slice(start, start + MAX_TIMELINE_EVENTS);
 }
 
 function normalizedTone(value) {
@@ -940,9 +1095,6 @@ function clearTimelineItems() {
 }
 
 function shouldFollowTimelineEnd(runChanged) {
-  if (!window.matchMedia("(max-width: 980px)").matches) {
-    return false;
-  }
   if (runChanged || timelineItemCache.size === 0) {
     return true;
   }
@@ -954,8 +1106,21 @@ function shouldFollowTimelineEnd(runChanged) {
 }
 
 function renderTimeline(detail) {
-  const events = timelineEvents(detail);
-  elements.timelineStatus.textContent = events.length ? `${events.length} 个节点` : "暂无事件";
+  const sourceDetail = { ...detail, events: state.timelineEvents };
+  const events = timelineEvents(sourceDetail);
+  const rawCount = state.timelineEvents.length;
+  const earlierCount = Number(state.timelinePage?.earlier_count || 0);
+  const latestSequence = Number(state.timelinePage?.latest_sequence || 0);
+  const loadedLast = eventSequence(state.timelineEvents.at(-1));
+  const laterCount = Math.max(0, latestSequence - loadedLast);
+  elements.timelineStatus.textContent = events.length
+    ? `${rawCount} 个事件 · ${events.length} 个节点` +
+      (earlierCount > 0 ? ` · 更早 ${formatNumber(earlierCount)} 个` : "") +
+      (laterCount > 0 ? ` · 更晚 ${formatNumber(laterCount)} 个` : "")
+    : "暂无事件";
+  elements.loadEarlierEvents.hidden = !state.timelinePage?.has_earlier;
+  elements.loadEarlierEvents.disabled = state.eventPageLoading;
+  elements.returnLatestEvents.hidden = laterCount === 0;
   const timelineJobId = String(firstDefined(detail.job_id, detail.id, state.selectedJobId, ""));
   const runChanged = timelineJobId !== state.timelineJobId;
   const followLatest = shouldFollowTimelineEnd(runChanged);
@@ -998,8 +1163,63 @@ function renderTimeline(detail) {
   }
 }
 
+function updateTimelineState(detail) {
+  const jobId = String(firstDefined(detail.job_id, detail.id, state.selectedJobId, ""));
+  const incoming = Array.isArray(detail.events) ? detail.events : [];
+  if (jobId !== state.timelineJobId) {
+    state.timelineEvents = incoming.slice(-MAX_TIMELINE_EVENTS);
+    state.timelinePage = detail.event_page || null;
+    state.timelineBrowsingEarlier = false;
+    return;
+  }
+  if (!state.timelineBrowsingEarlier) {
+    state.timelineEvents = mergeTimelineEvents(state.timelineEvents, incoming).slice(
+      -MAX_TIMELINE_EVENTS,
+    );
+    state.timelinePage = detail.event_page || state.timelinePage;
+  } else if (detail.event_page) {
+    state.timelinePage = {
+      ...state.timelinePage,
+      latest_sequence: detail.event_page.latest_sequence,
+    };
+  }
+}
+
 function extractDraft(detail) {
   return pick(detail, "progress.public_preview");
+}
+
+function renderDraft(detail) {
+  const jobId = String(firstDefined(detail.job_id, detail.id, state.selectedJobId, ""));
+  const nextText = formatStructured(extractDraft(detail), "尚未产生草稿");
+  const runChanged = jobId !== state.draftJobId;
+  const distanceFromEnd =
+    elements.draftContent.scrollHeight -
+    elements.draftContent.clientHeight -
+    elements.draftContent.scrollTop;
+  const followEnd = runChanged || distanceFromEnd <= 32;
+
+  if (!runChanged && nextText.startsWith(state.draftText)) {
+    const suffix = nextText.slice(state.draftText.length);
+    if (suffix) {
+      elements.draftContent.append(document.createTextNode(suffix));
+    }
+  } else if (runChanged || nextText !== state.draftText) {
+    elements.draftContent.textContent = nextText;
+  }
+
+  state.draftJobId = jobId;
+  state.draftText = nextText;
+  if (followEnd) {
+    elements.draftContent.scrollTop = elements.draftContent.scrollHeight;
+  }
+
+  const truncated = pick(detail, "progress.public_preview_truncated") === true;
+  elements.draftLiveIndicator.hidden = !isActive(detail) && !truncated;
+  elements.draftLiveIndicator.textContent = truncated ? "预览已截断" : "逐段更新中";
+  elements.draftLiveIndicator.title = truncated
+    ? "草稿预览已达到安全上限；任务完成后请查看最终结果"
+    : "公开草稿正在按模型原文逐段追加";
 }
 
 function extractResult(detail) {
@@ -1100,6 +1320,10 @@ function selectDetailTab(tabName, { focus = false } = {}) {
 
 function renderDetail(detail) {
   state.selectedDetail = detail;
+  state.durationObservedAt = Date.now();
+  if (isActive(detail)) {
+    state.lastActiveRefresh = Date.now();
+  }
   const info = statusInfo(detail);
   elements.emptyState.hidden = true;
   elements.detailContent.hidden = false;
@@ -1125,19 +1349,22 @@ function renderDetail(detail) {
     metric.title = metric.textContent;
   }
   elements.metrics.tokens.title = tokens.detail;
+  elements.tokenDetail.textContent = tokens.detail;
   elements.metrics.context.title = context.detail;
   elements.contextDetail.textContent = context.detail;
   elements.metrics.tps.title = tps;
 
-  const draft = extractDraft(detail);
   const result = extractResult(detail);
-  elements.draftContent.textContent = formatStructured(draft, "尚未产生草稿");
+  renderDraft(detail);
   elements.resultContent.textContent = formatStructured(
     result,
-    isCompleted(detail) ? "任务已完成，但没有返回结果" : "等待任务完成",
+    isCompleted(detail)
+      ? "任务已完成，但没有返回结果"
+      : isActive(detail)
+        ? "等待任务完成"
+        : "任务已结束，但没有可展示结果",
   );
-  elements.draftLiveIndicator.hidden = !isActive(detail);
-
+  updateTimelineState(detail);
   renderTimeline(detail);
   renderChecks(detail);
   elements.receiptContent.textContent = formatStructured(receiptPayload(detail), "暂无回执");
@@ -1150,6 +1377,11 @@ function renderNoSelection() {
   clearTimelineItems();
   elements.timeline.querySelector(".timeline-placeholder")?.remove();
   state.timelineJobId = null;
+  state.timelineEvents = [];
+  state.timelinePage = null;
+  state.timelineBrowsingEarlier = false;
+  state.draftJobId = null;
+  state.draftText = "";
   elements.timelineStatus.textContent = "未选择";
 }
 
@@ -1309,6 +1541,96 @@ async function loadDetail(jobId, { quiet = false } = {}) {
   }
 }
 
+async function loadEarlierEvents() {
+  if (
+    state.eventPageLoading ||
+    !state.selectedJobId ||
+    !state.timelinePage?.has_earlier
+  ) {
+    return;
+  }
+  const before = Number(state.timelinePage.next_before_sequence);
+  if (!Number.isFinite(before) || before <= 1) {
+    return;
+  }
+  state.eventPageLoading = true;
+  elements.loadEarlierEvents.disabled = true;
+  const previousHeight = elements.timeline.scrollHeight;
+  const previousTop = elements.timeline.scrollTop;
+  const anchor = [...elements.timeline.querySelectorAll(".timeline-item")].find(
+    (item) => item.offsetTop + item.offsetHeight >= previousTop,
+  );
+  const anchorKey = anchor?.dataset.eventKey;
+  const anchorOffset = anchor ? anchor.offsetTop - previousTop : 0;
+  try {
+    const page = await requestJson(
+      `/api/runs/${encodeURIComponent(state.selectedJobId)}/events` +
+        `?limit=${EVENT_PAGE_SIZE}&before_sequence=${before}`,
+    );
+    if (state.selectedJobId !== page.job_id) {
+      return;
+    }
+    state.timelineEvents = mergeTimelineEvents(
+      state.timelineEvents,
+      Array.isArray(page.events) ? page.events : [],
+    ).slice(0, MAX_TIMELINE_EVENTS);
+    state.timelinePage = {
+      ...(page.event_page || {}),
+      latest_sequence: state.timelinePage?.latest_sequence,
+    };
+    state.timelineBrowsingEarlier = true;
+    renderTimeline(state.selectedDetail || { job_id: state.selectedJobId });
+    const retainedAnchor = anchorKey ? timelineItemCache.get(anchorKey)?.item : null;
+    elements.timeline.scrollTop = retainedAnchor
+      ? retainedAnchor.offsetTop - anchorOffset
+      : previousTop + Math.max(0, elements.timeline.scrollHeight - previousHeight);
+  } catch (error) {
+    showToast(`加载更早事件失败：${error.message}`);
+  } finally {
+    state.eventPageLoading = false;
+    elements.loadEarlierEvents.disabled = false;
+  }
+}
+
+async function returnToLatestEvents() {
+  if (!state.selectedJobId) {
+    return;
+  }
+  state.timelineBrowsingEarlier = false;
+  state.timelineEvents = [];
+  state.timelinePage = null;
+  state.timelineJobId = null;
+  await loadDetail(state.selectedJobId);
+}
+
+function tickActiveDetail() {
+  const detail = state.selectedDetail;
+  if (!detail || !isActive(detail)) {
+    return;
+  }
+  const baseSeconds = Number(
+    pick(
+      detail,
+      "performance.elapsed_seconds",
+      "progress.metrics.elapsed_seconds",
+    ),
+  );
+  const observedAt = Number(state.durationObservedAt);
+  if (Number.isFinite(baseSeconds) && Number.isFinite(observedAt)) {
+    const liveSeconds = baseSeconds + Math.max(0, Date.now() - observedAt) / 1000;
+    elements.metrics.duration.textContent = formatDuration(liveSeconds, "seconds");
+    elements.metrics.duration.title = elements.metrics.duration.textContent;
+  }
+  const now = Date.now();
+  if (
+    !document.hidden &&
+    now - state.lastActiveRefresh >= ACTIVE_REFRESH_INTERVAL_MS
+  ) {
+    state.lastActiveRefresh = now;
+    void loadRuns({ quiet: true });
+  }
+}
+
 async function selectRun(jobId, { quiet = false } = {}) {
   if (!jobId) {
     return;
@@ -1379,6 +1701,8 @@ elements.refreshButton.addEventListener("click", () => loadRuns());
 elements.loadMoreButton.addEventListener("click", () =>
   loadRuns({ quiet: true, append: true }),
 );
+elements.loadEarlierEvents.addEventListener("click", loadEarlierEvents);
+elements.returnLatestEvents.addEventListener("click", returnToLatestEvents);
 elements.runSearch.addEventListener("input", (event) => {
   state.query = event.target.value;
   renderRunList();
@@ -1441,7 +1765,9 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("beforeunload", () => {
   state.eventSource?.close();
   stopPolling();
+  clearInterval(state.activeTimer);
 });
 
+state.activeTimer = setInterval(tickActiveDetail, 1000);
 loadRuns();
 connectStream();

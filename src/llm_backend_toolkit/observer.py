@@ -36,6 +36,10 @@ OBSERVER_MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 OBSERVER_MAX_RESULT_BYTES = 2 * 1024 * 1024
 OBSERVER_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 OBSERVER_MAX_LOCAL_METADATA_BYTES = 4 * 1024
+OBSERVER_EVENT_PAGE_SIZE = 160
+_TERMINAL_JOB_STATUSES = frozenset(
+    {"completed", "failed", "cancelled", "stale"}
+)
 _DISPLAY_FIELDS = frozenset(
     {
         "task_label",
@@ -74,6 +78,7 @@ _USAGE_NUMBER_FIELDS = frozenset(
         "input_tokens",
         "output_tokens",
         "cached_tokens",
+        "cached_input_tokens",
         "estimated_output_tokens",
         "token_events",
         "eval_duration_ns",
@@ -145,25 +150,52 @@ def _parse_utc(value: Any) -> datetime | None:
         return None
 
 
-def _elapsed_seconds(state: dict[str, Any], progress: dict[str, Any] | None) -> float:
+def _effective_job_status(
+    state: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> str:
+    status = str(state.get("job_status") or "")
+    if status in _TERMINAL_JOB_STATUSES or status == "cancellation_requested":
+        return status
+    deadline = _parse_utc(state.get("monitor_until_utc"))
+    observed = now or datetime.now(timezone.utc)
+    if deadline is not None and observed > deadline:
+        return "stale"
+    return status
+
+
+def _elapsed_seconds(
+    state: dict[str, Any],
+    progress: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+) -> float:
+    measured = 0.0
     if progress:
         metrics = progress.get("metrics") or {}
         try:
             measured = float(metrics.get("elapsed_seconds") or 0.0)
         except (TypeError, ValueError):
             measured = 0.0
-        if measured > 0:
-            return round(measured, 3)
+        if not math.isfinite(measured) or measured < 0:
+            measured = 0.0
     created = _parse_utc(state.get("created_utc"))
     updated = _parse_utc(state.get("updated_utc"))
     if created is None:
-        return 0.0
-    end = (
-        datetime.now(timezone.utc)
-        if state.get("job_status") in {"queued", "running"}
-        else updated or datetime.now(timezone.utc)
-    )
-    return round(max(0.0, (end - created).total_seconds()), 3)
+        return round(max(0.0, measured), 3)
+    observed = now or datetime.now(timezone.utc)
+    status = _effective_job_status(state, now=observed)
+    if status in {"accepted", "queued", "running", "cancellation_requested"}:
+        calculated = max(0.0, (observed - created).total_seconds())
+        return round(max(measured, calculated), 3)
+    if status == "stale":
+        deadline = _parse_utc(state.get("monitor_until_utc"))
+        end = deadline or updated or observed
+        return round(max(0.0, (end - created).total_seconds()), 3)
+    end = updated or observed
+    calculated = max(0.0, (end - created).total_seconds())
+    return round(max(measured, calculated), 3)
 
 
 def _bounded_output(
@@ -645,6 +677,8 @@ def _project_progress(progress: dict[str, Any]) -> dict[str, Any]:
     preview = progress.get("public_preview")
     if isinstance(preview, str) and preview:
         projected["public_preview"] = preview[:20_000]
+    if progress.get("public_preview_truncated") is True:
+        projected["public_preview_truncated"] = True
     return projected
 
 
@@ -960,7 +994,7 @@ class ObserverStore:
             if (
                 cached is not None
                 and cached[0] == signature
-                and cached[1].get("job_status") not in {"queued", "running"}
+                and cached[1].get("job_status") in _TERMINAL_JOB_STATUSES
             ):
                 return dict(cached[1])
         state = state or _read_json(directory / "state.json")
@@ -969,19 +1003,20 @@ class ObserverStore:
         progress = _read_json(directory / "progress.json") or {}
         result, _result_bytes, result_bounded = _read_result_json(directory)
         result = {} if result_bounded else result or {}
+        effective_status = _effective_job_status(state)
         elapsed = _elapsed_seconds(state, progress)
         display = _safe_display(state.get("display"))
         events = read_events(directory)
         value = {
             "job_id": directory.name,
-            "job_status": state.get("job_status"),
+            "job_status": effective_status,
             "result_status": state.get("result_status"),
             "backend": state.get("backend") or state.get("provider"),
             "model": _model_name(result, state),
             "created_utc": state.get("created_utc"),
             "updated_utc": state.get("updated_utc"),
             "display": display,
-            "phase": progress.get("phase") or state.get("job_status"),
+            "phase": progress.get("phase") or effective_status,
             "summary_zh": progress.get("summary")
             or (events[-1].get("summary_zh") if events else ""),
             "performance": _performance(result, progress, elapsed),
@@ -1107,20 +1142,22 @@ class ObserverStore:
             result = _project_result(result)
         else:
             result = {}
+        all_recent_events = read_events(directory)
         events = _with_local_workspace_paths(
-            read_events(directory),
+            all_recent_events[-OBSERVER_EVENT_PAGE_SIZE:],
             _local_workspace_root(directory),
         )
+        event_page = self._event_page_metadata(events)
         elapsed = _elapsed_seconds(state, progress)
         context = _context_snapshot(
             result,
-            events,
+            all_recent_events,
             progress,
         )
         return {
             "schema": "llm-backend-toolkit.observer-run.v1",
             "job_id": job_id,
-            "job_status": state.get("job_status"),
+            "job_status": _effective_job_status(state),
             "result_status": state.get("result_status"),
             "backend": state.get("backend") or state.get("provider"),
             "model": _model_name(result, state),
@@ -1137,8 +1174,59 @@ class ObserverStore:
             "performance": _performance(result, progress, elapsed),
             "context": context,
             "events": events,
-            "handoff": self._handoff(events),
+            "event_page": event_page,
+            "handoff": self._handoff(all_recent_events),
             "result": result,
+        }
+
+    @staticmethod
+    def _event_page_metadata(events: list[dict[str, Any]]) -> dict[str, Any]:
+        first = int(events[0].get("sequence") or 0) if events else None
+        last = int(events[-1].get("sequence") or 0) if events else None
+        has_earlier = bool(first is not None and first > 1)
+        return {
+            "returned": len(events),
+            "first_sequence": first,
+            "last_sequence": last,
+            "has_earlier": has_earlier,
+            "next_before_sequence": first if has_earlier else None,
+            "earlier_count": max(0, first - 1) if first is not None else 0,
+            "latest_sequence": last,
+        }
+
+    def get_event_page(
+        self,
+        job_id: str,
+        *,
+        limit: int = OBSERVER_EVENT_PAGE_SIZE,
+        before_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        if len(job_id) != 24 or any(char not in "0123456789abcdef" for char in job_id):
+            raise ValueError("Invalid job ID")
+        directory = self.root / job_id
+        if not (directory / "state.json").is_file():
+            raise FileNotFoundError(f"Unknown job: {job_id}")
+        bounded_limit = max(1, min(int(limit), 200))
+        events = _with_local_workspace_paths(
+            read_events(
+                directory,
+                limit=bounded_limit,
+                before_sequence=before_sequence,
+            ),
+            _local_workspace_root(directory),
+        )
+        metadata = self._event_page_metadata(events)
+        latest = read_events(directory, limit=1)
+        latest_sequence = (
+            int(latest[-1].get("sequence") or 0) if latest else None
+        )
+        metadata["latest_sequence"] = latest_sequence
+        return {
+            "schema": "llm-backend-toolkit.observer-events.v1",
+            "status": "ok",
+            "job_id": job_id,
+            "events": events,
+            "event_page": metadata,
         }
 
     @staticmethod
@@ -1321,7 +1409,30 @@ def create_observer_server(
                 )
                 return
             if path.startswith("/api/runs/"):
-                job_id = path.removeprefix("/api/runs/")
+                suffix = path.removeprefix("/api/runs/")
+                if suffix.endswith("/events"):
+                    job_id = suffix.removesuffix("/events")
+                    query = urllib.parse.parse_qs(parsed.query)
+                    try:
+                        limit = int((query.get("limit") or [str(OBSERVER_EVENT_PAGE_SIZE)])[0])
+                    except ValueError:
+                        limit = OBSERVER_EVENT_PAGE_SIZE
+                    try:
+                        before = int((query.get("before_sequence") or ["0"])[0]) or None
+                    except ValueError:
+                        before = None
+                    try:
+                        page = store.get_event_page(
+                            job_id,
+                            limit=limit,
+                            before_sequence=before,
+                        )
+                    except (FileNotFoundError, ValueError):
+                        self._send_json(404, {"status": "not_found"})
+                        return
+                    self._send_json(200, page)
+                    return
+                job_id = suffix
                 try:
                     detail = store.get_run(job_id)
                 except (FileNotFoundError, ValueError):

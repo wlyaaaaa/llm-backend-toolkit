@@ -11,8 +11,8 @@
     >
     <title>模型调用观察台</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/styles.css">
-    <script src="/assets/app.js" defer></script>
+    <link rel="stylesheet" href="/assets/styles.css?v=20260813-observer-live">
+    <script src="/assets/app.js?v=20260813-observer-live" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#workspace">跳到工作区</a>
@@ -90,6 +90,12 @@
             <span id="timeline-status" class="quiet-label">未选择</span>
           </div>
           <ol id="timeline" class="timeline"></ol>
+          <button id="load-earlier-events" class="load-more-button" type="button" hidden>
+            加载更早事件
+          </button>
+          <button id="return-latest-events" class="load-more-button" type="button" hidden>
+            返回最新事件
+          </button>
         </aside>
 
         <section class="detail-pane" aria-label="调用详情">
@@ -136,9 +142,16 @@
                   <dt>推理等级</dt>
                   <dd id="metric-reasoning">—</dd>
                 </div>
-                <div class="metric">
+                <div class="metric metric-token">
                   <dt>Token</dt>
-                  <dd id="metric-tokens">—</dd>
+                  <dd>
+                    <details class="context-disclosure">
+                      <summary id="metric-tokens">—</summary>
+                      <span id="metric-token-detail" class="context-detail">
+                        Token usage 不可用
+                      </span>
+                    </details>
+                  </dd>
                 </div>
                 <div class="metric metric-context">
                   <dt>当前上下文</dt>
@@ -207,10 +220,10 @@
             <section id="draft-panel" class="content-card draft-card" role="tabpanel" aria-labelledby="tab-draft">
               <header class="card-header">
                 <div>
-                  <p class="eyebrow">Working output</p>
+                  <p class="eyebrow">生成中的公开输出</p>
                   <h3 id="draft-title">
                     实时草稿
-                    <span id="draft-live-indicator" class="live-indicator" hidden>更新中</span>
+                    <span id="draft-live-indicator" class="live-indicator" hidden>逐段更新中</span>
                   </h3>
                 </div>
                 <button class="copy-button" type="button" data-copy-target="draft-content">复制</button>
@@ -221,7 +234,7 @@
             <section id="result-panel" class="content-card result-card" role="tabpanel" aria-labelledby="tab-result" hidden>
               <header class="card-header">
                 <div>
-                  <p class="eyebrow">Delivered output</p>
+                  <p class="eyebrow">已交付输出</p>
                   <h3 id="result-title">最终结果</h3>
                 </div>
                 <button class="copy-button" type="button" data-copy-target="result-content">复制</button>
@@ -232,7 +245,7 @@
             <section id="receipt-panel" class="content-card receipt-card" role="tabpanel" aria-labelledby="tab-receipt" hidden>
               <header class="card-header">
                 <div>
-                  <p class="eyebrow">Verification</p>
+                  <p class="eyebrow">验证结果</p>
                   <h3 id="receipt-title">校验回执</h3>
                 </div>
                 <span id="receipt-summary" class="receipt-summary">暂无校验</span>

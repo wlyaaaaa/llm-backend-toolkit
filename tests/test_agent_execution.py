@@ -1819,6 +1819,23 @@ class AgentExecutionTests(unittest.TestCase):
             json.dumps(event, ensure_ascii=False),
         )
 
+    def test_public_agent_output_delta_preserves_stream_boundary_whitespace(self):
+        progress = []
+
+        AiCliProfileRunner._emit_machine_event(
+            progress.append,
+            {
+                "kind": "output.delta",
+                "status": "updated",
+                "item_type": "agent_message",
+                "public_text": " world\n",
+            },
+        )
+
+        self.assertEqual(1, len(progress))
+        self.assertEqual("world", progress[0]["public_event"]["summary_zh"])
+        self.assertEqual(" world\n", progress[0]["content_delta"])
+
     def test_empty_or_unsafe_public_agent_output_delta_is_not_emitted(self):
         for label, public_text in {
             "empty": " \x00\t\r\n\u202e ",
@@ -1861,16 +1878,31 @@ class AgentExecutionTests(unittest.TestCase):
         self.assertEqual(1, len(progress))
         event = progress[0]
         summary = event["public_event"]["summary_zh"]
-        self.assertEqual(summary, event["content_replace"])
+        replacement = event["content_replace"]
         self.assertNotIn("content_delta", event)
         self.assertLessEqual(len(summary), 500)
+        self.assertGreater(len(replacement), len(summary))
+        self.assertLessEqual(len(replacement), 20_000)
+        self.assertFalse(event.get("public_preview_truncated", False))
         self.assertTrue(summary.startswith("＜script＞alert(1)＜/script＞ 公开进度"))
         self.assertNotIn("<script>", summary)
+        self.assertNotIn("<script>", replacement)
         self.assertFalse(any(ord(char) < 32 for char in summary))
         self.assertNotIn(
             "PRIVATE_HIDDEN_REASONING",
             json.dumps(event, ensure_ascii=False),
         )
+
+        truncated = []
+        AiCliProfileRunner._emit_machine_event(
+            truncated.append,
+            {
+                "kind": "output.completed",
+                "status": "completed",
+                "public_text": "公开" * 11_000,
+            },
+        )
+        self.assertTrue(truncated[0]["public_preview_truncated"])
 
     def test_empty_public_agent_message_is_not_emitted(self):
         progress = []

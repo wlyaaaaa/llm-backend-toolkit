@@ -3,56 +3,22 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import signal
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
-import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .errors import ToolError, classify_agent_process_error
+from .public_progress import bounded_public_draft, bounded_public_text
 
 
 PUBLIC_PROGRESS_MAX_CHARS = 500
-_PUBLIC_PROGRESS_SECRET_PATTERNS = (
-    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\b(?:sk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{16,}\b"),
-    re.compile(
-        r"(?i)\b(?:api[_-]?key|authorization|passwd|password|secret|token)"
-        r"\s*[:=]\s*[\"']?[A-Za-z0-9+/_.=-]{8,}"
-    ),
-)
-_PUBLIC_PROGRESS_ALWAYS_UNSAFE_PATH_PATTERNS = (
-    re.compile(r"\bfile:(?:/{1,3}|\\\\)", re.IGNORECASE),
-    re.compile(
-        r"(?<![A-Z0-9_/\\])[A-Z]:[\\/][^\s\x00]*",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\\\\[^\s\\/]+\\[^\s\\/]+"),
-    re.compile(
-        r"\\Device\\[^\s\\/]+\\[^\s\\/]+",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"""(?:^|[\s(\[{'\"=:：（【「『])\\(?!\\)[^\s\\/]+\\[^\s\\/]+"""
-    ),
-)
-_PUBLIC_PROGRESS_NON_URL_PATH_PATTERNS = (
-    re.compile(r"//[^\s\\/]+/[^\s\\/]+"),
-    re.compile(r"(?<![:/])/(?!/)[^\s\\/]+/[^\s\\/]+"),
-    re.compile(
-        r"""(?:^|[\s(\[{'\"=:：（【「『])/(?!/)[^\s\\/]+(?:/[^\s\\/]+)*"""
-    ),
-)
-_PUBLIC_PROGRESS_URL_PATTERN = re.compile(
-    r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s<>＜＞]+"
-)
+PUBLIC_DRAFT_MAX_CHARS = 20_000
 
 _AUDITED_AICLI_VERSION = "0.3.3"
 _AUDITED_AICLI_SOURCE_BUNDLE_SHA256 = (
@@ -383,37 +349,16 @@ def _extract_text(value: Any) -> str:
     return ""
 
 
-def _is_safe_public_progress_text(value: str) -> bool:
-    if any(
-        pattern.search(value)
-        for pattern in (
-            *_PUBLIC_PROGRESS_SECRET_PATTERNS,
-            *_PUBLIC_PROGRESS_ALWAYS_UNSAFE_PATH_PATTERNS,
-        )
-    ):
-        return False
-    non_url_probe = _PUBLIC_PROGRESS_URL_PATTERN.sub("", value)
-    return not any(
-        pattern.search(non_url_probe)
-        for pattern in _PUBLIC_PROGRESS_NON_URL_PATH_PATTERNS
-    )
-
-
 def _bounded_public_text(value: Any, *, max_chars: int = PUBLIC_PROGRESS_MAX_CHARS) -> str:
-    safe_chars: list[str] = []
-    for char in str(value or ""):
-        if unicodedata.category(char) in {"Cc", "Cf", "Cs"}:
-            safe_chars.append(" ")
-        elif char == "<":
-            safe_chars.append("＜")
-        elif char == ">":
-            safe_chars.append("＞")
-        else:
-            safe_chars.append(char)
-    normalized = " ".join("".join(safe_chars).split())
-    if not _is_safe_public_progress_text(normalized):
-        return ""
-    return normalized[:max_chars].rstrip()
+    return bounded_public_text(value, max_chars=max_chars)
+
+
+def _bounded_public_draft(
+    value: Any,
+    *,
+    max_chars: int = PUBLIC_DRAFT_MAX_CHARS,
+) -> tuple[str, bool]:
+    return bounded_public_draft(value, max_chars=max_chars)
 
 
 class QwenCodeRunner:
@@ -1043,9 +988,14 @@ class AiCliProfileRunner:
             ):
                 safe_duration_ms = raw_duration_ms
         public_text = ""
+        public_draft = ""
+        public_draft_truncated = False
         if kind in {"output.delta", "output.completed"}:
-            public_text = _bounded_public_text(event.get("public_text"))
-            if not public_text:
+            public_draft, public_draft_truncated = _bounded_public_draft(
+                event.get("public_text")
+            )
+            public_text = _bounded_public_text(public_draft)
+            if not public_draft or not public_text:
                 return
         phase = "waiting"
         if kind == "reasoning.activity":
@@ -1139,9 +1089,11 @@ class AiCliProfileRunner:
             },
         }
         if kind == "output.delta":
-            progress["content_delta"] = public_text
+            progress["content_delta"] = public_draft
         elif kind == "output.completed":
-            progress["content_replace"] = public_text
+            progress["content_replace"] = public_draft
+        if public_draft_truncated:
+            progress["public_preview_truncated"] = True
         if kind == "context.usage.updated":
             progress["current_context_tokens"] = event.get("current_tokens")
             progress["context_window_tokens"] = event.get(

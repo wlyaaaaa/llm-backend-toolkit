@@ -26,6 +26,10 @@ from .input_integrity import (
 )
 from .input_lifecycle import JobInputLifecycle, JobNotRunnableError  # noqa: F401
 from .observability import append_event, append_event_once, notify_observer
+from .public_progress import (
+    has_potential_secret_suffix,
+    is_safe_public_progress_text,
+)
 from .workspace_observer import (
     WorkspaceRootError,
     revalidate_workspace_root,
@@ -1190,7 +1194,7 @@ class JobStore:
         job_id: str,
         *,
         allow_public_preview: bool,
-        preview_chars: int = 1_500,
+        preview_chars: int = 20_000,
         write_interval_seconds: float = 0.25,
     ) -> Callable[[dict[str, Any]], None]:
         job_dir = self._job_dir(job_id)
@@ -1199,6 +1203,8 @@ class JobStore:
         preview_limit = max(200, preview_chars)
         interval = max(0.05, write_interval_seconds)
         public_preview = ""
+        public_preview_truncated = False
+        public_preview_blocked = False
         events: list[dict[str, Any]] = []
         last_phase = ""
         last_write = 0.0
@@ -1226,24 +1232,53 @@ class JobStore:
             "failed": "执行遇到问题，已保留可接管状态。",
         }
         allowed_phases = set(summaries)
+        record_lock = threading.Lock()
 
-        def record(event: dict[str, Any]) -> None:
-            nonlocal public_preview, last_phase, last_write
+        def record_unlocked(event: dict[str, Any]) -> None:
+            nonlocal public_preview, public_preview_truncated, public_preview_blocked
+            nonlocal last_phase, last_write
             phase = str(event.get("phase") or "waiting")
             if phase not in allowed_phases:
                 phase = "waiting"
             delta = str(event.get("content_delta") or "")
             has_replacement = "content_replace" in event
             replacement = str(event.get("content_replace") or "")
-            if allow_public_preview:
+            upstream_truncated = event.get("public_preview_truncated") is True
+            if allow_public_preview and not public_preview_blocked:
                 if has_replacement:
-                    public_preview = replacement[:preview_limit]
+                    candidate = replacement[:preview_limit]
+                    candidate_truncated = upstream_truncated or len(replacement) > preview_limit
                 elif delta and len(public_preview) < preview_limit:
-                    public_preview = (public_preview + delta)[:preview_limit]
-            if has_replacement:
-                metrics["estimated_output_tokens"] = _estimate_tokens(replacement)
-            elif delta:
-                metrics["estimated_output_tokens"] += _estimate_tokens(delta)
+                    candidate_truncated = (
+                        public_preview_truncated
+                        or upstream_truncated
+                        or len(public_preview) + len(delta) > preview_limit
+                    )
+                    candidate = (public_preview + delta)[:preview_limit]
+                elif delta:
+                    public_preview_truncated = True
+                    candidate = public_preview
+                    candidate_truncated = True
+                else:
+                    candidate = public_preview
+                    candidate_truncated = public_preview_truncated
+                if candidate and (
+                    not is_safe_public_progress_text(candidate)
+                    or has_potential_secret_suffix(candidate)
+                ):
+                    public_preview = ""
+                    public_preview_truncated = False
+                    public_preview_blocked = True
+                else:
+                    public_preview = candidate
+                    public_preview_truncated = candidate_truncated
+            if allow_public_preview and not public_preview_blocked:
+                if has_replacement:
+                    metrics["estimated_output_tokens"] = _estimate_tokens(replacement)
+                elif delta:
+                    metrics["estimated_output_tokens"] += _estimate_tokens(delta)
+            elif public_preview_blocked:
+                metrics["estimated_output_tokens"] = 0
             if "elapsed_seconds" in event:
                 metrics["elapsed_seconds"] = round(float(event.get("elapsed_seconds") or 0.0), 3)
             if "content_chars" in event:
@@ -1274,7 +1309,16 @@ class JobStore:
                 )
                 if re.fullmatch(r"[a-z][a-z0-9_.-]{0,95}", kind) and summary:
                     payload_value = public_event.get("payload")
-                    if kind != "agent.context.usage.updated":
+                    if kind not in {
+                        "agent.context.usage.updated",
+                        "agent.output.delta",
+                    } and not (
+                        not allow_public_preview
+                        and kind in {"agent.output.delta", "agent.output.completed"}
+                    ) and not (
+                        public_preview_blocked
+                        and kind in {"agent.output.delta", "agent.output.completed"}
+                    ):
                         append_event(
                             job_dir,
                             kind,
@@ -1360,6 +1404,8 @@ class JobStore:
             }
             if public_preview:
                 payload["public_preview"] = public_preview
+            if public_preview_truncated:
+                payload["public_preview_truncated"] = True
 
             should_write = (
                 phase_changed
@@ -1369,6 +1415,10 @@ class JobStore:
             if should_write:
                 _atomic_json(job_dir / "progress.json", payload)
                 last_write = now
+
+        def record(event: dict[str, Any]) -> None:
+            with record_lock:
+                record_unlocked(event)
 
         return record
 

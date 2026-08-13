@@ -91,10 +91,10 @@ python -m venv .venv
 `0.9.0` 提供正式的本机只读 GUI。它使用白底和纯绿主色，在一个常驻窗口中自动展示：
 
 - 多个模型调用和多轮 continuation，对话历史持久保留并可分页回看；
-- 中文工作时间线、AICLI 工具/文件编辑活动、OCR/ASR 阶段与公开输出；
-- AICLI 安全公开消息按增量通过 SSE 无刷新分段显示；`output.completed` 仍保留最终输出与时间线事件，但用完整公开文本 replacement 对齐草稿，不会把同一份完成文本再次追加；
+- 中文工作时间线、AICLI 命令/文件编辑计数、OCR/ASR 阶段与公开输出；单个任务先显示最近 160 个事件，可按页加载更早记录，旧版逐片段事件会合并为一个摘要节点；
+- AICLI 安全公开消息按增量通过 SSE 无刷新追加到草稿；增量不再逐条灌入耐久时间线，`output.completed` 用有界完整公开文本对齐草稿且不会重复追加。草稿最多保留 20,000 字，达到上限会明确提示并引导查看最终结果；
 - 实际模型、执行方式、推理模式或 reasoning effort；
-- Token、耗时和 Token/s；Ollama 完成后以 `completion_tokens / eval_duration_ns` 显示模型评估时段的精确输出速度，AICLI agent 的安全真实输出 token 只除以从启动到完成的整段执行墙钟并明确标为估算，运行中公开输出同样只显示带时段说明的估算；
+- Token、耗时和 Token/s；Token 卡可展开显示输入、输出和缓存（缓存是输入子集，不重复计入总数）。执行中耗时每秒更新，静默阶段仍会低频复核服务端状态，终态或过期后冻结；Ollama 完成后以 `completion_tokens / eval_duration_ns` 显示模型评估时段的精确输出速度，AICLI agent 的安全真实输出 token 只除以从启动到完成的整段执行墙钟并明确标为估算；
 - Codex agent 同一条运行时通知实际同时上报当前上下文占用与上限后，显示例如“已用 202k / 共 258k”并实时更新；在完整实测到达前显示“等待 Codex 运行时实测”，不会显示 registry 配置值或结果回执替代品；自动压缩完成后同步回落并写入时间线；
 - 最终结果、确定性校验和 Codex 是否已取回结果。
 
@@ -117,7 +117,7 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 
 观察台显示的是经过净化的可验证工作过程，不是隐藏 chain-of-thought。prompt、隐藏 thinking/reasoning 正文、原始命令和参数、工具输入输出、环境变量、OCR/ASR 正文及绝对私密路径都不会进入公开事件日志。正式 skill 只使用上述 AICLI 源码入口，不会因旧安装态缺少事件能力而静默降级。其 Codex app-server 合同以当前实装的 `codex-cli 0.145.0` 为已验证基线；`0.145.x` 较早公开 `agentMessage` 缺少 completed 的兼容只在后续存在非空 completed final 且没有其他未完成项时成立。未来更新默认尝试，但必要字段、通知、生命周期或清理协议漂移会返回明确错误。
 
-“Token”卡片是本次运行累计输入、输出与缓存 usage；“当前上下文”是另一项指标，只接受 Codex app-server 在同一条 `thread/tokenUsage/updated` 运行时通知中同时提供的 `last.totalTokens` 与 `modelContextWindow`。首个完整实测尚未到达时固定显示“等待 Codex 运行时实测”；如果运行结束仍缺少完整配对，或字段、通知、生命周期不兼容，AICLI 会返回明确协议错误，不会用 prompt token、累计输入、Toolkit 压缩估算、backend registry 上限或最终结果回执补成估算值。时间线中的“已压缩调用输入”是 Toolkit 发起模型调用前的确定性输入整理；“Codex 已自动压缩上下文”才是原生 agent 会话实际完成的 context compaction。
+“Token”卡片是本次运行累计输入、输出与缓存 usage，兼容 provider 与 AICLI 的两套字段命名；缓存属于输入子集，不会重复计入总数。“当前上下文”是另一项指标，只接受 Codex app-server 在同一条 `thread/tokenUsage/updated` 运行时通知中同时提供的 `last.totalTokens` 与 `modelContextWindow`。首个完整实测尚未到达时固定显示“等待 Codex 运行时实测”；如果运行结束仍缺少完整配对，或字段、通知、生命周期不兼容，AICLI 会返回明确协议错误，不会用 prompt token、累计输入、Toolkit 压缩估算、backend registry 上限或最终结果回执补成估算值。时间线中的“已压缩调用输入”是 Toolkit 发起模型调用前的确定性输入整理；“Codex 已自动压缩上下文”才是原生 agent 会话实际完成的 context compaction，后者只展示上游真实提供的压缩次数与上下文占用，不补造压缩前数据。
 
 请求可选填 `observability.public_label` 作为持久历史中的非敏感短标题；观察台不会从私密任务正文自动生成标题。技能调用会在有合适公开名称时填写此字段。
 

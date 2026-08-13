@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
+import llm_backend_toolkit.jobs as jobs_module
 from llm_backend_toolkit.backends import BackendRegistry
 from llm_backend_toolkit.jobs import JobStore
 from llm_backend_toolkit.observability import append_event, read_events
@@ -285,6 +286,11 @@ class JobStoreTests(unittest.TestCase):
                     "thinking_chars": 42,
                     "token_events": 7,
                     "content_delta": '{"partial":"do not show"}',
+                    "public_event": {
+                        "kind": "agent.output.delta",
+                        "summary_zh": "PRIVATE_PUBLIC_OUTPUT",
+                        "payload": {"status": "updated"},
+                    },
                     "reasoning": "PRIVATE_HIDDEN_TRACE",
                 }
             )
@@ -297,9 +303,77 @@ class JobStoreTests(unittest.TestCase):
             self.assertIn("内部分析", progress["summary"])
             self.assertEqual(42, progress["metrics"]["thinking_chars"])
             self.assertEqual(7, progress["metrics"]["token_events"])
+            self.assertEqual(0, progress["metrics"]["estimated_output_tokens"])
             self.assertNotIn("public_preview", progress)
             self.assertNotIn("PRIVATE_HIDDEN_TRACE", raw)
             self.assertNotIn('"partial"', raw)
+            self.assertNotIn(
+                "agent.output.delta",
+                [event["kind"] for event in read_events(Path(temp) / receipt["job_id"])],
+            )
+
+    def test_progress_recorder_serializes_concurrent_callbacks_without_losing_deltas(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(
+                receipt["job_id"],
+                allow_public_preview=True,
+                write_interval_seconds=0.05,
+            )
+            original_atomic_json = jobs_module._atomic_json
+            active = 0
+            active_guard = threading.Lock()
+            collisions: list[str] = []
+
+            def guarded_atomic_json(path, value):
+                nonlocal active
+                with active_guard:
+                    active += 1
+                    if active > 1:
+                        collisions.append(str(path))
+                try:
+                    time.sleep(0.005)
+                    original_atomic_json(path, value)
+                finally:
+                    with active_guard:
+                        active -= 1
+
+            barrier = threading.Barrier(8)
+            errors: list[Exception] = []
+
+            def emit(index: int) -> None:
+                try:
+                    barrier.wait(timeout=3)
+                    recorder(
+                        {
+                            "phase": "completed",
+                            "content_delta": f"[{index}]",
+                        }
+                    )
+                except Exception as error:  # pragma: no cover - diagnostic capture
+                    errors.append(error)
+
+            with patch(
+                "llm_backend_toolkit.jobs._atomic_json",
+                side_effect=guarded_atomic_json,
+            ):
+                threads = [threading.Thread(target=emit, args=(index,)) for index in range(8)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=5)
+
+            progress = json.loads(
+                (Path(temp) / receipt["job_id"] / "progress.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertFalse(errors)
+            self.assertFalse(collisions)
+            for index in range(8):
+                self.assertIn(f"[{index}]", progress["public_preview"])
 
     def test_progress_recorder_replaces_streamed_preview_with_completed_reply(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -313,7 +387,17 @@ class JobStoreTests(unittest.TestCase):
                 write_interval_seconds=0.05,
             )
 
-            recorder({"phase": "generating", "content_delta": "你好，"})
+            recorder(
+                {
+                    "phase": "generating",
+                    "content_delta": "你好，",
+                    "public_event": {
+                        "kind": "agent.output.delta",
+                        "summary_zh": "你好，",
+                        "payload": {"status": "updated"},
+                    },
+                }
+            )
             recorder({"phase": "generating", "content_delta": "这是"})
             recorder(
                 {
@@ -338,10 +422,35 @@ class JobStoreTests(unittest.TestCase):
                 if event["kind"] == "agent.output.completed"
             ]
             self.assertEqual(1, len(completed_events))
+            self.assertNotIn(
+                "agent.output.delta",
+                [event["kind"] for event in read_events(Path(temp) / receipt["job_id"])],
+            )
             self.assertEqual(
                 "你好，这是公开回复。",
                 completed_events[0]["summary_zh"],
             )
+
+    def test_progress_recorder_suppresses_a_secret_split_across_deltas(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(
+                receipt["job_id"],
+                allow_public_preview=True,
+                write_interval_seconds=0.05,
+            )
+
+            recorder({"phase": "generating", "content_delta": "token=abcd"})
+            recorder({"phase": "completed", "content_delta": "efgh12345678"})
+
+            progress_path = Path(temp) / receipt["job_id"] / "progress.json"
+            raw = progress_path.read_text(encoding="utf-8")
+            progress = json.loads(raw)
+            self.assertNotIn("public_preview", progress)
+            self.assertEqual(0, progress["metrics"]["estimated_output_tokens"])
+            self.assertNotIn("token=abcdefgh12345678", raw)
 
     def test_progress_recorder_completed_reply_sets_preview_without_deltas(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -370,6 +479,27 @@ class JobStoreTests(unittest.TestCase):
                 progress["public_preview"],
             )
             self.assertEqual("completed", progress["phase"])
+
+    def test_progress_recorder_keeps_a_useful_bounded_public_draft_by_default(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(
+                receipt["job_id"],
+                allow_public_preview=True,
+            )
+            reply = "中" * 25_000
+
+            recorder({"phase": "completed", "content_replace": reply})
+
+            progress = json.loads(
+                (Path(temp) / receipt["job_id"] / "progress.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(reply[:20_000], progress["public_preview"])
+            self.assertTrue(progress["public_preview_truncated"])
 
     def test_get_returns_compact_state_and_result_only_after_completion(self):
         with tempfile.TemporaryDirectory() as temp:

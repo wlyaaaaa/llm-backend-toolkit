@@ -42,8 +42,14 @@ class ObserverUiTests(unittest.TestCase):
         parser = _DocumentParser()
         parser.feed(self.html)
 
-        self.assertEqual(["/assets/styles.css"], parser.stylesheets)
-        self.assertEqual(["/assets/app.js"], parser.scripts)
+        self.assertEqual(
+            ["/assets/styles.css?v=20260813-observer-live"],
+            parser.stylesheets,
+        )
+        self.assertEqual(
+            ["/assets/app.js?v=20260813-observer-live"],
+            parser.scripts,
+        )
         self.assertIn('href="/assets/favicon.svg"', self.html)
         self.assertTrue((UI_ROOT / "favicon.svg").is_file())
         self.assertFalse(re.search(r"https?://|//cdn", self.html, re.IGNORECASE))
@@ -59,6 +65,8 @@ class ObserverUiTests(unittest.TestCase):
             {
                 "run-list",
                 "timeline",
+                "load-earlier-events",
+                "return-latest-events",
                 "draft-panel",
                 "result-panel",
                 "receipt-panel",
@@ -200,6 +208,7 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("输入 ${formatNumber(promptTokens)}", self.js)
         self.assertIn("输出 ${formatNumber(completionTokens)}", self.js)
         self.assertIn("缓存 ${formatNumber(cachedTokens)}", self.js)
+        self.assertIn('id="metric-token-detail"', self.html)
         self.assertIn("输出 token/秒（整段墙钟估算）", self.js)
         self.assertIn("输出 token/秒（模型评估时段精确）", self.js)
         self.assertIn("function contextSummary(detail)", self.js)
@@ -234,6 +243,53 @@ class ObserverUiTests(unittest.TestCase):
             timeline_body.index('pick(detail, "progress.events")'),
         )
 
+    def test_live_elapsed_draft_and_event_history_are_incremental(self) -> None:
+        duration_body = self.js.split("function calculateDuration(detail)", 1)[1].split(
+            "function calculateTps", 1
+        )[0]
+        self.assertIn('"performance.elapsed_seconds"', duration_body)
+        self.assertIn('"progress.metrics.elapsed_seconds"', duration_body)
+        self.assertIn("ACTIVE_REFRESH_INTERVAL_MS", self.js)
+        self.assertIn("setInterval(tickActiveDetail", self.js)
+        self.assertIn("Math.round(milliseconds / 1000)", self.js)
+
+        self.assertIn("function renderDraft(detail)", self.js)
+        self.assertIn("nextText.startsWith(state.draftText)", self.js)
+        self.assertIn("document.createTextNode(suffix)", self.js)
+        render_detail = self.js.split("function renderDetail(detail)", 1)[1].split(
+            "function renderNoSelection", 1
+        )[0]
+        self.assertIn("renderDraft(detail)", render_detail)
+        self.assertNotIn("elements.draftContent.textContent =", render_detail)
+        self.assertIn("逐段更新中", self.html)
+        self.assertIn("public_preview_truncated", self.js)
+        self.assertIn("草稿预览已达到安全上限", self.js)
+
+        self.assertIn('id="load-earlier-events"', self.html)
+        self.assertIn("function loadEarlierEvents()", self.js)
+        self.assertIn("before_sequence", self.js)
+        self.assertIn("agent.output.delta.batch", self.js)
+        self.assertIn("完整内容已在“实时草稿”中逐段追加", self.js)
+        self.assertIn("earlier_count", self.js)
+        self.assertIn('id="return-latest-events"', self.html)
+        self.assertIn("function returnToLatestEvents()", self.js)
+        self.assertIn("更晚 ${formatNumber(laterCount)} 个", self.js)
+        self.assertIn(".slice(-MAX_TIMELINE_EVENTS)", self.js)
+        self.assertIn(".slice(0, MAX_TIMELINE_EVENTS)", self.js)
+        self.assertIn("timelineItemCache.get(anchorKey)", self.js)
+        self.assertIn("latest_sequence: detail.event_page.latest_sequence", self.js)
+        self.assertIn("任务已结束，但没有可展示结果", self.js)
+        self.assertNotIn('matchMedia("(max-width: 1100px)")', self.js)
+
+    def test_timeline_summarizes_native_compaction_and_safe_tool_progress(self) -> None:
+        self.assertIn("第 ${compactionCount} 次自动压缩", self.js)
+        self.assertIn("压缩后约", self.js)
+        self.assertIn("第 ${toolNumber} 个命令", self.js)
+        self.assertIn("执行成功", self.js)
+        self.assertIn('"agent.run.failed": "智能体运行失败"', self.js)
+        self.assertIn('"handoff.collected": "结果已取回"', self.js)
+        self.assertIn('cancellation_requested: { label: "取消中", tone: "active" }', self.js)
+
     def test_agent_route_effort_and_max_label_take_priority(self) -> None:
         reasoning = self.js.split("function reasoningLevel(detail)", 1)[1].split(
             "function gpuLabel", 1
@@ -267,13 +323,13 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("100dvh", self.css)
         self.assertIn("minmax(0, 1fr)", self.css)
         self.assertIn("overflow-wrap: anywhere", self.css)
-        self.assertRegex(self.css, r"@media\s*\(max-width:\s*980px\)")
+        self.assertRegex(self.css, r"@media\s*\(max-width:\s*1100px\)")
         self.assertRegex(self.css, r"@media\s*\(max-width:\s*680px\)")
         self.assertIn("prefers-reduced-motion", self.css)
         self.assertIn("--quiet: #657169", self.css)
         self.assertIn("outline: 2px solid var(--green-deep)", self.css)
         self.assertIn("repeat(auto-fit, minmax(96px, 1fr))", self.css)
-        narrow_timeline = self.css.split("@media (max-width: 980px)", 1)[1].split(
+        narrow_timeline = self.css.split("@media (max-width: 1100px)", 1)[1].split(
             "@media (max-width: 680px)", 1
         )[0]
         self.assertIn("overflow-y: auto", narrow_timeline)

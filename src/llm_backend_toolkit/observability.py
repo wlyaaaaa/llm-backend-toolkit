@@ -403,7 +403,14 @@ def _public_payload(kind: str, payload: Any) -> dict[str, Any]:
         return _project_flat_payload(
             payload,
             text_fields=frozenset(
-                {"status", "item_type", "error_category", "limit", "level"}
+                {
+                    "status",
+                    "item_type",
+                    "command_status",
+                    "error_category",
+                    "limit",
+                    "level",
+                }
             ),
             id_fields=frozenset({"error_code"}),
             number_fields=frozenset(
@@ -414,6 +421,8 @@ def _public_payload(kind: str, payload: Any) -> dict[str, Any]:
                     "current_tokens",
                     "context_window_tokens",
                     "compaction_count",
+                    "exit_code",
+                    "duration_ms",
                 }
             ),
         )
@@ -453,6 +462,7 @@ def read_events(
     *,
     after_sequence: int = 0,
     limit: int = 500,
+    before_sequence: int | None = None,
 ) -> list[dict[str, Any]]:
     path = Path(job_dir) / "events.jsonl"
     if not path.is_file():
@@ -482,6 +492,8 @@ def read_events(
             except (TypeError, ValueError):
                 continue
             if sequence <= after_sequence:
+                continue
+            if before_sequence is not None and sequence >= before_sequence:
                 continue
             public_event = dict(event)
             kind = str(public_event.get("kind") or "")

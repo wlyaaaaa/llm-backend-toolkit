@@ -7,12 +7,12 @@
 界面由三部分组成：
 
 1. 调用记录与历史：显示并发任务、独立对话和 continuation 轮次，支持筛选、搜索和分页加载旧历史。
-2. 中文工作时间线：显示排队、输入整理、GPU/模型连接、推理活动、分段公开输出、安全工具与文件编辑活动、OCR/ASR、校验和交付事件。
+2. 中文工作时间线：显示排队、输入整理、GPU/模型连接、推理活动、安全命令与文件编辑活动、OCR/ASR、上下文压缩、校验和交付事件；每次先取最近 160 个，可按页加载更早记录。
 3. 详情：展示流式公开草稿、最终输出、校验回执、经安全复验的本机完整路径和调用方 opt-in 的有界 diff，以及模型、推理等级、累计 Token、当前上下文、Token/s、耗时、GPU 与交付状态。
 
 所有历史以耐久 job artifact 为准；读取 GUI 不增加轮询计数，也不等于 Codex 已取回结果。只有结果读取入口会记录 `handoff.collected`。
 
-公开草稿只消费 AICLI 投影出的安全 `agent_message`：每个 `output.delta` 都会作为单个增量进入 progress recorder，并借助 SSE refresh 无刷新分段显示。`output.completed` 仍作为最终输出和时间线事件保留，但携带有界完整公开文本 replacement；recorder 用它替换草稿而不是再次追加，因此已有 delta 不会重复，没有 delta 时也能直接建立完整 preview。这些公开消息不是隐藏 chain-of-thought。
+公开草稿只消费 AICLI 投影出的安全 `agent_message`：每个 `output.delta` 都作为单个增量进入 progress recorder，并借助 SSE refresh 在 DOM 中追加新后缀；增量本身不再逐条写入耐久时间线。`output.completed` 仍作为最终输出和时间线事件保留，并用有界完整公开文本 replacement 对齐草稿，因此已有 delta 不会重复，没有 delta 时也能直接建立 preview。草稿默认上限为 20,000 字，超过时投影显式 `public_preview_truncated`，界面提示改看最终结果。这些公开消息保持模型原文，不自动翻译，也不是隐藏 chain-of-thought。
 
 Codex `0.145.x` 存在一个已实测的窄生命周期例外：一条或多条较早公开 `agentMessage` 可能已经发送 delta，却不再发送自己的 completed，随后由一条更晚的 completed final 收口。AICLI 只在版本确为 `0.145.x`、所有未完成项都是较早的公开 `agentMessage`、且之后存在非空 completed final 时兼容；推理、工具、文件项未完成，final 缺失，final 之后才出现未完成消息，或未来 Codex 版本都继续明确失败。这样既保留真实实时消息，也不会把任意协议漂移伪装成成功。
 
@@ -57,7 +57,7 @@ Token/s 指标必须说明依据：
 - `public_content_estimate`：运行中公开输出的估算 token 数除以该公开输出观察窗的墙钟时间，近似；
 - `unavailable` / `not_applicable`：无法可靠计算，OCR/ASR 不冒充 token TPS。
 
-Token 卡片的主值是总计，悬停说明会分列输入、输出和缓存；Token/s 一律带“输出 token/秒”单位，并在卡片或说明中明确标出“模型评估时段精确值”“整段执行墙钟估算”或“公开输出观察窗估算”。
+Token 卡片的主值是总计，可展开直接查看输入、输出和缓存；输入兼容 `prompt_tokens` / `input_tokens`，输出兼容 `completion_tokens` / `output_tokens`，缓存兼容 `cached_tokens` / `cached_input_tokens`。缓存属于输入子集，不再次加到总数。Token/s 一律带“输出 token/秒”单位，并明确标出“模型评估时段精确值”“整段执行墙钟估算”或“公开输出观察窗估算”。
 
 “当前上下文”与累计 Token 严格分离：
 
@@ -102,8 +102,9 @@ Toolkit 调用 OCR/ASR 时会把开始/完成阶段写入同一个模型 job。�
 ## 实时与性能
 
 - `/api/stream` 只发送 refresh 信号，详情仍由同源 loopback JSON API 读取；连接会持续发送 heartbeat，直到客户端主动断开，不会在任务仍运行时静默到期。
-- 浏览器断线时降级为有界轮询；SSE 恢复后停止轮询。
+- 浏览器断线时降级为有界轮询；SSE 恢复后停止通用轮询。选中的活跃任务仍用本地 1 秒 ticker 更新耗时，并每 5 秒低频复核详情，使静默工具阶段和 `monitor_until_utc` 过期仍能及时反映；终态耗时冻结。
 - GUI 首屏只加载最近 100 条，旧历史按页加载。
+- 单个任务详情只加载最近 160 个事件，`/api/runs/{job_id}/events` 以 `before_sequence` 向前分页；前端最多渲染 240 个节点，并将旧版连续 `agent.output.delta` 合并为一个公开片段摘要。
 - 服务缓存未变化的终态摘要；活跃任务继续计算新鲜耗时。
 - 列表和详情分开请求，静态资源无外部依赖，长输出使用滚动容器和安全 `textContent`。
 

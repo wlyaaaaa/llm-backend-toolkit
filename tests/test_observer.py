@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import tempfile
 import threading
 import time
@@ -15,6 +16,7 @@ from llm_backend_toolkit.observer import (
     OBSERVER_MAX_LOCAL_METADATA_BYTES,
     OBSERVER_MAX_OUTPUT_BYTES,
     ObserverStore,
+    _elapsed_seconds,
     _runtime_health,
     _state_root_id,
     _stream_updates,
@@ -302,6 +304,155 @@ class VisibleRunEventTests(unittest.TestCase):
 
 
 class ObserverStoreTests(unittest.TestCase):
+    def test_usage_projection_preserves_input_output_and_cached_input_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = JobStore(root, spawner=lambda *_: None)
+            job_id = store.submit(request(), force=True)["job_id"]
+            store.claim(job_id)
+            store.complete(
+                job_id,
+                {
+                    "status": "ok",
+                    "output": "完成",
+                    "usage": {
+                        "input_tokens": 120,
+                        "output_tokens": 30,
+                        "cached_input_tokens": 80,
+                        "total_tokens": 150,
+                    },
+                },
+            )
+
+            usage = ObserverStore(root).get_run(job_id)["result"]["usage"]
+
+            self.assertEqual(120, usage["input_tokens"])
+            self.assertEqual(30, usage["output_tokens"])
+            self.assertEqual(80, usage["cached_input_tokens"])
+            self.assertEqual(150, usage["total_tokens"])
+
+    def test_command_activity_detail_preserves_only_safe_status_and_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = JobStore(root, spawner=lambda *_: None)
+            job_id = store.submit(request(), force=True)["job_id"]
+            store.claim(job_id)
+            recorder = store.progress_recorder(job_id, allow_public_preview=True)
+            recorder(
+                {
+                    "phase": "waiting",
+                    "public_event": {
+                        "kind": "agent.tool.activity",
+                        "summary_zh": "智能体执行命令成功（退出码 0）。",
+                        "payload": {
+                            "status": "completed",
+                            "item_type": "command_execution",
+                            "command_status": "succeeded",
+                            "tool_calls": 3,
+                            "exit_code": 0,
+                            "duration_ms": 617,
+                            "command": "PRIVATE_COMMAND",
+                        },
+                    },
+                }
+            )
+
+            event = next(
+                item
+                for item in ObserverStore(root).get_run(job_id)["events"]
+                if item["kind"] == "agent.tool.activity"
+            )
+
+            self.assertEqual("succeeded", event["payload"]["command_status"])
+            self.assertEqual(0, event["payload"]["exit_code"])
+            self.assertEqual(617, event["payload"]["duration_ms"])
+            self.assertNotIn("PRIVATE_COMMAND", json.dumps(event, ensure_ascii=False))
+
+    def test_active_elapsed_advances_past_stale_runner_metric(self) -> None:
+        created = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+        observed = created + timedelta(seconds=125)
+        state = {
+            "job_status": "running",
+            "created_utc": created.isoformat().replace("+00:00", "Z"),
+            "updated_utc": (created + timedelta(seconds=1)).isoformat().replace(
+                "+00:00",
+                "Z",
+            ),
+        }
+
+        elapsed = _elapsed_seconds(
+            state,
+            {"metrics": {"elapsed_seconds": 2.0}},
+            now=observed,
+        )
+
+        self.assertEqual(125.0, elapsed)
+
+    def test_active_elapsed_ignores_non_finite_runner_metric(self) -> None:
+        created = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+        elapsed = _elapsed_seconds(
+            {
+                "job_status": "running",
+                "created_utc": created.isoformat().replace("+00:00", "Z"),
+            },
+            {"metrics": {"elapsed_seconds": float("nan")}},
+            now=created + timedelta(seconds=5),
+        )
+
+        self.assertEqual(5.0, elapsed)
+        self.assertTrue(math.isfinite(elapsed))
+
+    def test_terminal_elapsed_does_not_jump_back_from_live_wall_clock(self) -> None:
+        created = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+        elapsed = _elapsed_seconds(
+            {
+                "job_status": "completed",
+                "created_utc": created.isoformat().replace("+00:00", "Z"),
+                "updated_utc": (created + timedelta(seconds=100))
+                .isoformat()
+                .replace("+00:00", "Z"),
+            },
+            {"metrics": {"elapsed_seconds": 2.0}},
+            now=created + timedelta(seconds=101),
+        )
+
+        self.assertEqual(100.0, elapsed)
+
+    def test_expired_active_run_is_projected_as_stale_and_stops_elapsed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = JobStore(root, spawner=lambda *_: None)
+            job_id = store.submit(request(), force=True)["job_id"]
+            state_path = root / job_id / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            created = datetime.now(timezone.utc) - timedelta(minutes=5)
+            deadline = created + timedelta(minutes=2)
+            state.update(
+                {
+                    "job_status": "running",
+                    "created_utc": created.isoformat().replace("+00:00", "Z"),
+                    "updated_utc": (created + timedelta(seconds=1))
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                    "monitor_until_utc": deadline.isoformat().replace(
+                        "+00:00",
+                        "Z",
+                    ),
+                }
+            )
+            state_path.write_text(
+                json.dumps(state, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            observer = ObserverStore(root)
+            detail = observer.get_run(job_id)
+            summary = observer.list_runs()["runs"][0]
+
+            self.assertEqual("stale", detail["job_status"])
+            self.assertEqual("stale", summary["job_status"])
+            self.assertAlmostEqual(120.0, detail["performance"]["elapsed_seconds"], places=1)
+
     def test_large_text_and_json_artifacts_are_bounded_in_store_and_http(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -905,12 +1056,28 @@ class ObserverStoreTests(unittest.TestCase):
             )
 
             observed = read_events(job_dir)
-            detail = ObserverStore(Path(temp)).get_run(job_id)
+            observer = ObserverStore(Path(temp))
+            detail = observer.get_run(job_id)
+            older = observer.get_event_page(
+                job_id,
+                limit=160,
+                before_sequence=detail["event_page"]["next_before_sequence"],
+            )
 
             self.assertEqual(500, len(observed))
             self.assertEqual(101, observed[0]["sequence"])
             self.assertEqual("handoff.collected", observed[-1]["kind"])
             self.assertEqual("collected", detail["handoff"]["status"])
+            self.assertEqual(160, len(detail["events"]))
+            self.assertEqual(441, detail["events"][0]["sequence"])
+            self.assertTrue(detail["event_page"]["has_earlier"])
+            self.assertEqual(441, detail["event_page"]["next_before_sequence"])
+            self.assertEqual(440, detail["event_page"]["earlier_count"])
+            self.assertEqual(600, detail["event_page"]["latest_sequence"])
+            self.assertEqual(160, len(older["events"]))
+            self.assertEqual(281, older["events"][0]["sequence"])
+            self.assertEqual(440, older["events"][-1]["sequence"])
+            self.assertEqual(600, older["event_page"]["latest_sequence"])
 
     def test_runtime_identity_isolated_for_sibling_state_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1272,6 +1439,11 @@ class ObserverStoreTests(unittest.TestCase):
                     f"{base}/api/runs/{receipt['job_id']}", timeout=3
                 ) as response:
                     detail = json.load(response)
+                with urllib.request.urlopen(
+                    f"{base}/api/runs/{receipt['job_id']}/events?limit=160",
+                    timeout=3,
+                ) as response:
+                    event_page = json.load(response)
                 with urllib.request.urlopen(f"{base}/", timeout=3) as response:
                     html = response.read().decode("utf-8")
             finally:
@@ -1286,6 +1458,8 @@ class ObserverStoreTests(unittest.TestCase):
             self.assertEqual(1, first_page["total"])
             self.assertIsNone(first_page["next_offset"])
             self.assertEqual(receipt["job_id"], detail["job_id"])
+            self.assertEqual(receipt["job_id"], event_page["job_id"])
+            self.assertIn("events", event_page)
             self.assertIn("模型调用观察台", html)
 
 
