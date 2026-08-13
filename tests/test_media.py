@@ -2,8 +2,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from llm_backend_toolkit.media import MediaProcessor
+from llm_backend_toolkit.media import MediaProcessor, _default_runner
 
 
 class Completed:
@@ -14,6 +15,19 @@ class Completed:
 
 
 class MediaProcessorTests(unittest.TestCase):
+    @patch("llm_backend_toolkit.media.os.name", "nt")
+    @patch.object(__import__("subprocess"), "CREATE_NO_WINDOW", 0x08000000, create=True)
+    @patch("llm_backend_toolkit.media.subprocess.run")
+    def test_default_specialist_runner_hides_windows_powershell(self, run):
+        run.return_value = Completed("{}")
+
+        _default_runner(["pwsh", "-NoProfile"])
+
+        self.assertEqual(
+            0x08000000,
+            run.call_args.kwargs["creationflags"],
+        )
+
     def test_localocr_reads_the_declared_output_artifact(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -92,7 +92,7 @@ python -m venv .venv
 
 - 多个模型调用和多轮 continuation，以“对话列表 / 连续对话 / 对话信息”三栏呈现；不包含项目、文件、设置、输入、停止或审批控制；
 - 中文聚合工作记录、AICLI 命令/文件活动、OCR/ASR 阶段与公开输出；没有真实公开 prompt 时不渲染用户气泡，重复的开始/结束及无安全正文的成功活动只显示语义计数，进行中、失败或有安全摘要的活动才显示明细。单轮先读取最近 160 个原始事件，可在最多 240 个事件的有界窗口中向前翻页并返回最新，旧版逐片段事件会合并为摘要；
-- AICLI 安全公开消息按增量通过 SSE 无刷新追加到草稿；增量不再逐条灌入耐久时间线，`output.completed` 用有界完整公开文本对齐草稿且不会重复追加。草稿最多保留 20,000 字，达到上限会明确提示并引导查看最终结果；
+- AICLI 安全公开消息按增量通过 SSE 无刷新追加到草稿；增量不再逐条灌入耐久时间线，`output.completed` 用有界完整公开文本对齐草稿且不会重复追加。草稿最多保留 20,000 字，达到上限会明确提示并引导查看最终结果；原生 CLI 明确公开的安全 `reasoning.summary.delta` 另行累积为“工作思路”，运行中展开并原位追加，终态保留，缺少真实摘要时不生成节点；
 - 安全的 context、delegation、source、execution、delivery、cache identity、media route 回执与确定性检查保留在每轮回答后的折叠卡中；普通结构化 JSON 结果按有界文本显示，只有后端明确标记的 artifact preview 才显示摘要，不会因字段名碰巧为 `preview` 而丢失其他结果；
 - 计划或回执中的模型名称、执行方式、推理模式或 reasoning effort；缺少供应商运行时身份回读时不会标成“实际模型”；
 - Token、耗时和 Token/s；Token 卡可展开显示输入、输出、推理输出和非零缓存（缓存是输入子集，不重复计入总数）。AICLI/Codex 的累计统计来自 `tokenUsage.total`，不会把 `TokenUsage.last.outputTokens` 误标为整场累计；缓存为零或缺失时不显示。执行中耗时每秒更新，静默阶段仍会低频复核服务端状态，终态或过期后冻结；Ollama 完成后以 `completion_tokens / eval_duration_ns` 显示模型评估时段的精确输出速度，AICLI agent 的安全真实输出 token 只除以从启动到完成的整段执行墙钟并明确标为估算；
@@ -114,9 +114,9 @@ pwsh -NoProfile -File .\scripts\Start-LlmBackendObserver.ps1
 pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 ```
 
-正式启动器会为精确观察台窗口写入独立 AppUserModelID 与项目 ICO 的任务栏身份；窗口属性无法写入或回读时会失败，不以 Edge 图标冒充成功。
+正式启动器使用项目自带的无控制台 WinForms/WebView2 宿主，而不是 Edge app-mode。宿主在创建窗口前设置独立 AppUserModelID，再为窗口写入同一 AUMID、RelaunchIconResource 与大小图标；离屏自测必须同时回读进程身份、窗口身份、窗口图标并成功初始化 WebView2，不能再把 favicon、`IconLocation` 或属性写入本身冒充任务栏图标已生效。宿主显式清除仅限当前进程的 WebView2 环境覆盖并使用独立 profile，避免 Windows Search/Widgets 的共享 profile 造成 `ERROR_INVALID_STATE` 页面加载失败。
 
-启动器只创建一个 loopback 服务和一个 Edge app 窗口。窗口打开后通过 SSE 自动接收后续调用，不需要手动刷新；重复调用不会抢焦点。安装器会同时创建当前用户桌面和开始菜单中的“模型调用观察台”快捷方式，并使用项目自带的白绿图标；它只升级或删除能由启动目标、完整参数、工作目录和描述共同证明属于本工具的链接，同名第三方文件会冲突失败而不会被覆盖。首次全体预检会拦截开始时已经存在的冲突；每个目标在最终变更或状态确认前还会复验。桌面和开始菜单是两个独立 Known Folder，不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，已经完成的本工具链接操作可能保留，可在处理冲突后幂等重跑。需要移除这两个精确入口时使用 `-Remove`。`Show-LlmBackendDashboard.ps1` 继续作为 PowerShell 降级视图。
+启动器只创建一个 loopback 服务和一个原生观察台窗口。快捷方式直接指向 `LlmBackendObserverHost.exe`，后台服务和 AICLI/PowerShell 子进程均用 `CREATE_NO_WINDOW` / Hidden 语义，失败只写本机诊断文件，不弹控制台或错误框。窗口打开后通过 SSE 自动接收后续调用，不需要手动刷新；重复调用不会抢焦点。安装器会同时创建当前用户桌面和开始菜单中的“模型调用观察台”快捷方式，并使用项目自带的白绿图标；它只升级或删除能由启动目标、完整参数、工作目录和描述共同证明属于本工具的链接，同名第三方文件会冲突失败而不会被覆盖。首次全体预检会拦截开始时已经存在的冲突；每个目标在最终变更或状态确认前还会复验。桌面和开始菜单是两个独立 Known Folder，不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，已经完成的本工具链接操作可能保留，可在处理冲突后幂等重跑。需要移除这两个精确入口时使用 `-Remove`。`Show-LlmBackendDashboard.ps1` 继续作为 PowerShell 降级视图。
 
 观察台显示的是经过净化的可验证工作过程，不是隐藏 chain-of-thought。prompt、隐藏 thinking/reasoning 正文、原始命令和参数、工具输入输出、环境变量、OCR/ASR 正文及绝对私密路径都不会进入公开事件日志。正式 skill 只使用上述 AICLI 源码入口，不会因旧安装态缺少事件能力而静默降级。其 Codex app-server 合同以当前实装的 `codex-cli 0.145.0` 为已验证基线；`0.145.x` 较早公开 `agentMessage` 缺少 completed 的兼容只在后续存在非空 completed final 且没有其他未完成项时成立。未来更新默认尝试，但必要字段、通知、生命周期或清理协议漂移会返回明确错误。
 

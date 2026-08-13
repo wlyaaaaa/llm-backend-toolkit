@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ToolError, classify_agent_process_error
-from .public_progress import bounded_public_draft, bounded_public_text
+from .public_progress import (
+    PUBLIC_REASONING_SUMMARY_DELTA_MAX_CHARS,
+    bounded_public_draft,
+    bounded_public_text,
+)
 
 
 PUBLIC_PROGRESS_MAX_CHARS = 500
@@ -124,7 +128,15 @@ def _bounded_process(
         event_thread.join(timeout=2)
 
     try:
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+        creationflags = 0
+        if os.name == "nt":
+            # AICLI is normally a PowerShell entrypoint.  It is a background
+            # worker implementation detail and must never flash a console in
+            # front of the desktop observer.
+            creationflags = (
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
         process = subprocess.Popen(
             command,
             cwd=str(cwd),
@@ -164,6 +176,11 @@ def _bounded_process(
                         timeout=10,
                         shell=False,
                         check=False,
+                        creationflags=getattr(
+                            subprocess,
+                            "CREATE_NO_WINDOW",
+                            0,
+                        ),
                     )
                     if killed.returncode == 0:
                         process.wait(timeout=5)
@@ -992,9 +1009,38 @@ class AiCliProfileRunner:
         public_text = ""
         public_draft = ""
         public_draft_truncated = False
-        if kind in {"output.delta", "output.completed"}:
+        public_text_truncated = False
+        summary_group = None
+        summary_index = None
+        if kind == "reasoning.summary.delta":
+            # AICLI deliberately labels this field public.  Do not accept a
+            # generic reasoning field as a fallback: it may contain hidden
+            # chain-of-thought.  The group/index pair identifies a public
+            # summary segment; durable event sequence supplies its ordering.
+            raw_summary_group = event.get("summary_group")
+            raw_summary_index = event.get("summary_index")
+            if (
+                type(raw_summary_group) is not int
+                or not 1 <= raw_summary_group <= 1_000_000
+                or type(raw_summary_index) is not int
+                or not 0 <= raw_summary_index <= 10_000
+            ):
+                return
+            summary_group = raw_summary_group
+            summary_index = raw_summary_index
+            public_text_truncated = event.get("public_text_truncated") is True
+        if kind in {
+            "output.delta",
+            "output.completed",
+            "reasoning.summary.delta",
+        }:
             public_draft, public_draft_truncated = _bounded_public_draft(
-                event.get("public_text")
+                event.get("public_text"),
+                max_chars=(
+                    PUBLIC_REASONING_SUMMARY_DELTA_MAX_CHARS
+                    if kind == "reasoning.summary.delta"
+                    else PUBLIC_DRAFT_MAX_CHARS
+                ),
             )
             public_text = _bounded_public_text(public_draft)
             if not public_draft or not public_text:
@@ -1005,6 +1051,9 @@ class AiCliProfileRunner:
             summary = (
                 "智能体正在进行内部分析；只展示活动状态，不展示隐藏思维正文。"
             )
+        elif kind == "reasoning.summary.delta":
+            phase = "thinking"
+            summary = "公开工作思路正在更新。"
         elif kind == "tool.activity":
             if item_type == "command_execution" and command_status:
                 summary = {
@@ -1082,6 +1131,10 @@ class AiCliProfileRunner:
             allowed_payload["exit_code"] = safe_exit_code
         if safe_duration_ms is not None:
             allowed_payload["duration_ms"] = safe_duration_ms
+        if summary_group is not None:
+            allowed_payload["summary_group"] = summary_group
+        if summary_index is not None:
+            allowed_payload["summary_index"] = summary_index
         progress: dict[str, Any] = {
             "phase": phase,
             "public_event": {
@@ -1094,7 +1147,19 @@ class AiCliProfileRunner:
             progress["content_delta"] = public_draft
         elif kind == "output.completed":
             progress["content_replace"] = public_draft
-        if public_draft_truncated:
+        elif kind == "reasoning.summary.delta":
+            progress["reasoning_summary_delta"] = {
+                "summary_group": summary_group,
+                "summary_index": summary_index,
+                "delta": public_draft,
+                "truncated": public_text_truncated or public_draft_truncated,
+            }
+        if (
+            kind == "reasoning.summary.delta"
+            and (public_text_truncated or public_draft_truncated)
+        ):
+            progress["public_reasoning_summaries_truncated"] = True
+        elif public_draft_truncated:
             progress["public_preview_truncated"] = True
         if kind == "context.usage.updated":
             progress["current_context_tokens"] = event.get("current_tokens")

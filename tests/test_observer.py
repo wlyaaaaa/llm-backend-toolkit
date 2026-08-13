@@ -377,6 +377,63 @@ class ObserverStoreTests(unittest.TestCase):
             self.assertEqual(617, event["payload"]["duration_ms"])
             self.assertNotIn("PRIVATE_COMMAND", json.dumps(event, ensure_ascii=False))
 
+    def test_run_detail_retains_public_reasoning_summary_and_paged_deltas(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = JobStore(root, spawner=lambda *_: None)
+            job_id = store.submit(request(), force=True)["job_id"]
+            store.claim(job_id)
+            recorder = store.progress_recorder(
+                job_id,
+                allow_public_preview=True,
+                write_interval_seconds=0.05,
+            )
+            recorder(
+                {
+                    "phase": "thinking",
+                    "reasoning_summary_delta": {
+                        "summary_group": 1,
+                        "summary_index": 0,
+                        "delta": "正在核对公开配置。",
+                    },
+                    "reasoning": "PRIVATE_RAW_REASONING_CANARY",
+                }
+            )
+            recorder({"phase": "completed"})
+            store.complete(job_id, {"status": "ok", "output": "完成。"})
+
+            detail = ObserverStore(root).get_run(job_id)
+
+            self.assertEqual(
+                [
+                    {
+                        "summary_group": 1,
+                        "summary_index": 0,
+                        "text": "正在核对公开配置。",
+                    }
+                ],
+                detail["progress"]["public_reasoning_summaries"],
+            )
+            summary_event = next(
+                event
+                for event in ObserverStore(root).get_event_page(job_id, limit=20)[
+                    "events"
+                ]
+                if event["kind"] == "agent.reasoning.summary.delta"
+            )
+            self.assertEqual(
+                {
+                    "summary_group": 1,
+                    "summary_index": 0,
+                    "delta": "正在核对公开配置。",
+                },
+                summary_event["payload"],
+            )
+            self.assertNotIn(
+                "PRIVATE_RAW_REASONING_CANARY",
+                json.dumps({"detail": detail, "event": summary_event}, ensure_ascii=False),
+            )
+
     def test_active_elapsed_advances_past_stale_runner_metric(self) -> None:
         created = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
         observed = created + timedelta(seconds=125)

@@ -14,6 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from .public_progress import (
+    PUBLIC_REASONING_SUMMARY_DELTA_MAX_CHARS,
+    bounded_public_draft,
+    has_potential_secret_suffix,
+)
 from .workspace_observer import (
     is_safe_public_text,
     is_safe_workspace_relative_path,
@@ -401,6 +406,34 @@ def _public_payload(kind: str, payload: Any) -> dict[str, Any]:
             ),
             bool_fields=frozenset({"applied", "lossy"}),
         )
+    if kind == "agent.reasoning.summary.delta":
+        # This event is intentionally narrower than generic agent activity:
+        # only the explicitly public incremental summary is available to a
+        # paged observer.  Raw reasoning and any unrecognized payload fields
+        # are discarded here even if a malformed local writer reaches JSONL.
+        delta, _ = bounded_public_draft(
+            payload.get("delta"),
+            max_chars=PUBLIC_REASONING_SUMMARY_DELTA_MAX_CHARS,
+        )
+        if not delta or has_potential_secret_suffix(delta):
+            return {}
+        summary_group = payload.get("summary_group")
+        summary_index = payload.get("summary_index")
+        if (
+            type(summary_group) is not int
+            or not 1 <= summary_group <= 1_000_000
+            or type(summary_index) is not int
+            or not 0 <= summary_index <= 10_000
+        ):
+            return {}
+        projected = {
+            "summary_group": summary_group,
+            "summary_index": summary_index,
+            "delta": delta,
+        }
+        if payload.get("truncated") is True:
+            projected["truncated"] = True
+        return projected
     if kind.startswith("agent."):
         return _project_flat_payload(
             payload,

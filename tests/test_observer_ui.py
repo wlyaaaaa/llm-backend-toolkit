@@ -43,11 +43,11 @@ class ObserverUiTests(unittest.TestCase):
         parser = _DocumentParser()
         parser.feed(self.html)
         self.assertEqual(
-            ["/assets/styles.css?v=20260813-conversations-5"],
+            ["/assets/styles.css?v=20260813-conversations-6"],
             parser.stylesheets,
         )
         self.assertEqual(
-            ["/assets/app.js?v=20260813-conversations-5"],
+            ["/assets/app.js?v=20260813-conversations-6"],
             parser.scripts,
         )
         self.assertIn('href="/assets/favicon.svg"', self.html)
@@ -119,6 +119,22 @@ class ObserverUiTests(unittest.TestCase):
         self.assertNotIn(".task-withheld", self.css)
         self.assertIn("实时草稿", self.js)
         self.assertIn("最终答复", self.js)
+        self.assertIn('createElement("strong", "", "工作思路")', self.js)
+        self.assertNotIn('createElement("strong", "", "公开工作思路")', self.js)
+        self.assertIn("public_reasoning_summaries", self.js)
+        self.assertIn('kind === "agent.reasoning.summary.delta"', self.js)
+        self.assertIn("payload.delta", self.js)
+        self.assertNotIn("event.summary_zh", self.js.split("function reasoningSummaryData", 1)[1].split("function renderReasoningSummaries", 1)[0])
+        self.assertIn('createElement("details", "reasoning-summary")', self.js)
+        self.assertIn('details.open = !terminal', self.js)
+        self.assertIn('"reasoning-summary-text"', self.js)
+        self.assertIn("priorReasoningTexts", self.js)
+        self.assertIn("nextText.startsWith(priorText)", self.js)
+        self.assertIn(".reasoning-summary", self.css)
+        self.assertLess(
+            render_turn.index("if (!output.final) article.append(assistant)"),
+            render_turn.index("if (reasoning) article.append(reasoning)"),
+        )
         output_data = self.js.split("function outputData", 1)[1].split(
             "function renderTurn", 1
         )[0]
@@ -181,6 +197,63 @@ class ObserverUiTests(unittest.TestCase):
             self.skipTest("node is unavailable")
         completed = subprocess.run(
             [node, "--check", str(UI_ROOT / "app.js")],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+    def test_reasoning_summary_data_prefers_accumulated_state_and_safely_falls_back_to_events(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is unavailable")
+
+        def function_source(name: str) -> str:
+            start = self.js.index(f"function {name}(")
+            end = self.js.find("\nfunction ", start + 1)
+            return self.js[start:] if end < 0 else self.js[start:end]
+
+        harness = "\n".join(
+            function_source(name)
+            for name in (
+                "first",
+                "eventSequence",
+                "mergeEvents",
+                "isReasoningSummaryEvent",
+                "reasoningSummaryData",
+            )
+        ) + r'''
+const accumulated = reasoningSummaryData({
+  progress: { public_reasoning_summaries: [
+    { summary_group: 1, summary_index: 0, text: "累积摘要" },
+  ] },
+  events: [],
+}, [{
+  sequence: 1,
+  kind: "agent.reasoning.summary.delta",
+  payload: { summary_group: 1, summary_index: 0, delta: "不应重复" },
+}]);
+if (JSON.stringify(accumulated.items.map((item) => item.text)) !== JSON.stringify(["累积摘要"])) {
+  throw new Error("accumulated summary must be authoritative");
+}
+
+const fallback = reasoningSummaryData({ progress: {}, events: [] }, [
+  { sequence: 1, kind: "agent.reasoning.summary.delta", payload: { summary_group: 2, summary_index: 0, delta: "正在核对" } },
+  { sequence: 2, kind: "agent.reasoning.summary.delta", payload: { summary_group: 2, summary_index: 0, delta: "配置。" } },
+  { sequence: 3, kind: "reasoning.activity", summary_zh: "普通活动文案不得成为内容", payload: {} },
+]);
+if (fallback.items.length !== 1 || fallback.items[0].text !== "正在核对配置。") {
+  throw new Error("safe event deltas must accumulate by summary key");
+}
+
+const absent = reasoningSummaryData({ progress: {}, events: [] }, [
+  { sequence: 1, kind: "agent.reasoning.summary.delta", summary_zh: "只有状态文案", payload: { summary_group: 1, summary_index: 0 } },
+]);
+if (absent.items.length !== 0) throw new Error("status labels must not fabricate a work-thought node");
+'''
+        completed = subprocess.run(
+            [node, "-e", harness],
             capture_output=True,
             text=True,
             timeout=10,

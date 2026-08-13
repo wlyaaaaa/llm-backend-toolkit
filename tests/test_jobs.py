@@ -452,6 +452,206 @@ class JobStoreTests(unittest.TestCase):
             self.assertEqual(0, progress["metrics"]["estimated_output_tokens"])
             self.assertNotIn("token=abcdefgh12345678", raw)
 
+    def test_progress_recorder_keeps_public_reasoning_summaries_separate_and_paged(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(
+                receipt["job_id"],
+                allow_public_preview=True,
+                write_interval_seconds=0.05,
+            )
+
+            recorder(
+                {
+                    "phase": "thinking",
+                    "reasoning_summary_delta": {
+                        "summary_group": 1,
+                        "summary_index": 0,
+                        "delta": "正在核对",
+                    },
+                }
+            )
+            time.sleep(0.06)
+            recorder(
+                {
+                    "phase": "thinking",
+                    "reasoning_summary_delta": {
+                        "summary_group": 1,
+                        "summary_index": 0,
+                        "delta": "公开配置。",
+                    },
+                }
+            )
+
+            progress_path = Path(temp) / receipt["job_id"] / "progress.json"
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                [
+                    {
+                        "summary_group": 1,
+                        "summary_index": 0,
+                        "text": "正在核对公开配置。",
+                    }
+                ],
+                progress["public_reasoning_summaries"],
+            )
+            self.assertNotIn("public_preview", progress)
+            summary_events = [
+                event
+                for event in read_events(Path(temp) / receipt["job_id"])
+                if event["kind"] == "agent.reasoning.summary.delta"
+            ]
+            self.assertEqual(
+                ["正在核对", "公开配置。"],
+                [event["payload"]["delta"] for event in summary_events],
+            )
+            self.assertEqual([1, 1], [event["payload"]["summary_group"] for event in summary_events])
+            self.assertEqual([0, 0], [event["payload"]["summary_index"] for event in summary_events])
+
+    def test_progress_recorder_blocks_a_secret_split_across_reasoning_summary_deltas(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(
+                receipt["job_id"],
+                allow_public_preview=True,
+                write_interval_seconds=0.05,
+            )
+
+            for delta in ("sk", "-abcdefghijklmnop"):
+                recorder(
+                    {
+                        "phase": "thinking",
+                        "reasoning_summary_delta": {
+                            "summary_group": 1,
+                            "summary_index": 0,
+                            "delta": delta,
+                        },
+                    }
+                )
+
+            raw = (
+                Path(temp) / receipt["job_id"] / "progress.json"
+            ).read_text(encoding="utf-8")
+            progress = json.loads(raw)
+            self.assertNotIn("public_reasoning_summaries", progress)
+            self.assertNotIn("sk-abcdefghijklmnop", raw)
+            self.assertNotIn(
+                "agent.reasoning.summary.delta",
+                [event["kind"] for event in read_events(Path(temp) / receipt["job_id"])],
+            )
+
+    def test_progress_recorder_bounds_the_public_reasoning_summary_segments(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(
+                receipt["job_id"],
+                allow_public_preview=True,
+                write_interval_seconds=0.05,
+            )
+
+            for _ in range(11):
+                recorder(
+                    {
+                        "phase": "thinking",
+                        "reasoning_summary_delta": {
+                            "summary_group": 1,
+                            "summary_index": 0,
+                            "delta": "中" * 4_000,
+                        },
+                    }
+                )
+            recorder({"phase": "completed"})
+
+            progress = json.loads(
+                (Path(temp) / receipt["job_id"] / "progress.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(4_000, len(progress["public_reasoning_summaries"][0]["text"]))
+            self.assertTrue(progress["public_reasoning_summaries_truncated"])
+
+    def test_progress_recorder_keeps_multiple_public_reasoning_summary_segments(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(
+                receipt["job_id"],
+                allow_public_preview=True,
+                write_interval_seconds=0.05,
+            )
+
+            for group, index, delta in (
+                (1, 0, "第一段前半"),
+                (1, 0, "后半。"),
+                (1, 1, "第二段。"),
+                (2, 0, "第三段。"),
+            ):
+                recorder(
+                    {
+                        "phase": "thinking",
+                        "reasoning_summary_delta": {
+                            "summary_group": group,
+                            "summary_index": index,
+                            "delta": delta,
+                        },
+                    }
+                )
+            recorder({"phase": "completed"})
+
+            progress = json.loads(
+                (Path(temp) / receipt["job_id"] / "progress.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                [
+                    {"summary_group": 1, "summary_index": 0, "text": "第一段前半后半。"},
+                    {"summary_group": 1, "summary_index": 1, "text": "第二段。"},
+                    {"summary_group": 2, "summary_index": 0, "text": "第三段。"},
+                ],
+                progress["public_reasoning_summaries"],
+            )
+
+    def test_progress_recorder_propagates_explicit_reasoning_summary_truncation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(receipt["job_id"], allow_public_preview=True)
+
+            recorder(
+                {
+                    "phase": "thinking",
+                    "reasoning_summary_delta": {
+                        "summary_group": 1,
+                        "summary_index": 0,
+                        "delta": "公开摘要。",
+                        "truncated": True,
+                    },
+                }
+            )
+            recorder({"phase": "completed"})
+
+            progress = json.loads(
+                (Path(temp) / receipt["job_id"] / "progress.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertTrue(progress["public_reasoning_summaries_truncated"])
+            event = next(
+                item
+                for item in read_events(Path(temp) / receipt["job_id"])
+                if item["kind"] == "agent.reasoning.summary.delta"
+            )
+            self.assertTrue(event["payload"]["truncated"])
+
     def test_progress_recorder_completed_reply_sets_preview_without_deltas(self):
         with tempfile.TemporaryDirectory() as temp:
             store = JobStore(Path(temp), spawner=lambda *_: None)

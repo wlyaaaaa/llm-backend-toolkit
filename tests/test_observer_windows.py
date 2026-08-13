@@ -15,6 +15,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STARTER = REPO_ROOT / "scripts" / "Start-LlmBackendObserver.ps1"
 INSTALLER = REPO_ROOT / "scripts" / "Install-LlmBackendObserverShortcut.ps1"
+HOST_BUILDER = REPO_ROOT / "scripts" / "Build-LlmBackendObserverHost.ps1"
+HOST_PROJECT = REPO_ROOT / "src" / "LlmBackendObserverHost" / "LlmBackendObserverHost.csproj"
+HOST_SOURCE = REPO_ROOT / "src" / "LlmBackendObserverHost" / "Program.cs"
+HOST_WEBVIEW_SOURCE = REPO_ROOT / "src" / "LlmBackendObserverHost" / "WebViewRuntime.cs"
+HOST_IDENTITY_SOURCE = REPO_ROOT / "src" / "LlmBackendObserverHost" / "WindowIdentity.cs"
 ICON_SOURCE = REPO_ROOT / "assets" / "observer-console.svg"
 ICON = REPO_ROOT / "assets" / "observer-console.ico"
 REQUIRED_ICON_SIZES = {16, 24, 32, 48, 64, 128, 256}
@@ -67,16 +72,23 @@ def _read_shortcut(path: Path) -> dict[str, object]:
     command = (
         "& { "
         "$shell = New-Object -ComObject 'WScript.Shell'; "
+        "$shellApplication = New-Object -ComObject 'Shell.Application'; "
         f"$shortcut = $shell.CreateShortcut({_ps_quote(path)}); "
+        f"$folder = $shellApplication.Namespace({_ps_quote(path.parent)}); "
+        f"$item = $folder.ParseName({_ps_quote(path.name)}); "
         "try { [pscustomobject] @{ "
         "target_path = $shortcut.TargetPath; "
         "arguments = $shortcut.Arguments; "
         "working_directory = $shortcut.WorkingDirectory; "
         "description = $shortcut.Description; "
-        "icon_location = $shortcut.IconLocation "
+        "icon_location = $shortcut.IconLocation; "
+        "app_user_model_id = $item.ExtendedProperty('System.AppUserModel.ID'); "
+        "relaunch_icon_resource = "
+        "$item.ExtendedProperty('System.AppUserModel.RelaunchIconResource') "
         "} } finally { "
         "[void] [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut); "
-        "[void] [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) "
+        "[void] [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell); "
+        "[void] [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shellApplication) "
         "} }"
     )
     return _run_for_json(command)
@@ -171,40 +183,68 @@ class ObserverWindowsSourceTests(unittest.TestCase):
             with self.subTest(script=script.name):
                 self.assertTrue(script.read_bytes().startswith(b"\xef\xbb\xbf"))
 
-    def test_launcher_has_standard_edge_paths_and_non_focusing_deduplication(self) -> None:
+    def test_launcher_uses_the_owned_webview_host_without_edge_identity(self) -> None:
         source = STARTER.read_text(encoding="utf-8-sig")
 
-        self.assertIn("${env:ProgramFiles(x86)}", source)
-        self.assertIn("$env:ProgramFiles", source)
-        self.assertIn("$env:LOCALAPPDATA", source)
+        self.assertIn("Build-LlmBackendObserverHost.ps1", source)
+        self.assertIn("LlmBackendObserverHost", source)
         self.assertIn("FindProcessIdsByExactTitle", source)
         self.assertIn("EnumWindows", source)
         self.assertIn("StringComparison.Ordinal", source)
-        self.assertIn("$process.ProcessName -eq 'msedge'", source)
-        self.assertIn('"--app=$($contract.url)"', source)
+        self.assertIn("current_host_generation", source)
+        self.assertIn("$isOwnedPriorGeneration", source)
+        self.assertIn("$actualHostRoot", source)
+        self.assertIn("--url", source)
+        self.assertNotIn("msedge.exe", source)
+        self.assertNotIn('"--app=$($contract.url)"', source)
         self.assertNotIn("AppActivate", source)
         self.assertNotIn("SetForegroundWindow", source)
 
-    def test_launcher_assigns_a_truthful_independent_taskbar_identity(self) -> None:
-        source = STARTER.read_text(encoding="utf-8-sig")
+    def test_native_host_owns_its_window_icon_and_read_only_webview(self) -> None:
+        project = HOST_PROJECT.read_text(encoding="utf-8")
+        program = HOST_SOURCE.read_text(encoding="utf-8")
+        webview = HOST_WEBVIEW_SOURCE.read_text(encoding="utf-8")
+        identity = HOST_IDENTITY_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("Wly.LlmBackendToolkit.Observer", source)
-        self.assertIn("SHGetPropertyStoreForWindow", source)
-        self.assertIn("PKEY_AppUserModel_ID", source)
-        self.assertIn("PKEY_AppUserModel_RelaunchIconResource", source)
-        self.assertIn("Set-ObserverWindowIdentity", source)
-        self.assertIn("assets\\observer-console.ico", source)
-        self.assertNotIn("SetCurrentProcessExplicitAppUserModelID", source)
+        self.assertIn("<OutputType>WinExe</OutputType>", project)
+        self.assertIn("<UseWindowsForms>true</UseWindowsForms>", project)
+        self.assertIn("<ApplicationIcon>", project)
+        self.assertIn("Microsoft.Web.WebView2", project)
+        self.assertIn("SetCurrentProcessExplicitAppUserModelID", identity)
+        self.assertIn("SHGetPropertyStoreForWindow", identity)
+        self.assertIn("WmSetIcon", identity)
+        self.assertIn("new Icon(iconPath)", program)
+        self.assertIn("CoreWebView2Environment.CreateAsync", webview)
+        self.assertIn('"WEBVIEW2_USER_DATA_FOLDER"', webview)
+        self.assertIn("EnvironmentVariableTarget.Process", webview)
+        self.assertIn("ShowWithoutActivation", webview)
+        self.assertIn("ShowInTaskbar = false", webview)
+        self.assertIn("Opacity = 0D", program)
+        self.assertIn("ShowInTaskbar = true", program)
+        self.assertNotIn("观察台页面加载失败。", program)
+        self.assertIn("CreateNoWindow = true", program)
+        self.assertIn('ArgumentList.Add("observer")', program)
+        self.assertIn('ArgumentList.Add("--no-open")', program)
+        self.assertIn("IsLoopback", program)
+        self.assertIn("NavigationStarting", webview)
+        self.assertIn("NavigationCompleted", webview)
+        self.assertIn("result.IsSuccess", webview)
+        self.assertIn("WaitAsync", webview)
+        self.assertIn("NewWindowRequested", webview)
+        self.assertIn('Text = ""', program)
+        self.assertIn("Text = _options.Title", program)
 
     def test_installer_uses_known_folder_without_onedrive_assumption(self) -> None:
         source = INSTALLER.read_text(encoding="utf-8-sig")
 
         self.assertIn("[Environment+SpecialFolder]::DesktopDirectory", source)
         self.assertIn("[Environment+SpecialFolder]::Programs", source)
-        self.assertIn("-WindowStyle Hidden", source)
-        self.assertIn("pwsh.exe", source)
+        self.assertIn("Build-LlmBackendObserverHost.ps1", source)
+        self.assertIn("LlmBackendObserverHost.exe", source)
         self.assertIn("assets\\observer-console.ico", source)
         self.assertIn("$shortcut.IconLocation", source)
+        self.assertIn("PKEY_AppUserModel_ID", source)
+        self.assertIn("SetShortcutIdentity", source)
         self.assertNotIn("OneDrive", source)
         self.assertNotIn("Microsoft\\Edge\\Application\\msedge.exe", source)
 
@@ -235,6 +275,18 @@ class ObserverWindowsSourceTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt" and shutil.which("pwsh"), "Windows PowerShell 7 is required")
 class ObserverWindowsBehaviorTests(unittest.TestCase):
+    def test_native_host_passes_invisible_webview_and_window_identity_self_test(self) -> None:
+        result = _run_for_json(
+            f"& {_ps_quote(HOST_BUILDER)} -ValidateRuntime -PassThru"
+        )
+
+        self.assertEqual("ok", result["self_test_status"])
+        self.assertEqual("host_runtime", result["self_test_stage"])
+        self.assertTrue(result["process_identity_verified"])
+        self.assertTrue(result["window_identity_verified"])
+        self.assertTrue(result["window_icon_verified"])
+        self.assertTrue(result["webview_ready"])
+
     def test_launcher_invokes_toolkit_observer_no_open(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             temp_root = Path(temp)
@@ -313,7 +365,7 @@ class ObserverWindowsBehaviorTests(unittest.TestCase):
         self.assertNotEqual(0, completed.returncode)
         self.assertIn("loopback", completed.stderr)
 
-    def test_shortcut_test_mode_reports_hidden_pwsh_target_without_creating_link(self) -> None:
+    def test_shortcut_test_mode_reports_owned_host_target_without_creating_link(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             desktop = Path(temp) / "Redirected Desktop"
             start_menu = Path(temp) / "Redirected Start Menu" / "Programs"
@@ -335,10 +387,16 @@ class ObserverWindowsBehaviorTests(unittest.TestCase):
             self.assertFalse(start_menu.exists())
 
         self.assertEqual("planned", result["status"])
-        self.assertTrue(str(result["target_path"]).lower().endswith("pwsh.exe"))
+        self.assertTrue(
+            str(result["target_path"]).lower().endswith("llmbackendobserverhost.exe")
+        )
         self.assertEqual(ICON.resolve(), Path(str(result["icon_path"])))
-        self.assertIn("-WindowStyle Hidden", str(result["arguments"]))
-        self.assertIn(str(STARTER), str(result["arguments"]))
+        self.assertEqual(
+            "Wly.LlmBackendToolkit.Observer",
+            result["app_user_model_id"],
+        )
+        self.assertIn("--toolkit-command", str(result["arguments"]))
+        self.assertNotIn("-WindowStyle Hidden", str(result["arguments"]))
 
     def test_shortcut_installer_creates_desktop_and_start_menu_links_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -378,6 +436,14 @@ class ObserverWindowsBehaviorTests(unittest.TestCase):
                 self.assertEqual(
                     f"{ICON.resolve()},0".casefold(),
                     str(contract["icon_location"]).replace(", 0", ",0").casefold(),
+                )
+                self.assertEqual(
+                    "Wly.LlmBackendToolkit.Observer",
+                    contract["app_user_model_id"],
+                )
+                self.assertEqual(
+                    f"{ICON.resolve()},0".casefold(),
+                    str(contract["relaunch_icon_resource"]).casefold(),
                 )
 
             mtimes = {
@@ -430,6 +496,42 @@ class ObserverWindowsBehaviorTests(unittest.TestCase):
                 self.assertEqual(
                     f"{ICON.resolve()},0".casefold(),
                     str(contract["icon_location"]).replace(", 0", ",0").casefold(),
+                )
+
+    def test_shortcut_installer_upgrades_owned_links_missing_aumid(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            desktop = temp_root / "Redirected Desktop"
+            start_menu = temp_root / "Redirected Start Menu" / "Programs"
+            desktop.mkdir()
+            start_menu.mkdir(parents=True)
+            base_command = (
+                f"& {_ps_quote(INSTALLER)} "
+                f"-DesktopPath {_ps_quote(desktop)} "
+                f"-StartMenuPath {_ps_quote(start_menu)} "
+            )
+            planned = _run_for_json(base_command + "-NoCreate -PassThru")
+            links = [Path(path) for path in planned["shortcut_paths"]]
+
+            for link in links:
+                _write_shortcut(
+                    link,
+                    target_path=str(planned["target_path"]),
+                    arguments=str(planned["arguments"]),
+                    working_directory=str(planned["working_directory"]),
+                    description="打开模型调用观察台",
+                    icon_location=f"{ICON.resolve()},0",
+                )
+                self.assertIsNone(_read_shortcut(link)["app_user_model_id"])
+
+            upgraded = _run_for_json(base_command + "-PassThru")
+
+            self.assertEqual("updated", upgraded["status"])
+            for link in links:
+                contract = _read_shortcut(link)
+                self.assertEqual(
+                    "Wly.LlmBackendToolkit.Observer",
+                    contract["app_user_model_id"],
                 )
 
     def test_shortcut_whatif_does_not_create_or_remove_links(self) -> None:

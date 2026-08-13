@@ -7,7 +7,7 @@
 界面采用封存 Local Remote Demo 的桌面三栏视觉，但移除本观察台不可提供的所有控制面：
 
 1. 对话：受管 job 按 conversation root 聚合，多轮 continuation 共用一个入口，旧历史分页加载。
-2. 连续对话：公开短标题只用于列表和页头，不冒充用户提示词；每轮显示聚合工作记录、压缩分隔、实时草稿与最终回答，同一个回答节点从流式草稿原位过渡到最终结果。重复的命令开始/结束事件和没有安全正文的成功活动只进入语义计数，进行中、失败或确有安全摘要的活动才展开成明细，避免把事件日志铺成页面。
+2. 连续对话：公开短标题只用于列表和页头，不冒充用户提示词；每轮优先显示实时草稿，并分别显示工作思路、聚合工作记录、压缩分隔与最终回答，同一个回答节点从流式草稿原位过渡到最终结果。重复的命令开始/结束事件和没有安全正文的成功活动只进入语义计数，进行中、失败或确有安全摘要的活动才展开成明细，避免把事件日志铺成页面。
 3. 对话信息：只显示状态、轮次、计划/回执模型、执行方式、累计 Token、实测上下文、耗时与交付状态。缺失字段显示“不可用”，不补造额度、子智能体、项目或设置。
 
 每轮回答后的“运行与验收回执”默认折叠：首层只显示安全执行字段与检查通过数，二次展开保留 API 已投影的 context、delegation、source、execution、delivery、cache identity、media route 和 checks。它不会输出原始命令、工具输入输出或未投影的 verification。普通 JSON 输出完整有界展示；只有后端明确投影为 `type=preview` 的 artifact 才按摘要显示。
@@ -17,6 +17,8 @@
 所有历史以耐久 job artifact 为准；读取 GUI 不增加轮询计数，也不等于 Codex 已取回结果。只有结果读取入口会记录 `handoff.collected`。
 
 公开草稿只消费 AICLI 投影出的安全 `agent_message`：每个 `output.delta` 都作为单个增量进入 progress recorder，并借助 SSE refresh 在 DOM 中追加新后缀；增量本身不再逐条写入耐久时间线。活跃轮次始终优先显示最新 `public_preview`，不会被旧结果快照遮住；`output.completed` 仍作为最终输出和时间线事件保留，并用有界完整公开文本 replacement 对齐同一个回答节点，因此已有 delta 不会重复，没有 delta 时也能直接建立 preview。草稿默认上限为 20,000 字，超过时投影显式 `public_preview_truncated`，界面提示改看最终结果。这些公开消息保持模型原文，不自动翻译，也不是隐藏 chain-of-thought。
+
+“工作思路”只消费原生 CLI 明确公开并经安全投影的 `reasoning.summary.delta`，按 `summary_group + summary_index` 累积为独立节点，不从普通 reasoning 活动、状态文案或隐藏正文推导内容。活跃轮次默认展开，同一节点随 SSE 刷新只追加新增后缀；终态仍保留但默认可折叠。正式累积字段尚不可用时，前端仅兼容带相同索引和明确安全 delta 的 `agent.reasoning.summary.delta` 事件，不把通用 `summary_zh` 冒充内容；没有真实数据就不生成节点。每段、总量和段数均有界，工作思路与实时草稿、最终答复互不混用。
 
 Codex `0.145.x` 存在一个已实测的窄生命周期例外：一条或多条较早公开 `agentMessage` 可能已经发送 delta，却不再发送自己的 completed，随后由一条更晚的 completed final 收口。AICLI 只在版本确为 `0.145.x`、所有未完成项都是较早的公开 `agentMessage`、且之后存在非空 completed final 时兼容；推理、工具、文件项未完成，final 缺失，final 之后才出现未完成消息，或未来 Codex 版本都继续明确失败。这样既保留真实实时消息，也不会把任意协议漂移伪装成成功。
 
@@ -118,9 +120,9 @@ Toolkit 调用 OCR/ASR 时会把开始/完成阶段写入同一个模型 job。�
 
 ## Windows 桌面入口
 
-正式启动器会在精确观察台窗口上写入独立 `AppUserModelID=Wly.LlmBackendToolkit.Observer` 与项目 ICO 的窗口级任务栏身份；属性写入或回读失败时返回失败，新启动且未完成身份设置的观察台窗口会被关闭，不把 Edge 身份冒充为已修复。
+正式入口是项目自带的无控制台 WinForms/WebView2 宿主。它在窗口创建前设置 `AppUserModelID=Wly.LlmBackendToolkit.Observer`，再为同一 HWND 写入 AUMID、`RelaunchIconResource` 与 `WM_SETICON` 大小图标；离屏自测必须回读并证明进程身份、窗口身份、窗口图标和 WebView2 初始化全部成立。宿主只清除自身进程内会覆盖显式参数的 `WEBVIEW2_*` 变量，并使用独立 LocalAppData profile，避免 Windows Search/Widgets 共用 profile 导致 `ERROR_INVALID_STATE (0x8007139F)`。属性、图标或 WebView 初始化任一失败都只写本机有界诊断并关闭失败，不弹错误框，也不把 Edge 图标或占位页冒充成功。
 
-`Start-LlmBackendObserver.ps1` 先确保 loopback 服务存活，再以 Edge `--app=<url>` 打开正式窗口。它用同用户互斥锁和精确窗口标题去重，不激活已有窗口。`Install-LlmBackendObserverShortcut.ps1` 使用 Windows Known Folder 同时创建当前用户桌面与开始菜单 Programs 快捷方式，不假设 OneDrive 或用户名路径，并绑定项目自带的白绿 ICO。安装、升级和 `-Remove` 都会验证 PowerShell 目标、完整 launcher/toolkit 参数、工作目录与描述；只有能证明属于本工具的链接才会修改或删除，旧 Edge 图标可安全迁移。首次全体预检会避免开始时已经存在的同名冲突导致半更新；每个目标在变更或确认 `unchanged` / `absent` 前还会按文件身份和链接契约最终复验。两个独立 Known Folder 不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，已经完成的本工具链接更新或删除可能保留，可在处理冲突后幂等重跑恢复。
+`Start-LlmBackendObserver.ps1` 先确保 loopback 服务存活，再启动原生宿主；它用同用户互斥锁、精确窗口标题和宿主路径去重，不激活已有窗口。`Install-LlmBackendObserverShortcut.ps1` 使用 Windows Known Folder 同时创建当前用户桌面与开始菜单 Programs 快捷方式，不假设 OneDrive 或用户名路径，并让快捷方式直接指向 `LlmBackendObserverHost.exe`，绑定项目白绿 ICO、相同 AppUserModelID 与 RelaunchIconResource。正式运行链不以 `pwsh.exe` 为快捷方式目标；观察服务和 AICLI 子进程均用 `CREATE_NO_WINDOW` / Hidden 语义，失败不产生可见 PowerShell/控制台。安装、升级和 `-Remove` 都会验证宿主目标、完整参数、工作目录、描述、图标与 Shell 身份；只有能证明属于本工具的链接才会修改或删除，旧 PowerShell 入口或只有 `IconLocation` 而缺少 AUMID 的本工具链接会被自动升级。首次全体预检会避免开始时已经存在的同名冲突导致半更新；每个目标在变更或确认 `unchanged` / `absent` 前还会按文件身份和链接契约最终复验。两个独立 Known Folder 不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，已经完成的本工具链接更新或删除可能保留，可在处理冲突后幂等重跑恢复。
 
 个人 skill wrapper 在模型 `submit` / `probe` 之前调用启动器，因此可见 job 会在 worker 启动前写入；GUI 失败时不得静默开始不可观察的模型调用。
 

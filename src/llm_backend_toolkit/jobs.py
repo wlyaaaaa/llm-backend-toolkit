@@ -27,6 +27,7 @@ from .input_integrity import (
 from .input_lifecycle import JobInputLifecycle, JobNotRunnableError  # noqa: F401
 from .observability import append_event, append_event_once, notify_observer
 from .public_progress import (
+    PUBLIC_REASONING_SUMMARY_MAX_CHARS,
     has_potential_secret_suffix,
     is_safe_public_progress_text,
 )
@@ -1205,6 +1206,13 @@ class JobStore:
         public_preview = ""
         public_preview_truncated = False
         public_preview_blocked = False
+        public_reasoning_summaries: list[dict[str, Any]] = []
+        public_reasoning_by_key: dict[tuple[int, int], dict[str, Any]] = {}
+        public_reasoning_blocked: set[tuple[int, int]] = set()
+        public_reasoning_summaries_truncated = False
+        reasoning_summary_entry_limit = 12
+        reasoning_summary_text_limit = 4_000
+        reasoning_summary_total_limit = PUBLIC_REASONING_SUMMARY_MAX_CHARS
         events: list[dict[str, Any]] = []
         last_phase = ""
         last_write = 0.0
@@ -1236,6 +1244,7 @@ class JobStore:
 
         def record_unlocked(event: dict[str, Any]) -> None:
             nonlocal public_preview, public_preview_truncated, public_preview_blocked
+            nonlocal public_reasoning_summaries_truncated
             nonlocal last_phase, last_write
             phase = str(event.get("phase") or "waiting")
             if phase not in allowed_phases:
@@ -1272,6 +1281,88 @@ class JobStore:
                 else:
                     public_preview = candidate
                     public_preview_truncated = candidate_truncated
+            reasoning_event_payload: dict[str, Any] | None = None
+            reasoning_delta = event.get("reasoning_summary_delta")
+            if allow_public_preview and isinstance(reasoning_delta, dict):
+                raw_summary_group = reasoning_delta.get("summary_group")
+                raw_summary_index = reasoning_delta.get("summary_index")
+                # Recorder-only callers from the pre-group schema can still
+                # emit one segment.  The AICLI boundary itself requires both
+                # fields, so new machine events never take this compatibility
+                # path.
+                if raw_summary_group is None and raw_summary_index is None:
+                    summary_group, summary_index = 1, 0
+                else:
+                    summary_group, summary_index = (
+                        raw_summary_group,
+                        raw_summary_index,
+                    )
+                delta_text = reasoning_delta.get("delta")
+                if (
+                    type(summary_group) is int
+                    and 1 <= summary_group <= 1_000_000
+                    and type(summary_index) is int
+                    and 0 <= summary_index <= 10_000
+                    and isinstance(delta_text, str)
+                    and delta_text
+                ):
+                    key = (summary_group, summary_index)
+                    if key not in public_reasoning_blocked:
+                        entry = public_reasoning_by_key.get(key)
+                        if entry is None:
+                            if len(public_reasoning_summaries) >= reasoning_summary_entry_limit:
+                                public_reasoning_summaries_truncated = True
+                            else:
+                                entry = {
+                                    "summary_group": summary_group,
+                                    "summary_index": summary_index,
+                                    "text": "",
+                                }
+                                public_reasoning_by_key[key] = entry
+                                public_reasoning_summaries.append(entry)
+                        if entry is not None:
+                            current_text = str(entry["text"])
+                            current_total = sum(
+                                len(str(item["text"]))
+                                for item in public_reasoning_summaries
+                            )
+                            available = min(
+                                reasoning_summary_text_limit - len(current_text),
+                                reasoning_summary_total_limit - current_total,
+                            )
+                            if available <= 0:
+                                public_reasoning_summaries_truncated = True
+                            else:
+                                piece = delta_text[:available]
+                                candidate = current_text + piece
+                                candidate_truncated = (
+                                    len(piece) < len(delta_text)
+                                    or reasoning_delta.get("truncated") is True
+                                    or event.get(
+                                        "public_reasoning_summaries_truncated"
+                                    ) is True
+                                )
+                                if candidate and (
+                                    not is_safe_public_progress_text(candidate)
+                                    or has_potential_secret_suffix(candidate)
+                                ):
+                                    # A later chunk may reveal that a prefix
+                                    # was secret-like.  Remove the entire
+                                    # segment and never resume it.
+                                    public_reasoning_summaries.remove(entry)
+                                    public_reasoning_by_key.pop(key, None)
+                                    public_reasoning_blocked.add(key)
+                                else:
+                                    entry["text"] = candidate
+                                    if candidate_truncated:
+                                        public_reasoning_summaries_truncated = True
+                                    reasoning_event_payload = {
+                                        "summary_group": summary_group,
+                                        "summary_index": summary_index,
+                                        "delta": piece,
+                                    }
+                                    if reasoning_delta.get("truncated") is True:
+                                        reasoning_event_payload["truncated"] = True
             if allow_public_preview and not public_preview_blocked:
                 if has_replacement:
                     metrics["estimated_output_tokens"] = _estimate_tokens(replacement)
@@ -1300,6 +1391,14 @@ class JobStore:
                     int(event["context_window_tokens"]),
                 )
 
+            if reasoning_event_payload is not None:
+                append_event(
+                    job_dir,
+                    "agent.reasoning.summary.delta",
+                    "公开工作摘要正在更新。",
+                    payload=reasoning_event_payload,
+                )
+
             public_event = event.get("public_event")
             if isinstance(public_event, dict):
                 kind = str(public_event.get("kind") or "")
@@ -1312,6 +1411,7 @@ class JobStore:
                     if kind not in {
                         "agent.context.usage.updated",
                         "agent.output.delta",
+                        "agent.reasoning.summary.delta",
                     } and not (
                         not allow_public_preview
                         and kind in {"agent.output.delta", "agent.output.completed"}
@@ -1406,6 +1506,14 @@ class JobStore:
                 payload["public_preview"] = public_preview
             if public_preview_truncated:
                 payload["public_preview_truncated"] = True
+            if public_reasoning_summaries:
+                payload["public_reasoning_summaries"] = [
+                    dict(item)
+                    for item in public_reasoning_summaries
+                    if item.get("text")
+                ]
+            if public_reasoning_summaries_truncated:
+                payload["public_reasoning_summaries_truncated"] = True
 
             should_write = (
                 phase_changed

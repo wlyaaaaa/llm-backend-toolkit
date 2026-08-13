@@ -1819,6 +1819,77 @@ class AgentExecutionTests(unittest.TestCase):
             json.dumps(event, ensure_ascii=False),
         )
 
+    def test_public_reasoning_summary_delta_is_separate_from_answer_draft(self):
+        progress = []
+
+        AiCliProfileRunner._emit_machine_event(
+            progress.append,
+            {
+                "kind": "reasoning.summary.delta",
+                "status": "updated",
+                "item_type": "reasoning_summary",
+                "summary_group": 2,
+                "summary_index": 0,
+                "public_text": "正在核对公开配置。",
+                "reasoning": "PRIVATE_RAW_REASONING_CANARY",
+            },
+        )
+
+        self.assertEqual(1, len(progress))
+        event = progress[0]
+        self.assertEqual("thinking", event["phase"])
+        self.assertEqual(
+            "agent.reasoning.summary.delta",
+            event["public_event"]["kind"],
+        )
+        self.assertEqual(
+            "公开工作思路正在更新。",
+            event["public_event"]["summary_zh"],
+        )
+        self.assertEqual(
+            {
+                "summary_group": 2,
+                "summary_index": 0,
+                "delta": "正在核对公开配置。",
+                "truncated": False,
+            },
+            event["reasoning_summary_delta"],
+        )
+        self.assertNotIn("content_delta", event)
+        self.assertNotIn("content_replace", event)
+        self.assertNotIn(
+            "PRIVATE_RAW_REASONING_CANARY",
+            json.dumps(event, ensure_ascii=False),
+        )
+
+    def test_public_reasoning_summary_delta_is_independently_bounded(self):
+        progress = []
+
+        AiCliProfileRunner._emit_machine_event(
+            progress.append,
+            {
+                "kind": "reasoning.summary.delta",
+                "summary_group": 3,
+                "summary_index": 1,
+                "public_text": "公开" * 2_100,
+                "public_text_truncated": True,
+                "reasoning": "PRIVATE_RAW_REASONING_CANARY",
+            },
+        )
+
+        self.assertEqual(1, len(progress))
+        event = progress[0]
+        self.assertEqual(3, event["reasoning_summary_delta"]["summary_group"])
+        self.assertEqual(1, event["reasoning_summary_delta"]["summary_index"])
+        self.assertEqual(4_000, len(event["reasoning_summary_delta"]["delta"]))
+        self.assertTrue(event["reasoning_summary_delta"]["truncated"])
+        self.assertTrue(event["public_reasoning_summaries_truncated"])
+        self.assertNotIn("content_delta", event)
+        self.assertNotIn(
+            "PRIVATE_RAW_REASONING_CANARY",
+            json.dumps(event, ensure_ascii=False),
+        )
+
     def test_public_agent_output_delta_preserves_stream_boundary_whitespace(self):
         progress = []
 
@@ -2477,6 +2548,8 @@ class AgentExecutionTests(unittest.TestCase):
         self.assertEqual("agent_budget_exceeded", result["error"]["category"])
         self.assertEqual("maxToolCalls", result["execution_receipt"]["limit_hit"])
 
+    @patch.object(subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True)
+    @patch.object(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, create=True)
     @patch("llm_backend_toolkit.agent_runners.os.name", "nt")
     @patch("llm_backend_toolkit.agent_runners.subprocess.run")
     @patch("llm_backend_toolkit.agent_runners.subprocess.Popen")
@@ -2506,6 +2579,18 @@ class AgentExecutionTests(unittest.TestCase):
         self.assertEqual(
             ["taskkill", "/PID", "24680", "/T", "/F"],
             native_run.call_args.args[0],
+        )
+        self.assertTrue(
+            popen.call_args.kwargs["creationflags"]
+            & getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
+        self.assertTrue(
+            popen.call_args.kwargs["creationflags"]
+            & getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+        self.assertEqual(
+            getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            native_run.call_args.kwargs["creationflags"],
         )
 
     @patch("llm_backend_toolkit.agent_runners.os.name", "nt")

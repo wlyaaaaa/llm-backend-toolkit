@@ -24,6 +24,14 @@ class MediaResult:
 
 
 def _default_runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    if os.name == "nt":
+        # LocalOCR and ChineseASR are background specialist adapters. Their
+        # PowerShell implementation must not flash a console over the desktop
+        # observer or the user's active application.
+        kwargs.setdefault(
+            "creationflags",
+            getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
     return subprocess.run(args, **kwargs)
 
 

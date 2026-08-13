@@ -22,6 +22,11 @@ from typing import Any
 
 from .jobs import OBSERVER_LOCAL_SCHEMA, default_state_root
 from .observability import file_lock, read_events, utc_now
+from .public_progress import (
+    PUBLIC_REASONING_SUMMARY_MAX_CHARS,
+    bounded_public_draft,
+    has_potential_secret_suffix,
+)
 from .workspace_observer import (
     is_safe_workspace_relative_path,
     revalidate_workspace_root,
@@ -719,6 +724,43 @@ def _project_progress(progress: dict[str, Any]) -> dict[str, Any]:
         projected["public_preview"] = preview[:20_000]
     if progress.get("public_preview_truncated") is True:
         projected["public_preview_truncated"] = True
+    summaries = progress.get("public_reasoning_summaries")
+    if isinstance(summaries, (list, tuple)):
+        safe_summaries: list[dict[str, Any]] = []
+        remaining_chars = PUBLIC_REASONING_SUMMARY_MAX_CHARS
+        for raw in summaries[:12]:
+            if not isinstance(raw, dict) or remaining_chars <= 0:
+                continue
+            summary_group = raw.get("summary_group")
+            summary_index = raw.get("summary_index")
+            raw_text = raw.get("text")
+            if (
+                type(summary_group) is not int
+                or not 1 <= summary_group <= 1_000_000
+                or type(summary_index) is not int
+                or not 0 <= summary_index <= 10_000
+            ):
+                continue
+            text, truncated = bounded_public_draft(
+                raw_text,
+                max_chars=min(4_000, remaining_chars),
+            )
+            if not text or has_potential_secret_suffix(text):
+                continue
+            safe_summaries.append(
+                {
+                    "summary_group": summary_group,
+                    "summary_index": summary_index,
+                    "text": text,
+                }
+            )
+            remaining_chars -= len(text)
+            if truncated:
+                break
+        if safe_summaries:
+            projected["public_reasoning_summaries"] = safe_summaries
+    if progress.get("public_reasoning_summaries_truncated") is True:
+        projected["public_reasoning_summaries_truncated"] = True
     return projected
 
 

@@ -541,6 +541,129 @@ function appendWorkspaceNote(container, changes) {
   container.append(note);
 }
 
+function isReasoningSummaryEvent(event) {
+  const kind = String(event?.kind || "").toLowerCase();
+  return kind === "reasoning.summary.delta" || kind === "agent.reasoning.summary.delta";
+}
+
+function reasoningSummaryData(turn, events) {
+  const raw = Array.isArray(turn.progress?.public_reasoning_summaries)
+    ? turn.progress.public_reasoning_summaries
+    : [];
+  const accumulated = [];
+  let accumulatedChars = 0;
+  let accumulatedTruncated = turn.progress?.public_reasoning_summaries_truncated === true;
+  for (const item of raw) {
+    if (
+      !Number.isInteger(item?.summary_group)
+      || item.summary_group <= 0
+      || !Number.isInteger(item?.summary_index)
+      || item.summary_index < 0
+      || typeof item?.text !== "string"
+      || !item.text
+    ) continue;
+    if (accumulated.length >= 12) {
+      accumulatedTruncated = true;
+      continue;
+    }
+    const available = Math.min(4_000, 20_000 - accumulatedChars);
+    if (available <= 0) {
+      accumulatedTruncated = true;
+      continue;
+    }
+    const text = item.text.slice(0, available);
+    accumulated.push({
+      summary_group: item.summary_group,
+      summary_index: item.summary_index,
+      text,
+    });
+    accumulatedChars += text.length;
+    if (text.length < item.text.length) accumulatedTruncated = true;
+  }
+  if (accumulated.length) {
+    return { items: accumulated, truncated: accumulatedTruncated };
+  }
+
+  // Compatibility contract for observer backends that expose only the safe
+  // projected event. Never use summary_zh: it is an activity label, not model
+  // authored work-thought content.
+  const byKey = new Map();
+  let totalChars = 0;
+  let truncated = false;
+  for (const event of mergeEvents(events, Array.isArray(turn.events) ? turn.events : [])) {
+    if (!isReasoningSummaryEvent(event)) continue;
+    const payload = event.payload || {};
+    if (payload.truncated === true || event.public_reasoning_summaries_truncated === true) {
+      truncated = true;
+    }
+    const summaryGroup = first(payload.summary_group, event.summary_group);
+    const summaryIndex = first(payload.summary_index, event.summary_index);
+    const delta = first(payload.delta, payload.public_text, event.delta, event.public_text);
+    if (
+      !Number.isInteger(summaryGroup)
+      || summaryGroup <= 0
+      || !Number.isInteger(summaryIndex)
+      || summaryIndex < 0
+      || typeof delta !== "string"
+      || !delta
+    ) continue;
+    const key = `${summaryGroup}:${summaryIndex}`;
+    let item = byKey.get(key);
+    if (!item) {
+      if (byKey.size >= 12) {
+        truncated = true;
+        continue;
+      }
+      item = { summary_group: summaryGroup, summary_index: summaryIndex, text: "" };
+      byKey.set(key, item);
+    }
+    const available = Math.min(4_000 - item.text.length, 20_000 - totalChars);
+    if (available <= 0) {
+      truncated = true;
+      continue;
+    }
+    const piece = delta.slice(0, available);
+    item.text += piece;
+    totalChars += piece.length;
+    if (piece.length < delta.length) truncated = true;
+  }
+  return { items: [...byKey.values()].filter((item) => item.text), truncated };
+}
+
+function renderReasoningSummaries(turn, events) {
+  const view = reasoningSummaryData(turn, events);
+  const summaries = view.items;
+  if (!summaries.length) return null;
+  const terminal = ["completed", "failed", "cancelled", "stale", "blocked"]
+    .includes(statusName(turn.job_status));
+  const details = createElement("details", "reasoning-summary");
+  details.open = !terminal;
+  details.dataset.live = String(!terminal);
+  const heading = createElement("summary", "reasoning-summary-heading");
+  heading.append(
+    createElement("strong", "", "工作思路"),
+    createElement(
+      "span",
+      "reasoning-summary-state",
+      terminal ? `${summaries.length} 段` : "正在更新",
+    ),
+  );
+  details.append(heading);
+  const body = createElement("div", "reasoning-summary-body");
+  for (const item of summaries) {
+    const text = createElement("div", "reasoning-summary-text", item.text);
+    text.dataset.summaryKey = `${item.summary_group}:${item.summary_index}`;
+    text.setAttribute("aria-live", terminal ? "off" : "polite");
+    text.setAttribute("aria-atomic", "false");
+    body.append(text);
+  }
+  if (view.truncated) {
+    body.append(createElement("div", "reasoning-summary-limit", "工作思路显示已截断。"));
+  }
+  details.append(body);
+  return details;
+}
+
 function safeOutputText(raw) {
   if (typeof raw === "string") return { text: raw, truncated: false };
   if (raw === undefined || raw === null) return { text: "", truncated: false };
@@ -719,6 +842,9 @@ function renderTurn(turn, index) {
   const output = outputData(turn);
   const assistant = renderAssistant(output);
   if (!output.final) article.append(assistant);
+
+  const reasoning = renderReasoningSummaries(turn, events);
+  if (reasoning) article.append(reasoning);
 
   if (work.rows.length || work.workspace.length || turn.event_page?.has_earlier || state.eventPages.get(jobId)?.hasEarlier) {
     const log = createElement("details", "work-log");
@@ -921,12 +1047,19 @@ function renderConversation(detail, { preserveScroll = true } = {}) {
 
   const priorOutputs = new Map();
   const priorWorkOpen = new Map();
+  const priorReasoningOpen = new Map();
+  const priorReasoningTexts = new Map();
   for (const article of elements.turns.querySelectorAll(".turn[data-job-id]")) {
     const jobId = String(article.dataset.jobId || "");
     const output = article.querySelector(".assistant-output");
     if (jobId && output) priorOutputs.set(jobId, output);
     const workLog = article.querySelector(".work-log");
     if (jobId && workLog) priorWorkOpen.set(jobId, workLog.open);
+    const reasoning = article.querySelector(".reasoning-summary");
+    if (jobId && reasoning) priorReasoningOpen.set(jobId, reasoning.open);
+    for (const text of article.querySelectorAll(".reasoning-summary-text[data-summary-key]")) {
+      if (jobId) priorReasoningTexts.set(`${jobId}:${text.dataset.summaryKey}`, text);
+    }
   }
 
   const fragment = document.createDocumentFragment();
@@ -949,6 +1082,26 @@ function renderConversation(detail, { preserveScroll = true } = {}) {
     }
     const workLog = article.querySelector(".work-log");
     if (workLog && priorWorkOpen.has(jobId)) workLog.open = priorWorkOpen.get(jobId);
+    const reasoning = article.querySelector(".reasoning-summary");
+    if (reasoning && priorReasoningOpen.has(jobId)) {
+      reasoning.open = priorReasoningOpen.get(jobId);
+    }
+    for (const nextReasoning of article.querySelectorAll(".reasoning-summary-text[data-summary-key]")) {
+      const key = `${jobId}:${nextReasoning.dataset.summaryKey}`;
+      const priorReasoning = priorReasoningTexts.get(key);
+      if (!priorReasoning) continue;
+      const nextText = nextReasoning.textContent || "";
+      const priorText = priorReasoning.textContent || "";
+      priorReasoning.className = nextReasoning.className;
+      priorReasoning.setAttribute("aria-live", nextReasoning.getAttribute("aria-live") || "off");
+      priorReasoning.setAttribute("aria-atomic", "false");
+      if (nextText.startsWith(priorText)) {
+        priorReasoning.append(document.createTextNode(nextText.slice(priorText.length)));
+      } else if (nextText !== priorText) {
+        priorReasoning.textContent = nextText;
+      }
+      nextReasoning.replaceWith(priorReasoning);
+    }
     fragment.append(article);
   });
   elements.turns.replaceChildren(fragment);
