@@ -1042,7 +1042,7 @@ function renderConversation(detail, { preserveScroll = true } = {}) {
   elements.status.textContent = statusText;
   elements.status.dataset.tone = tone;
   elements.turnCount.textContent = `${Number(conversation.turn_count || turns.length)} 轮对话`;
-  elements.title.textContent = taskLabel(first(turns[0], listItem));
+  elements.title.textContent = taskLabel(first(latest, listItem));
   elements.subtitle.textContent = `${modelName(latest)} · ${executionName(latest)} · 最近更新 ${formatDate(first(latest.updated_utc, listItem.updated_utc), "short")}`;
 
   const priorOutputs = new Map();

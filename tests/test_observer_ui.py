@@ -43,11 +43,11 @@ class ObserverUiTests(unittest.TestCase):
         parser = _DocumentParser()
         parser.feed(self.html)
         self.assertEqual(
-            ["/assets/styles.css?v=20260813-conversations-6"],
+            ["/assets/styles.css?v=20260813-conversations-7"],
             parser.stylesheets,
         )
         self.assertEqual(
-            ["/assets/app.js?v=20260813-conversations-6"],
+            ["/assets/app.js?v=20260813-conversations-7"],
             parser.scripts,
         )
         self.assertIn('href="/assets/favicon.svg"', self.html)
@@ -107,6 +107,16 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("MAX_EVENTS_PER_TURN - MAX_PINNED_EVENTS_PER_TURN", self.js)
         self.assertIn("返回本轮最新记录", self.js)
         self.assertNotIn("/api/runs?limit=", self.js)
+
+    def test_conversation_header_uses_the_latest_turn_label(self) -> None:
+        self.assertIn(
+            "elements.title.textContent = taskLabel(first(latest, listItem));",
+            self.js,
+        )
+        self.assertNotIn(
+            "elements.title.textContent = taskLabel(first(turns[0], listItem));",
+            self.js,
+        )
 
     def test_feed_preserves_observation_semantics(self) -> None:
         render_turn = self.js.split("function renderTurn", 1)[1].split(
