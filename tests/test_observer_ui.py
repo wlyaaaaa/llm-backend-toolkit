@@ -43,11 +43,11 @@ class ObserverUiTests(unittest.TestCase):
         parser = _DocumentParser()
         parser.feed(self.html)
         self.assertEqual(
-            ["/assets/styles.css?v=20260813-conversations-2"],
+            ["/assets/styles.css?v=20260813-conversations-5"],
             parser.stylesheets,
         )
         self.assertEqual(
-            ["/assets/app.js?v=20260813-conversations-2"],
+            ["/assets/app.js?v=20260813-conversations-5"],
             parser.scripts,
         )
         self.assertIn('href="/assets/favicon.svg"', self.html)
@@ -109,9 +109,27 @@ class ObserverUiTests(unittest.TestCase):
         self.assertNotIn("/api/runs?limit=", self.js)
 
     def test_feed_preserves_observation_semantics(self) -> None:
-        self.assertIn("本轮任务正文未公开", self.js)
+        render_turn = self.js.split("function renderTurn", 1)[1].split(
+            "function latestTurn", 1
+        )[0]
+        self.assertNotIn("display.task_label", render_turn)
+        self.assertNotIn('"task-message"', render_turn)
+        self.assertNotIn('"你"', render_turn)
+        self.assertNotIn(".task-message", self.css)
+        self.assertNotIn(".task-withheld", self.css)
         self.assertIn("实时草稿", self.js)
         self.assertIn("最终答复", self.js)
+        output_data = self.js.split("function outputData", 1)[1].split(
+            "function renderTurn", 1
+        )[0]
+        self.assertLess(
+            output_data.index("if (!terminal)"),
+            output_data.index("if (finalOutput.text)"),
+        )
+        self.assertIn("safeOutputText", output_data)
+        self.assertIn('raw.type === "preview"', self.js)
+        self.assertNotIn('if (typeof raw.output === "string")', self.js)
+        self.assertNotIn('String(first(raw.preview, raw.output, ""))', output_data)
         self.assertIn("Codex 已自动压缩上下文", self.js)
         self.assertIn("已压缩调用输入", self.js)
         self.assertIn("变化归因未验证", self.js)
@@ -130,6 +148,11 @@ class ObserverUiTests(unittest.TestCase):
         self.assertNotIn("calculatedTotal", self.js)
         self.assertIn("optionalNumber(context.current_tokens)", self.js)
         self.assertIn('createElement("details", "work-log")', self.js)
+        self.assertIn("workSummary(work)", self.js)
+        self.assertIn("当前窗口：${workSummary(work)}", self.js)
+        self.assertIn("page?.browsingEarlier", self.js)
+        self.assertIn("visibleWorkRows(work.rows)", self.js)
+        self.assertNotIn('`${work.rows.length} 项活动`', self.js)
         self.assertIn("workStatusDetail(item)", self.js)
         self.assertIn("isCompaction(event) || isOutcomeEvent(event)", self.js)
         self.assertIn('"outcome-note"', self.js)
@@ -138,7 +161,19 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("factContextBar.style.width", self.js)
         self.assertIn("模型评估时段", self.js)
         self.assertIn("整段墙钟估算", self.js)
+        self.assertIn('createElement("details", "receipt-card")', self.js)
+        self.assertIn("运行与验收回执", self.js)
+        self.assertIn("receipt.checks", self.js)
+        self.assertIn('"context_receipt"', self.js)
+        self.assertIn('"delegation_receipt"', self.js)
+        self.assertIn('"source_receipt"', self.js)
+        self.assertIn('"delivery_receipt"', self.js)
+        self.assertIn('"cache_identity"', self.js)
+        self.assertIn('"media_routes"', self.js)
+        self.assertIn("完整安全回执", self.js)
+        self.assertNotIn("JSON.stringify(receipt", self.js)
         self.assertNotIn("命令正文", self.js.split("function workLabel", 1)[1])
+        self.assertIn('kind === "run.completed"', self.js)
 
     def test_javascript_parses_when_node_is_available(self) -> None:
         node = shutil.which("node")

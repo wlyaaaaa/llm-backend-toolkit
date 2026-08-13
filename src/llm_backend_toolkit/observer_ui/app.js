@@ -302,8 +302,10 @@ function isOutputEvent(event) {
 
 function isOutcomeEvent(event) {
   const kind = String(event.kind || "").toLowerCase();
-  return kind === "run.failed"
+  return kind === "run.completed"
+    || kind === "run.failed"
     || kind === "run.cancelled"
+    || kind === "agent.run.completed"
     || kind === "agent.run.failed"
     || kind === "agent.turn.failed"
     || kind === "agent.limit.hit"
@@ -345,9 +347,8 @@ function eventOrdinal(event) {
 }
 
 function workLabel(type, event) {
-  const safeSummary = String(first(event.summary_zh, event.payload?.summary_zh, "")).trim();
-  const genericSummary = /^(智能体)?(正在|已)?(执行)?(命令|工具|网页|浏览器|mcp|电脑|计算机)(活动|调用|操作|执行)?[。.]?$/i;
-  if (safeSummary && !genericSummary.test(safeSummary)) return safeSummary;
+  const safeSummary = specificWorkSummary(event);
+  if (safeSummary) return safeSummary;
   const ordinal = eventOrdinal(event);
   const suffix = ordinal ? ` ${ordinal}` : "";
   if (type === "command") return `命令${suffix}`;
@@ -356,6 +357,12 @@ function workLabel(type, event) {
   if (type === "computer") return `电脑操作${suffix}`;
   if (type === "tool") return `工具活动${suffix}`;
   return "工作进度";
+}
+
+function specificWorkSummary(event) {
+  const safeSummary = String(first(event.summary_zh, event.payload?.summary_zh, "")).trim();
+  const genericSummary = /^(智能体)?(正在|已)?(执行)?(命令|工具|网页|浏览器|mcp|电脑|计算机)(活动|调用|操作|执行|成功|完成|失败)?(?:[（(][^）)]*[）)])?[。.]?$/i;
+  return safeSummary && !genericSummary.test(safeSummary) ? safeSummary : "";
 }
 
 function workStatusLabel(value) {
@@ -421,6 +428,7 @@ function normalizedWork(events) {
       key,
       type,
       label: workLabel(type, event),
+      specific: Boolean(specificWorkSummary(event)),
       status: eventStatus(event),
       durationMs: Number.isFinite(Number(event.payload?.duration_ms))
         ? Number(event.payload.duration_ms)
@@ -430,13 +438,47 @@ function normalizedWork(events) {
         : null,
     };
     if (indexed.has(key)) {
-      Object.assign(indexed.get(key), row);
+      const existing = indexed.get(key);
+      const specificLabel = existing.specific && !row.specific
+        ? { label: existing.label, specific: true }
+        : {};
+      Object.assign(existing, row, specificLabel);
     } else {
       indexed.set(key, row);
       rows.push(row);
     }
   }
   return { rows, workspace, compactions, outcomes };
+}
+
+function visibleWorkRows(rows) {
+  const important = rows.filter((item) =>
+    item.specific || ["started", "running", "in_progress", "failed", "declined", "cancelled"].includes(item.status));
+  const unique = new Map();
+  for (const item of important) unique.set(`${item.type}:${item.label}:${item.status}`, item);
+  return [...unique.values()].slice(-12);
+}
+
+function workSummary(work) {
+  const counts = new Map();
+  for (const item of work.rows) counts.set(item.type, (counts.get(item.type) || 0) + 1);
+  const labels = {
+    command: "命令",
+    web: "网页操作",
+    mcp: "MCP 调用",
+    computer: "电脑操作",
+    tool: "工具活动",
+  };
+  const parts = [...counts.entries()].map(([type, count]) =>
+    `${labels[type] || "工作活动"} ${count} 次`);
+  if (work.workspace.length) parts.push(`工作区变化 ${work.workspace.length} 项`);
+
+  const failed = work.rows.filter((item) => ["failed", "declined", "cancelled"].includes(item.status)).length;
+  const active = work.rows.filter((item) => ["started", "running", "in_progress"].includes(item.status)).length;
+  if (failed) parts.push(`${failed} 项未成功`);
+  else if (active) parts.push(`${active} 项进行中`);
+  else if (work.rows.length) parts.push("已完成");
+  return parts.join(" · ") || "已记录工作区变化";
 }
 
 function compactionText(event) {
@@ -499,29 +541,165 @@ function appendWorkspaceNote(container, changes) {
   container.append(note);
 }
 
-function outputData(turn) {
-  const raw = turn.result?.output;
-  let finalText = "";
-  let finalTruncated = false;
-  if (typeof raw === "string") finalText = raw;
-  else if (raw && typeof raw === "object") {
-    finalText = String(first(raw.preview, raw.output, ""));
-    finalTruncated = raw.truncated === true;
+function safeOutputText(raw) {
+  if (typeof raw === "string") return { text: raw, truncated: false };
+  if (raw === undefined || raw === null) return { text: "", truncated: false };
+  if (raw && typeof raw === "object" && raw.type === "preview" && typeof raw.preview === "string") {
+    return { text: raw.preview, truncated: raw.truncated === true };
   }
+  try {
+    const text = JSON.stringify(raw, null, 2) || "";
+    return { text: text.slice(0, 20_000), truncated: text.length > 20_000 };
+  } catch (_error) {
+    return { text: "", truncated: false };
+  }
+}
+
+function outputData(turn) {
+  const finalOutput = safeOutputText(turn.result?.output);
   const draft = String(turn.progress?.public_preview || "");
   const terminal = ["completed", "failed", "cancelled", "stale", "blocked"].includes(statusName(turn.job_status));
-  if (finalText) return { text: finalText, final: true, truncated: finalTruncated };
+  if (!terminal) return draft
+    ? {
+        text: draft,
+        final: false,
+        truncated: turn.progress?.public_preview_truncated === true,
+      }
+    : { text: "等待公开草稿…", final: false, truncated: false, empty: true };
+  if (finalOutput.text) return { text: finalOutput.text, final: true, truncated: finalOutput.truncated };
   if (draft) return {
     text: draft,
-    final: terminal,
+    final: true,
     truncated: turn.progress?.public_preview_truncated === true,
   };
   return {
-    text: terminal ? "本轮未提供公开答复。" : "等待公开答复…",
-    final: terminal,
+    text: "本轮未提供公开答复。",
+    final: true,
     truncated: false,
     empty: true,
   };
+}
+
+function receiptData(turn) {
+  const result = turn.result || {};
+  const execution = turn.result?.execution_receipt;
+  const checks = Array.isArray(turn.result?.checks) ? turn.result.checks : [];
+  const full = {};
+  for (const key of [
+    "context_receipt",
+    "delegation_receipt",
+    "source_receipt",
+    "execution_receipt",
+    "delivery_receipt",
+    "cache_identity",
+    "media_routes",
+  ]) {
+    if (result[key] !== undefined) full[key] = result[key];
+  }
+  if (checks.length) full.checks = checks;
+  const receipt = {
+    execution: execution && typeof execution === "object" ? execution : {},
+    checks,
+    full,
+  };
+  const fields = [];
+  const labels = {
+    runner: "执行器",
+    mode: "执行模式",
+    model: "计划或回执模型",
+    reasoning_effort: "推理强度",
+    stop_reason: "停止原因",
+    exit_code: "退出码",
+    duration_ms: "执行耗时",
+    steps: "步骤",
+    tool_calls: "工具调用",
+    machine_event_count: "机器事件",
+    fallback_used: "使用回退",
+    route_live_verified: "路由实时验证",
+    route_evidence_state: "路由证据",
+  };
+  for (const key of Object.keys(labels)) {
+    const value = receipt.execution[key];
+    if (value === undefined || value === null || value === "") continue;
+    let display = value;
+    if (key === "duration_ms") display = formatDuration(Number(value) / 1000);
+    else if (typeof value === "boolean") display = value ? "是" : "否";
+    fields.push({ label: labels[key], value: String(display) });
+  }
+  const cleanup = receipt.execution.limit_usage?.cleanup_confirmed;
+  if (typeof cleanup === "boolean") fields.push({ label: "清理确认", value: cleanup ? "是" : "否" });
+  const failed = receipt.checks.some((check) => check?.passed === false)
+    || Number(receipt.execution.exit_code) !== 0 && receipt.execution.exit_code !== undefined;
+  return { receipt, fields, failed };
+}
+
+function renderReceipt(turn) {
+  const view = receiptData(turn);
+  const hasFullReceipt = Object.keys(view.receipt.full).length > 0;
+  if (!view.fields.length && !view.receipt.checks.length && !hasFullReceipt) return null;
+  const card = createElement("details", "receipt-card");
+  card.open = view.failed;
+  card.dataset.tone = view.failed ? "danger" : "quiet";
+  const passed = view.receipt.checks.filter((check) => check?.passed === true).length;
+  const summaryText = view.receipt.checks.length
+    ? `${passed}/${view.receipt.checks.length} 项检查通过`
+    : view.fields.length ? "可验证执行信息" : "可验证回执";
+  const summary = createElement("summary", "receipt-heading");
+  summary.append(
+    createElement("strong", "", "运行与验收回执"),
+    createElement("span", "", view.failed ? `${summaryText} · 有失败` : summaryText),
+  );
+  card.append(summary);
+
+  if (view.fields.length) {
+    const facts = createElement("dl", "receipt-facts");
+    for (const field of view.fields) {
+      const row = createElement("div", "");
+      row.append(createElement("dt", "", field.label), createElement("dd", "", field.value));
+      facts.append(row);
+    }
+    card.append(facts);
+  }
+  if (view.receipt.checks.length) {
+    const list = createElement("ul", "receipt-checks");
+    for (const check of view.receipt.checks) {
+      const label = String(first(check?.summary, check?.id, "未命名检查"));
+      const item = createElement("li", "", label);
+      item.dataset.passed = String(check?.passed === true);
+      list.append(item);
+    }
+    card.append(list);
+  }
+  if (hasFullReceipt) {
+    const technical = createElement("details", "receipt-technical");
+    technical.append(createElement("summary", "", "完整安全回执"));
+    const fullText = safeOutputText(view.receipt.full);
+    const body = createElement("pre", "", fullText.text);
+    body.dataset.truncated = String(fullText.truncated);
+    technical.append(body);
+    card.append(technical);
+  }
+  return card;
+}
+
+function renderAssistant(output) {
+  const assistant = createElement("section", "assistant-message");
+  assistant.dataset.outputState = output.final ? "final" : "draft";
+  assistant.append(createElement("span", "assistant-avatar", "›_"));
+  const assistantHeader = createElement("div", "assistant-message-header");
+  const outputStatus = createElement(
+    "span",
+    "assistant-state",
+    output.final ? "最终答复" : "实时草稿",
+  );
+  outputStatus.dataset.live = String(!output.final);
+  assistantHeader.append(createElement("strong", "", output.final ? "回复" : "正在生成"), outputStatus);
+  const outputBody = createElement("div", `assistant-output${output.empty ? " is-empty" : ""}`, output.text);
+  outputBody.dataset.truncated = String(output.truncated);
+  outputBody.setAttribute("aria-live", output.final ? "off" : "polite");
+  outputBody.setAttribute("aria-atomic", "false");
+  assistant.append(assistantHeader, outputBody);
+  return assistant;
 }
 
 function renderTurn(turn, index) {
@@ -536,36 +714,29 @@ function renderTurn(turn, index) {
   );
   article.append(heading);
 
-  const publicTask = String(first(pick(turn, "display.task_label"), "")).trim();
-  if (publicTask) {
-    const task = createElement("section", "task-message");
-    task.append(
-      createElement("span", "message-label", "你"),
-      createElement("p", "", publicTask),
-    );
-    article.append(task);
-  } else {
-    article.append(createElement("p", "task-withheld", "本轮任务正文未公开"));
-  }
-
   const events = eventsForTurn(turn);
   const work = normalizedWork(events);
+  const output = outputData(turn);
+  const assistant = renderAssistant(output);
+  if (!output.final) article.append(assistant);
+
   if (work.rows.length || work.workspace.length || turn.event_page?.has_earlier || state.eventPages.get(jobId)?.hasEarlier) {
     const log = createElement("details", "work-log");
     log.open = work.rows.some((item) =>
       ["started", "running", "in_progress"].includes(item.status));
+    const page = state.eventPages.get(jobId);
+    const hasEarlier = page ? page.hasEarlier : turn.event_page?.has_earlier;
+    const windowIsLimited = Boolean(hasEarlier || page?.browsingEarlier);
     const logHeading = createElement("summary", "work-log-heading");
-    const summaryParts = [];
-    if (work.rows.length) summaryParts.push(`${work.rows.length} 项活动`);
-    if (work.workspace.length) summaryParts.push(`${work.workspace.length} 个文件`);
     logHeading.append(
       createElement("strong", "", log.open ? "正在工作" : "工作记录"),
-      createElement("span", "", summaryParts.join(" · ") || "观察到工作区变化"),
+      createElement("span", "", windowIsLimited ? `当前窗口：${workSummary(work)}` : workSummary(work)),
     );
     log.append(logHeading);
-    if (work.rows.length) {
+    const visibleRows = visibleWorkRows(work.rows);
+    if (visibleRows.length) {
       const rows = createElement("div", "work-rows");
-      for (const item of work.rows) {
+      for (const item of visibleRows) {
         const row = createElement("div", "work-row");
         row.dataset.tone = workTone(item.status);
         row.append(
@@ -575,13 +746,24 @@ function renderTurn(turn, index) {
         rows.append(row);
       }
       log.append(rows);
+    } else if (work.rows.length) {
+      log.append(createElement(
+        "p",
+        "work-aggregate-note",
+        "完成活动已聚合；上游未公开可安全展示的命令或工具正文。",
+      ));
     }
     appendWorkspaceNote(log, work.workspace);
 
-    const page = state.eventPages.get(jobId);
-    const hasEarlier = page ? page.hasEarlier : turn.event_page?.has_earlier;
     if (hasEarlier) {
-      const earlier = createElement("button", "older-events", "加载本轮更早的工作记录");
+      const earlierCount = optionalNumber(first(page?.earlierCount, turn.event_page?.earlier_count));
+      const earlier = createElement(
+        "button",
+        "older-events",
+        earlierCount === null
+          ? "加载本轮更早的工作记录"
+          : `加载本轮更早的工作记录（${formatNumber(earlierCount)} 条原始事件）`,
+      );
       earlier.type = "button";
       earlier.addEventListener("click", () => loadEarlierEvents(turn, earlier));
       log.append(earlier);
@@ -609,7 +791,9 @@ function renderTurn(turn, index) {
   for (const event of work.outcomes) {
     const kind = String(event.kind || "").toLowerCase();
     const tone = kind.includes("failed") || kind.includes("limit") ? "danger" : "quiet";
-    const fallback = kind === "handoff.collected" ? "Codex 已取回本轮结果" : "本轮运行未成功完成";
+    const fallback = kind.includes("completed")
+      ? "本轮运行已完成"
+      : kind === "handoff.collected" ? "Codex 已取回本轮结果" : "本轮运行未成功完成";
     const outcome = createElement(
       "div",
       "outcome-note",
@@ -618,23 +802,10 @@ function renderTurn(turn, index) {
     outcome.dataset.tone = tone;
     article.append(outcome);
   }
+  if (output.final) article.append(assistant);
 
-  const output = outputData(turn);
-  const assistant = createElement("section", "assistant-message");
-  assistant.dataset.outputState = output.final ? "final" : "draft";
-  assistant.append(createElement("span", "assistant-avatar", "›_"));
-  const assistantHeader = createElement("div", "assistant-message-header");
-  const outputStatus = createElement(
-    "span",
-    "assistant-state",
-    output.final ? "最终答复" : "实时草稿",
-  );
-  outputStatus.dataset.live = String(!output.final);
-  assistantHeader.append(createElement("strong", "", "回复"), outputStatus);
-  const outputBody = createElement("div", `assistant-output${output.empty ? " is-empty" : ""}`, output.text);
-  outputBody.dataset.truncated = String(output.truncated);
-  assistant.append(assistantHeader, outputBody);
-  article.append(assistant);
+  const receipt = renderReceipt(turn);
+  if (receipt) article.append(receipt);
 
   const errorCategory = turn.result?.error?.category;
   if (errorCategory) article.append(createElement("div", "turn-error", `错误类别：${errorCategory}`));
@@ -818,6 +989,7 @@ async function loadEarlierEvents(turn, button) {
     events: Array.isArray(turn.events) ? turn.events : [],
     hasEarlier: Boolean(turn.event_page?.has_earlier),
     nextBefore: turn.event_page?.next_before_sequence,
+    earlierCount: optionalNumber(turn.event_page?.earlier_count),
   };
   if (!page.hasEarlier) return;
   button.disabled = true;
@@ -834,6 +1006,7 @@ async function loadEarlierEvents(turn, button) {
         .slice(0, MAX_EVENTS_PER_TURN - MAX_PINNED_EVENTS_PER_TURN),
       hasEarlier: Boolean(metadata.has_earlier),
       nextBefore: metadata.next_before_sequence,
+      earlierCount: optionalNumber(metadata.earlier_count),
       browsingEarlier: true,
     });
     renderConversation(state.selectedDetail, { preserveScroll: true });

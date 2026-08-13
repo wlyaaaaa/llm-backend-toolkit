@@ -314,18 +314,6 @@ button:focus-visible,
 .turn-index { color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
 .turn-time { color: var(--quiet); font-size: 10px; font-variant-numeric: tabular-nums; }
 
-.task-message {
-  width: min(86%, 610px);
-  margin-left: auto;
-  padding: 11px 13px;
-  border: 1px solid var(--line);
-  border-radius: 13px 13px 3px 13px;
-  background: var(--surface-3);
-}
-.message-label { display: block; margin-bottom: 3px; color: var(--muted); font-size: 9px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
-.task-message p { margin: 0; overflow-wrap: anywhere; font-size: 14px; line-height: 1.72; }
-.task-withheld { margin: 0 0 20px; color: var(--muted); font-size: 11px; text-align: right; }
-
 .work-log { margin: 8px 0 18px; border-top: 1px solid var(--line); }
 .work-log-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; min-height: 44px; overflow: hidden; color: var(--muted); cursor: pointer; font-size: 11px; list-style: none; }
 .work-log-heading::-webkit-details-marker { display: none; }
@@ -339,6 +327,7 @@ button:focus-visible,
 .work-row[data-tone="live"] .work-row-main::before { background: var(--green); }
 .work-row[data-tone="danger"] .work-row-main::before { background: var(--danger); }
 .work-row-status { color: var(--muted); font-size: 9px; white-space: nowrap; }
+.work-aggregate-note { margin: 1px 0 6px 18px; color: var(--muted); font-size: 10px; line-height: 1.55; }
 .workspace-note { margin: 5px 0 0 13px; padding: 7px 9px; border-radius: 7px; background: #fff9eb; color: #77520d; font-size: 10px; }
 .workspace-paths { display: grid; gap: 3px; margin-top: 5px; }
 .workspace-change-row { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-width: 0; }
@@ -360,6 +349,7 @@ button:focus-visible,
 .assistant-message-header strong { font-size: 11px; font-weight: 670; }
 .assistant-state { color: var(--muted); font-size: 9px; }
 .assistant-state[data-live="true"] { color: var(--green-deep); }
+.assistant-state[data-live="true"]::before { content: ""; display: inline-block; width: 5px; height: 5px; margin: 0 5px 1px 0; border-radius: 50%; background: var(--green); animation: pulse 1.4s ease-in-out infinite; }
 .assistant-output {
   min-height: 24px;
   margin: 0;
@@ -376,6 +366,27 @@ button:focus-visible,
 .turn-error { margin-top: 10px; padding: 8px 10px; border-left: 2px solid var(--danger); background: #fff4f5; color: var(--danger); font-size: 10px; }
 .outcome-note { margin: 9px 0; padding: 7px 9px; border-left: 2px solid var(--line-strong); background: var(--surface-2); color: var(--ink-2); font-size: 10px; }
 .outcome-note[data-tone="danger"] { border-left-color: var(--danger); background: #fff4f5; color: var(--danger); }
+
+.receipt-card { margin: 18px 0 0 30px; border-top: 1px solid var(--line); }
+.receipt-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; min-height: 42px; color: var(--muted); cursor: pointer; font-size: 10px; list-style: none; }
+.receipt-heading::-webkit-details-marker { display: none; }
+.receipt-heading strong { color: var(--ink-2); font-size: 11px; font-weight: 650; }
+.receipt-heading::after { content: "⌄"; transition: transform 140ms ease; }
+.receipt-card:not([open]) .receipt-heading::after { transform: rotate(-90deg); }
+.receipt-card[data-tone="danger"] .receipt-heading strong { color: var(--danger); }
+.receipt-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px 18px; margin: 2px 0 8px; }
+.receipt-facts div { display: grid; grid-template-columns: minmax(76px, auto) minmax(0, 1fr); gap: 8px; padding: 4px 0; }
+.receipt-facts dt { color: var(--muted); font-size: 9px; }
+.receipt-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--ink-2); font-size: 9px; text-align: right; }
+.receipt-checks { display: grid; gap: 4px; margin: 4px 0 8px; padding: 0; list-style: none; }
+.receipt-checks li { position: relative; padding-left: 15px; color: var(--ink-2); font-size: 10px; }
+.receipt-checks li::before { content: "✓"; position: absolute; left: 0; color: var(--green-deep); }
+.receipt-checks li[data-passed="false"] { color: var(--danger); }
+.receipt-checks li[data-passed="false"]::before { content: "×"; color: var(--danger); }
+.receipt-technical { margin: 8px 0; border-top: 1px dashed var(--line); }
+.receipt-technical > summary { padding: 8px 0 4px; color: var(--muted); cursor: pointer; font-size: 9px; }
+.receipt-technical pre { max-height: 280px; margin: 5px 0 0; overflow: auto; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); color: var(--ink-2); font: 9px/1.55 "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; }
+.receipt-technical pre[data-truncated="true"]::after { content: "\A回执显示已截断"; color: var(--warning); }
 
 .facts-pane {
   overflow: auto;
@@ -423,6 +434,7 @@ button:focus-visible,
 .toast { position: fixed; z-index: 20; right: 310px; bottom: 18px; max-width: 360px; padding: 8px 11px; border: 1px solid var(--line-strong); border-radius: 8px; background: #fff; box-shadow: 0 12px 35px rgb(20 40 26 / 12%); color: var(--ink-2); font-size: 11px; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; }

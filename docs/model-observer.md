@@ -7,14 +7,16 @@
 界面采用封存 Local Remote Demo 的桌面三栏视觉，但移除本观察台不可提供的所有控制面：
 
 1. 对话：受管 job 按 conversation root 聚合，多轮 continuation 共用一个入口，旧历史分页加载。
-2. 连续对话：按轮次显示已公开的用户标签、折叠工作记录、压缩分隔与回答；同一个回答节点从流式草稿原位过渡到最终结果。
+2. 连续对话：公开短标题只用于列表和页头，不冒充用户提示词；每轮显示聚合工作记录、压缩分隔、实时草稿与最终回答，同一个回答节点从流式草稿原位过渡到最终结果。重复的命令开始/结束事件和没有安全正文的成功活动只进入语义计数，进行中、失败或确有安全摘要的活动才展开成明细，避免把事件日志铺成页面。
 3. 对话信息：只显示状态、轮次、计划/回执模型、执行方式、累计 Token、实测上下文、耗时与交付状态。缺失字段显示“不可用”，不补造额度、子智能体、项目或设置。
+
+每轮回答后的“运行与验收回执”默认折叠：首层只显示安全执行字段与检查通过数，二次展开保留 API 已投影的 context、delegation、source、execution、delivery、cache identity、media route 和 checks。它不会输出原始命令、工具输入输出或未投影的 verification。普通 JSON 输出完整有界展示；只有后端明确投影为 `type=preview` 的 artifact 才按摘要显示。
 
 本项目的正式验收范围仅为电脑端 Web 观察台；布局保持最小 1120px 的桌面三栏，不维护手机交互。
 
 所有历史以耐久 job artifact 为准；读取 GUI 不增加轮询计数，也不等于 Codex 已取回结果。只有结果读取入口会记录 `handoff.collected`。
 
-公开草稿只消费 AICLI 投影出的安全 `agent_message`：每个 `output.delta` 都作为单个增量进入 progress recorder，并借助 SSE refresh 在 DOM 中追加新后缀；增量本身不再逐条写入耐久时间线。`output.completed` 仍作为最终输出和时间线事件保留，并用有界完整公开文本 replacement 对齐草稿，因此已有 delta 不会重复，没有 delta 时也能直接建立 preview。草稿默认上限为 20,000 字，超过时投影显式 `public_preview_truncated`，界面提示改看最终结果。这些公开消息保持模型原文，不自动翻译，也不是隐藏 chain-of-thought。
+公开草稿只消费 AICLI 投影出的安全 `agent_message`：每个 `output.delta` 都作为单个增量进入 progress recorder，并借助 SSE refresh 在 DOM 中追加新后缀；增量本身不再逐条写入耐久时间线。活跃轮次始终优先显示最新 `public_preview`，不会被旧结果快照遮住；`output.completed` 仍作为最终输出和时间线事件保留，并用有界完整公开文本 replacement 对齐同一个回答节点，因此已有 delta 不会重复，没有 delta 时也能直接建立 preview。草稿默认上限为 20,000 字，超过时投影显式 `public_preview_truncated`，界面提示改看最终结果。这些公开消息保持模型原文，不自动翻译，也不是隐藏 chain-of-thought。
 
 Codex `0.145.x` 存在一个已实测的窄生命周期例外：一条或多条较早公开 `agentMessage` 可能已经发送 delta，却不再发送自己的 completed，随后由一条更晚的 completed final 收口。AICLI 只在版本确为 `0.145.x`、所有未完成项都是较早的公开 `agentMessage`、且之后存在非空 completed final 时兼容；推理、工具、文件项未完成，final 缺失，final 之后才出现未完成消息，或未来 Codex 版本都继续明确失败。这样既保留真实实时消息，也不会把任意协议漂移伪装成成功。
 
