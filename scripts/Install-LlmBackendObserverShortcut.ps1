@@ -418,7 +418,8 @@ function Set-ShortcutIdentity {
 
 function Test-ShortcutCoreContract {
     param(
-        [Parameter(Mandatory)] $Shortcut
+        [Parameter(Mandatory)] $Shortcut,
+        [Parameter(Mandatory)][string] $Path
     )
 
     $isCurrent = (
@@ -469,7 +470,7 @@ function Test-ShortcutCoreContract {
         return $false
     }
     $shortcutTarget = [IO.Path]::GetFullPath([string] $Shortcut.TargetPath)
-    return (
+    $matchesCurrentGeneration = (
         -not [string]::IsNullOrWhiteSpace($ownedHostRoot) -and
         $shortcutTarget.StartsWith(
             $ownedHostRoot,
@@ -483,6 +484,71 @@ function Test-ShortcutCoreContract {
             [StringComparison]::OrdinalIgnoreCase
         ) -and
         $Shortcut.Description -ceq $description
+    )
+    if ($matchesCurrentGeneration) {
+        return $true
+    }
+
+    # A previously installed native host remains owned when its complete
+    # generation, argument shape, icon identity, and AUMID all agree. This
+    # permits an intentional source/worktree move without weakening the
+    # refusal to overwrite unrelated same-name shortcuts.
+    $generationDirectory = Split-Path -Parent $shortcutTarget
+    $generationName = Split-Path -Leaf $generationDirectory
+    $managedRoot = Split-Path -Parent $generationDirectory
+    $expectedRoot = $ownedHostRoot.TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if (
+        [string]::IsNullOrWhiteSpace($ownedHostRoot) -or
+        -not [string]::Equals(
+            $managedRoot,
+            $expectedRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        $generationName -notmatch '\A[0-9a-f]{16}\z' -or
+        [IO.Path]::GetFileName($shortcutTarget) -cne 'LlmBackendObserverHost.exe' -or
+        -not [string]::Equals(
+            $Shortcut.WorkingDirectory,
+            $generationDirectory,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        $Shortcut.Description -cne $description
+    ) {
+        return $false
+    }
+
+    $argumentPattern = (
+        '\A--toolkit-command "(?<toolkit>[^"\r\n]+)" ' +
+        '--title "模型调用观察台" ' +
+        '--app-user-model-id "' + [regex]::Escape($AppUserModelId) + '" ' +
+        '--icon "(?<icon>[^"\r\n]+)"\z'
+    )
+    if ([string] $Shortcut.Arguments -notmatch $argumentPattern) {
+        return $false
+    }
+    $previousToolkit = [string] $Matches.toolkit
+    $previousIcon = [string] $Matches.icon
+    if (
+        -not [IO.Path]::IsPathRooted($previousToolkit) -or
+        -not [IO.Path]::IsPathRooted($previousIcon) -or
+        [IO.Path]::GetFileName($previousToolkit) -ine 'llm-backend-toolkit.exe' -or
+        [IO.Path]::GetFileName($previousIcon) -ine 'observer-console.ico' -or
+        -not [string]::Equals(
+            ($Shortcut.IconLocation -replace ',\s*0$', ',0'),
+            "$previousIcon,0",
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        return $false
+    }
+
+    $identity = Get-ShortcutIdentity -Path $Path
+    return (
+        $identity.app_user_model_id -ceq $AppUserModelId -and
+        [string]::Equals(
+            $identity.relaunch_icon_resource,
+            "$previousIcon,0",
+            [StringComparison]::OrdinalIgnoreCase
+        )
     )
 }
 
@@ -663,7 +729,7 @@ function Get-ShortcutPlan {
             throw "拒绝处理无法解析且不能证明属于本工具的快捷方式：$($Target.path)"
         }
 
-        if (-not (Test-ShortcutCoreContract -Shortcut $shortcut)) {
+        if (-not (Test-ShortcutCoreContract -Shortcut $shortcut -Path $Target.path)) {
             throw "拒绝覆盖或删除不能证明属于本工具的快捷方式：$($Target.path)"
         }
 

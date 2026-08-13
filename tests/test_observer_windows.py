@@ -534,6 +534,45 @@ class ObserverWindowsBehaviorTests(unittest.TestCase):
                     contract["app_user_model_id"],
                 )
 
+    def test_shortcut_installer_upgrades_owned_previous_toolkit_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            desktop = temp_root / "Redirected Desktop"
+            start_menu = temp_root / "Redirected Start Menu" / "Programs"
+            desktop.mkdir()
+            start_menu.mkdir(parents=True)
+            old_toolkit = temp_root / "old" / "llm-backend-toolkit.exe"
+            new_toolkit = temp_root / "new" / "llm-backend-toolkit.exe"
+            old_toolkit.parent.mkdir()
+            new_toolkit.parent.mkdir()
+            old_toolkit.touch()
+            new_toolkit.touch()
+            base_command = (
+                f"& {_ps_quote(INSTALLER)} "
+                f"-DesktopPath {_ps_quote(desktop)} "
+                f"-StartMenuPath {_ps_quote(start_menu)} "
+            )
+
+            installed = _run_for_json(
+                base_command
+                + f"-ToolkitCommand {_ps_quote(old_toolkit)} -PassThru"
+            )
+            upgraded = _run_for_json(
+                base_command
+                + f"-ToolkitCommand {_ps_quote(new_toolkit)} -PassThru"
+            )
+
+            self.assertEqual("created", installed["status"])
+            self.assertEqual("updated", upgraded["status"])
+            for path in upgraded["shortcut_paths"]:
+                contract = _read_shortcut(Path(str(path)))
+                self.assertIn(str(new_toolkit.resolve()), contract["arguments"])
+                self.assertNotIn(str(old_toolkit.resolve()), contract["arguments"])
+                self.assertEqual(
+                    "Wly.LlmBackendToolkit.Observer",
+                    contract["app_user_model_id"],
+                )
+
     def test_shortcut_whatif_does_not_create_or_remove_links(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             temp_root = Path(temp)
