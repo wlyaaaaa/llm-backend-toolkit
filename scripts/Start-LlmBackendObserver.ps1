@@ -3,6 +3,8 @@ param(
     [string] $ToolkitCommand = 'llm-backend-toolkit',
     [string] $WindowTitle = '模型调用观察台',
     [string] $EdgePath = '',
+    [string] $IconPath = '',
+    [string] $AppUserModelId = 'Wly.LlmBackendToolkit.Observer',
     [string] $ObserverJson = '',
     [switch] $NoLaunch,
     [switch] $ShowErrors,
@@ -12,6 +14,23 @@ param(
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
+
+if ([string]::IsNullOrWhiteSpace($IconPath)) {
+    $IconPath = Join-Path (
+        Split-Path -Parent $PSScriptRoot
+    ) 'assets\observer-console.ico'
+}
+if (-not (Test-Path -LiteralPath $IconPath -PathType Leaf)) {
+    throw "观察台任务栏图标不存在：$IconPath"
+}
+$IconPath = (Resolve-Path -LiteralPath $IconPath).Path
+if ($AppUserModelId.Length -gt 128 -or
+    $AppUserModelId -notmatch '\A[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)+\z') {
+    throw 'AppUserModelId 必须是不超过 128 字符的点分标识，且不能包含空格。'
+}
+if ($ToolkitCommand -match '[\r\n"]') {
+    throw 'ToolkitCommand 不能包含引号或换行。'
+}
 
 trap {
     if ($ShowErrors) {
@@ -120,8 +139,86 @@ using System.Text;
 
 namespace LlmBackendToolkit
 {
+    public sealed class ObserverWindowMatch
+    {
+        public int ProcessId { get; set; }
+        public IntPtr WindowHandle { get; set; }
+    }
+
     public static class ObserverWindowNativeMethods
     {
+        [StructLayout(LayoutKind.Sequential, Pack = 4)]
+        private struct PROPERTYKEY
+        {
+            public Guid formatId;
+            public uint propertyId;
+
+            public PROPERTYKEY(Guid formatId, uint propertyId)
+            {
+                this.formatId = formatId;
+                this.propertyId = propertyId;
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROPVARIANT
+        {
+            public ushort valueType;
+            public ushort reserved1;
+            public ushort reserved2;
+            public ushort reserved3;
+            public IntPtr pointerValue;
+            public int pointerValue2;
+
+            public static PROPVARIANT FromString(string value)
+            {
+                return new PROPVARIANT
+                {
+                    valueType = 31,
+                    pointerValue = Marshal.StringToCoTaskMemUni(value),
+                    pointerValue2 = 0
+                };
+            }
+
+            public string AsString()
+            {
+                return valueType == 31 && pointerValue != IntPtr.Zero
+                    ? Marshal.PtrToStringUni(pointerValue)
+                    : null;
+            }
+
+            public void Clear()
+            {
+                PROPVARIANT value = this;
+                PropVariantClear(ref value);
+                valueType = 0;
+                reserved1 = 0;
+                reserved2 = 0;
+                reserved3 = 0;
+                pointerValue = IntPtr.Zero;
+                pointerValue2 = 0;
+            }
+        }
+
+        [ComImport]
+        [Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IPropertyStore
+        {
+            [PreserveSig] int GetCount(out uint propertyCount);
+            [PreserveSig] int GetAt(uint propertyIndex, out PROPERTYKEY key);
+            [PreserveSig] int GetValue(ref PROPERTYKEY key, out PROPVARIANT value);
+            [PreserveSig] int SetValue(ref PROPERTYKEY key, ref PROPVARIANT value);
+            [PreserveSig] int Commit();
+        }
+
+        private static readonly Guid AppUserModelFormatId =
+            new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+        private static readonly PROPERTYKEY PKEY_AppUserModel_RelaunchIconResource =
+            new PROPERTYKEY(AppUserModelFormatId, 3);
+        private static readonly PROPERTYKEY PKEY_AppUserModel_ID =
+            new PROPERTYKEY(AppUserModelFormatId, 5);
+
         private delegate bool EnumWindowsCallback(IntPtr windowHandle, IntPtr parameter);
 
         [DllImport("user32.dll")]
@@ -146,9 +243,27 @@ namespace LlmBackendToolkit
             out uint processId
         );
 
-        public static int[] FindProcessIdsByExactTitle(string expectedTitle)
+        [DllImport("shell32.dll")]
+        private static extern int SHGetPropertyStoreForWindow(
+            IntPtr windowHandle,
+            ref Guid interfaceId,
+            [MarshalAs(UnmanagedType.Interface)] out IPropertyStore propertyStore
+        );
+
+        [DllImport("ole32.dll")]
+        private static extern int PropVariantClear(ref PROPVARIANT value);
+
+        [DllImport("user32.dll")]
+        private static extern bool PostMessage(
+            IntPtr windowHandle,
+            uint message,
+            IntPtr wordParameter,
+            IntPtr longParameter
+        );
+
+        public static ObserverWindowMatch[] FindWindowsByExactTitle(string expectedTitle)
         {
-            var processIds = new List<int>();
+            var matches = new List<ObserverWindowMatch>();
             EnumWindows(
                 delegate(IntPtr windowHandle, IntPtr parameter)
                 {
@@ -172,25 +287,155 @@ namespace LlmBackendToolkit
 
                     uint processId;
                     GetWindowThreadProcessId(windowHandle, out processId);
-                    processIds.Add((int)processId);
+                    matches.Add(new ObserverWindowMatch
+                    {
+                        ProcessId = (int)processId,
+                        WindowHandle = windowHandle
+                    });
                     return true;
                 },
                 IntPtr.Zero
             );
+            return matches.ToArray();
+        }
+
+        public static int[] FindProcessIdsByExactTitle(string expectedTitle)
+        {
+            var processIds = new List<int>();
+            foreach (var match in FindWindowsByExactTitle(expectedTitle))
+            {
+                processIds.Add(match.ProcessId);
+            }
             return processIds.ToArray();
+        }
+
+        private static IPropertyStore GetWindowPropertyStore(IntPtr windowHandle)
+        {
+            Guid interfaceId = typeof(IPropertyStore).GUID;
+            IPropertyStore propertyStore;
+            int result = SHGetPropertyStoreForWindow(
+                windowHandle,
+                ref interfaceId,
+                out propertyStore
+            );
+            if (result < 0)
+            {
+                throw new COMException("SHGetPropertyStoreForWindow failed.", result);
+            }
+            return propertyStore;
+        }
+
+        private static void SetString(
+            IPropertyStore propertyStore,
+            PROPERTYKEY key,
+            string value
+        )
+        {
+            PROPVARIANT propertyValue = PROPVARIANT.FromString(value);
+            try
+            {
+                int result = propertyStore.SetValue(ref key, ref propertyValue);
+                if (result < 0)
+                {
+                    throw new COMException(
+                        "IPropertyStore.SetValue failed for property " + key.propertyId + ".",
+                        result
+                    );
+                }
+            }
+            finally
+            {
+                propertyValue.Clear();
+            }
+        }
+
+        private static string GetString(
+            IPropertyStore propertyStore,
+            PROPERTYKEY key
+        )
+        {
+            PROPVARIANT propertyValue;
+            int result = propertyStore.GetValue(ref key, out propertyValue);
+            if (result < 0)
+            {
+                throw new COMException(
+                    "IPropertyStore.GetValue failed for property " + key.propertyId + ".",
+                    result
+                );
+            }
+            try
+            {
+                return propertyValue.AsString();
+            }
+            finally
+            {
+                propertyValue.Clear();
+            }
+        }
+
+        public static void SetWindowIdentity(
+            IntPtr windowHandle,
+            string appUserModelId,
+            string iconResource
+        )
+        {
+            IPropertyStore propertyStore = GetWindowPropertyStore(windowHandle);
+            try
+            {
+                SetString(propertyStore, PKEY_AppUserModel_ID, appUserModelId);
+                SetString(
+                    propertyStore,
+                    PKEY_AppUserModel_RelaunchIconResource,
+                    iconResource
+                );
+                int commitResult = propertyStore.Commit();
+                if (commitResult < 0)
+                {
+                    throw new COMException("IPropertyStore.Commit failed.", commitResult);
+                }
+
+                if (!String.Equals(
+                        GetString(propertyStore, PKEY_AppUserModel_ID),
+                        appUserModelId,
+                        StringComparison.Ordinal) ||
+                    !String.Equals(
+                        GetString(propertyStore, PKEY_AppUserModel_RelaunchIconResource),
+                        iconResource,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        "Windows did not retain the observer taskbar identity."
+                    );
+                }
+            }
+            finally
+            {
+                if (Marshal.IsComObject(propertyStore))
+                {
+                    Marshal.FinalReleaseComObject(propertyStore);
+                }
+            }
+        }
+
+        public static void CloseWindow(IntPtr windowHandle)
+        {
+            PostMessage(windowHandle, 0x0010, IntPtr.Zero, IntPtr.Zero);
         }
     }
 }
 '@
     }
 
-    $processIds = [LlmBackendToolkit.ObserverWindowNativeMethods]::FindProcessIdsByExactTitle(
+    $matches = [LlmBackendToolkit.ObserverWindowNativeMethods]::FindWindowsByExactTitle(
         $ExpectedTitle
     )
-    foreach ($processId in $processIds) {
+    foreach ($match in $matches) {
         try {
-            $process = Get-Process -Id $processId -ErrorAction Stop
+            $process = Get-Process -Id $match.ProcessId -ErrorAction Stop
             if ($process.ProcessName -eq 'msedge') {
+                $process | Add-Member -MemberType NoteProperty `
+                    -Name ObserverWindowHandle `
+                    -Value ([IntPtr] $match.WindowHandle) -Force
                 return $process
             }
         } catch {
@@ -198,6 +443,24 @@ namespace LlmBackendToolkit
         }
     }
     return $null
+}
+
+function Set-ObserverWindowIdentity {
+    param(
+        [Parameter(Mandatory)] $WindowProcess,
+        [Parameter(Mandatory)][string] $Identity,
+        [Parameter(Mandatory)][string] $TaskbarIcon
+    )
+
+    $windowHandle = [IntPtr] $WindowProcess.ObserverWindowHandle
+    if ($windowHandle -eq [IntPtr]::Zero) {
+        throw '观察台窗口缺少可验证的 Windows 句柄。'
+    }
+    [LlmBackendToolkit.ObserverWindowNativeMethods]::SetWindowIdentity(
+        $windowHandle,
+        $Identity,
+        "$TaskbarIcon,0"
+    )
 }
 
 function Write-ObserverResult {
@@ -231,11 +494,18 @@ try {
 
     $existing = Find-ObserverWindow -ExpectedTitle $WindowTitle
     if ($null -ne $existing) {
+        Set-ObserverWindowIdentity `
+            -WindowProcess $existing `
+            -Identity $AppUserModelId `
+            -TaskbarIcon $IconPath
         Write-ObserverResult ([pscustomobject] @{
             status = 'already_running'
             url = [string] $contract.url
             observer_status = [string] $contract.status
             process_id = $existing.Id
+            app_user_model_id = $AppUserModelId
+            taskbar_icon = $IconPath
+            taskbar_identity_applied = $true
             launched = $false
         })
         return
@@ -248,6 +518,9 @@ try {
             url = [string] $contract.url
             observer_status = [string] $contract.status
             edge_path = $resolvedEdge
+            app_user_model_id = $AppUserModelId
+            taskbar_icon = $IconPath
+            taskbar_identity_applied = $false
             launched = $false
         })
         return
@@ -266,12 +539,26 @@ try {
     if ($null -eq $windowProcess) {
         throw 'Edge 已启动，但观察台窗口未在 15 秒内出现。'
     }
+    try {
+        Set-ObserverWindowIdentity `
+            -WindowProcess $windowProcess `
+            -Identity $AppUserModelId `
+            -TaskbarIcon $IconPath
+    } catch {
+        [LlmBackendToolkit.ObserverWindowNativeMethods]::CloseWindow(
+            [IntPtr] $windowProcess.ObserverWindowHandle
+        )
+        throw
+    }
     Write-ObserverResult ([pscustomobject] @{
         status = 'launched'
         url = [string] $contract.url
         observer_status = [string] $contract.status
         edge_path = $resolvedEdge
         process_id = $windowProcess.Id
+        app_user_model_id = $AppUserModelId
+        taskbar_icon = $IconPath
+        taskbar_identity_applied = $true
         launched = $true
     })
 } finally {

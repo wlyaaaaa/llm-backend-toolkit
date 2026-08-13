@@ -318,8 +318,9 @@ class ObserverStoreTests(unittest.TestCase):
                     "usage": {
                         "input_tokens": 120,
                         "output_tokens": 30,
+                        "reasoning_tokens": 7,
                         "cached_input_tokens": 80,
-                        "total_tokens": 150,
+                        "total_tokens": 157,
                     },
                 },
             )
@@ -328,8 +329,9 @@ class ObserverStoreTests(unittest.TestCase):
 
             self.assertEqual(120, usage["input_tokens"])
             self.assertEqual(30, usage["output_tokens"])
+            self.assertEqual(7, usage["reasoning_tokens"])
             self.assertEqual(80, usage["cached_input_tokens"])
-            self.assertEqual(150, usage["total_tokens"])
+            self.assertEqual(157, usage["total_tokens"])
 
     def test_command_activity_detail_preserves_only_safe_status_and_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

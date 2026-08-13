@@ -21,7 +21,6 @@ const state = {
   listRequestInFlight: false,
   refreshQueued: false,
   appendQueued: false,
-  activeTab: "draft",
   historyTotal: 0,
   nextOffset: null,
   timelineJobId: null,
@@ -31,6 +30,9 @@ const state = {
   timelineBrowsingEarlier: false,
   draftJobId: null,
   draftText: "",
+  conversationJobId: null,
+  conversationLatestSequence: 0,
+  conversationPendingCount: 0,
   activeTimer: null,
   lastActiveRefresh: 0,
   durationObservedAt: 0,
@@ -46,8 +48,23 @@ const elements = {
   runListEmpty: document.querySelector("#run-list-empty"),
   loadMoreButton: document.querySelector("#load-more-button"),
   filterButtons: [...document.querySelectorAll(".filter-button")],
-  emptyState: document.querySelector("#empty-state"),
-  detailContent: document.querySelector("#detail-content"),
+  conversationEmptyState: document.querySelector("#conversation-empty-state"),
+  conversationContent: document.querySelector("#conversation-content"),
+  conversationPane: document.querySelector(".conversation-pane"),
+  conversationStream: document.querySelector("#conversation-stream"),
+  conversationLabel: document.querySelector("#conversation-label"),
+  conversationMeta: document.querySelector("#conversation-meta"),
+  conversationOutputNode: document.querySelector(".assistant-output-node"),
+  conversationOutputTitle: document.querySelector("#conversation-output-title"),
+  conversationOutputState: document.querySelector("#conversation-output-state"),
+  conversationOutput: document.querySelector("#conversation-output"),
+  conversationWorkRecords: document.querySelector("#conversation-work-records"),
+  conversationNewEvents: document.querySelector("#conversation-new-events"),
+  mobileBackButton: document.querySelector("#mobile-back-button"),
+  inspectorToggle: document.querySelector("#inspector-toggle"),
+  inspectorCloseButton: document.querySelector("#inspector-close-button"),
+  inspectorEmptyState: document.querySelector("#inspector-empty-state"),
+  inspectorContent: document.querySelector("#inspector-content"),
   timeline: document.querySelector("#timeline"),
   timelineStatus: document.querySelector("#timeline-status"),
   loadEarlierEvents: document.querySelector("#load-earlier-events"),
@@ -56,14 +73,9 @@ const elements = {
   runId: document.querySelector("#run-id"),
   runTitle: document.querySelector("#run-title"),
   copyIdButton: document.querySelector("#copy-id-button"),
-  draftLiveIndicator: document.querySelector("#draft-live-indicator"),
-  draftContent: document.querySelector("#draft-content"),
-  resultContent: document.querySelector("#result-content"),
   receiptSummary: document.querySelector("#receipt-summary"),
   receiptChecks: document.querySelector("#receipt-checks"),
   receiptContent: document.querySelector("#receipt-content"),
-  detailTabs: [...document.querySelectorAll(".detail-tab")],
-  tabPanels: [...document.querySelectorAll('[role="tabpanel"]')],
   toast: document.querySelector("#toast"),
   metrics: {
     model: document.querySelector("#metric-model"),
@@ -355,11 +367,22 @@ function tokenSummary(detail) {
     "usage.cached_tokens",
     "usage.cached_input_tokens",
   );
+  const reasoningTokens = pick(
+    detail,
+    "result.usage.reasoning_tokens",
+    "result.usage.reasoning_output_tokens",
+    "usage.reasoning_tokens",
+    "usage.reasoning_output_tokens",
+  );
   const numericPrompt = Number(promptTokens);
   const numericCompletion = Number(completionTokens);
+  const numericReasoning = Number(reasoningTokens);
   const calculatedTotal =
     Number.isFinite(numericPrompt) && Number.isFinite(numericCompletion)
-      ? numericPrompt + numericCompletion
+      ? numericPrompt + numericCompletion +
+        (Number.isFinite(numericReasoning) && numericReasoning > 0
+          ? numericReasoning
+          : 0)
       : undefined;
   const totalTokens = suppliedTotal ?? calculatedTotal;
   if (totalTokens !== undefined) {
@@ -370,7 +393,10 @@ function tokenSummary(detail) {
     if (completionTokens !== undefined) {
       parts.push(`输出 ${formatNumber(completionTokens)}`);
     }
-    if (cachedTokens !== undefined) {
+    if (reasoningTokens !== undefined && Number(reasoningTokens) > 0) {
+      parts.push(`推理 ${formatNumber(reasoningTokens)}`);
+    }
+    if (cachedTokens !== undefined && Number(cachedTokens) > 0) {
       parts.push(`缓存 ${formatNumber(cachedTokens)}`);
     }
     return {
@@ -608,7 +634,9 @@ function createRunItem(jobId) {
   const id = createElement("span", "run-item-id");
   meta.append(model, conversation, id);
   button.append(top, title, meta);
-  button.addEventListener("click", () => selectRun(button.dataset.jobId));
+  button.addEventListener("click", () =>
+    selectRun(button.dataset.jobId, { revealConversation: true }),
+  );
 
   const entry = { button, status, time, title, model, conversation, id };
   runItemCache.set(jobId, entry);
@@ -800,7 +828,16 @@ function toolActivityTitle(payload) {
     const prefix = numbered ? `第 ${toolNumber} 个工具活动` : "文件编辑";
     return `${prefix} · ${payload?.status === "completed" ? "完成编辑文件" : "正在编辑文件"}`;
   }
-  return "智能体工具活动";
+  const activityLabel = {
+    web_search: "查询公开资料",
+    mcp_tool_call: "调用 MCP 工具",
+    computer_use: "操作计算机",
+    dynamic_tool_call: "调用动态工具",
+    tool_call: "调用工具",
+  }[payload?.item_type] || "工具活动";
+  const prefix = numbered ? `第 ${toolNumber} 个工具 · ` : "";
+  const stateLabel = payload?.status === "completed" ? "已完成" : "进行中";
+  return `${prefix}${activityLabel} · ${stateLabel}`;
 }
 
 function timelineEvents(detail) {
@@ -945,6 +982,11 @@ function timelineEvents(detail) {
       lines.push("来源：工作区前后快照；归因：运行时窗观察，未验证由单一进程造成。");
       detailText = lines.filter(Boolean).join("\n");
     }
+    const toolOrdinal = Number(payload?.tool_calls);
+    const workspaceChangeCount = kind === "workspace.change.observed"
+      ? (Array.isArray(payload?.changes) ? payload.changes.length : 0) +
+        Math.max(0, Number(payload?.details_omitted) || 0)
+      : 0;
     return {
       key: timelineEventKey(item, sourceIndex),
       kind,
@@ -959,6 +1001,14 @@ function timelineEvents(detail) {
       ),
       tone,
       workspacePaths,
+      workType: kind === "workspace.change.observed"
+        ? "workspace_change"
+        : String(payload?.item_type || ""),
+      workOrdinal: Number.isFinite(toolOrdinal) && toolOrdinal > 0
+        ? toolOrdinal
+        : null,
+      workStatus: String(payload?.command_status || payload?.status || ""),
+      workCount: workspaceChangeCount,
     };
     });
   const start = state.timelineBrowsingEarlier
@@ -1191,35 +1241,60 @@ function extractDraft(detail) {
 
 function renderDraft(detail) {
   const jobId = String(firstDefined(detail.job_id, detail.id, state.selectedJobId, ""));
-  const nextText = formatStructured(extractDraft(detail), "尚未产生草稿");
+  const result = extractResult(detail);
+  const hasFinalResult = result !== undefined && result !== null && result !== "";
+  const active = isActive(detail);
+  const truncated = pick(detail, "progress.public_preview_truncated") === true;
+  const outputState = hasFinalResult
+    ? "final"
+    : active || extractDraft(detail)
+      ? "draft"
+      : "terminal-empty";
+  const fallback = hasFinalResult
+    ? "任务已完成，但没有返回结果"
+    : active
+      ? "尚未产生公开输出"
+      : "任务已结束，但没有可展示结果";
+  const nextText = formatStructured(
+    hasFinalResult ? result : extractDraft(detail),
+    fallback,
+  );
   const runChanged = jobId !== state.draftJobId;
   const distanceFromEnd =
-    elements.draftContent.scrollHeight -
-    elements.draftContent.clientHeight -
-    elements.draftContent.scrollTop;
+    elements.conversationOutput.scrollHeight -
+    elements.conversationOutput.clientHeight -
+    elements.conversationOutput.scrollTop;
   const followEnd = runChanged || distanceFromEnd <= 32;
 
   if (!runChanged && nextText.startsWith(state.draftText)) {
     const suffix = nextText.slice(state.draftText.length);
     if (suffix) {
-      elements.draftContent.append(document.createTextNode(suffix));
+      elements.conversationOutput.append(document.createTextNode(suffix));
     }
   } else if (runChanged || nextText !== state.draftText) {
-    elements.draftContent.textContent = nextText;
+    elements.conversationOutput.textContent = nextText;
   }
 
   state.draftJobId = jobId;
   state.draftText = nextText;
   if (followEnd) {
-    elements.draftContent.scrollTop = elements.draftContent.scrollHeight;
+    elements.conversationOutput.scrollTop = elements.conversationOutput.scrollHeight;
   }
 
-  const truncated = pick(detail, "progress.public_preview_truncated") === true;
-  elements.draftLiveIndicator.hidden = !isActive(detail) && !truncated;
-  elements.draftLiveIndicator.textContent = truncated ? "预览已截断" : "逐段更新中";
-  elements.draftLiveIndicator.title = truncated
+  elements.conversationOutputNode.dataset.outputState = outputState;
+  elements.conversationOutputTitle.textContent = hasFinalResult ? "最终结果" : "实时草稿";
+  elements.conversationOutputState.textContent = hasFinalResult
+    ? "最终结果"
+    : truncated
+      ? "草稿预览已截断"
+      : active
+        ? "逐段更新中"
+        : "等待公开输出";
+  elements.conversationOutputState.title = truncated
     ? "草稿预览已达到安全上限；任务完成后请查看最终结果"
-    : "公开草稿正在按模型原文逐段追加";
+    : hasFinalResult
+      ? "已在同一输出节点原位切换为最终结果"
+      : "公开草稿正在按模型原文逐段追加";
 }
 
 function extractResult(detail) {
@@ -1298,39 +1373,269 @@ function renderChecks(detail) {
   }
 }
 
-function selectDetailTab(tabName, { focus = false } = {}) {
-  const selected = elements.detailTabs.find((tab) => tab.dataset.tab === tabName);
-  if (!selected) {
-    return;
+function isOutputEvent(event) {
+  return event.kind === "agent.output.delta" ||
+    event.kind === "agent.output.delta.batch" ||
+    event.kind === "agent.output.completed";
+}
+
+function isWorkRecordEvent(event) {
+  return event.kind === "agent.tool.activity" ||
+    event.kind === "workspace.change.observed";
+}
+
+function isContextCompactionEvent(event) {
+  return event.kind === "context.compaction.completed" ||
+    event.kind === "agent.context.compaction.completed";
+}
+
+function isAmbientWorkProgress(event) {
+  return event.kind === "work.waiting" ||
+    event.kind === "reasoning.activity" ||
+    event.kind === "agent.reasoning.activity" ||
+    event.kind === "agent.planning.activity";
+}
+
+function groupWorkRecords(events) {
+  const groups = [];
+  let workRecord = null;
+  for (const event of events) {
+    if (isOutputEvent(event) || event.kind === "agent.context.usage.updated") {
+      continue;
+    }
+    if (isContextCompactionEvent(event)) {
+      workRecord = null;
+      groups.push({ type: "compaction", event });
+      continue;
+    }
+    if (isWorkRecordEvent(event)) {
+      if (!workRecord) {
+        workRecord = { type: "work", events: [] };
+        groups.push(workRecord);
+      }
+      workRecord.events.push(event);
+      continue;
+    }
+    if (workRecord && isAmbientWorkProgress(event)) {
+      continue;
+    }
+    workRecord = null;
+    groups.push({ type: "activity", event });
   }
-  state.activeTab = tabName;
-  for (const tab of elements.detailTabs) {
-    const active = tab === selected;
-    tab.classList.toggle("is-active", active);
-    tab.setAttribute("aria-selected", String(active));
-    tab.tabIndex = active ? 0 : -1;
+  return groups;
+}
+
+function appendWorkRecordItem(record, event) {
+  const item = createElement("li", "work-record-item");
+  item.dataset.tone = normalizedTone(event.tone);
+  item.append(createElement("span", "work-record-dot"));
+  const copy = createElement("span", "work-record-copy");
+  copy.append(createElement("strong", "", event.title));
+  if (event.detail) {
+    copy.append(createElement("span", "", event.detail));
   }
-  for (const panel of elements.tabPanels) {
-    panel.hidden = panel.id !== selected.getAttribute("aria-controls");
+  item.append(copy, createElement("time", "", formatDateTime(event.time)));
+  record.append(item);
+}
+
+function countToolActivities(events, type) {
+  const matching = events.filter((event) => event.workType === type);
+  if (!matching.length) {
+    return 0;
   }
-  if (focus) {
-    selected.focus();
+  const ordinals = new Set(
+    matching
+      .map((event) => event.workOrdinal)
+      .filter((value) => Number.isFinite(value) && value > 0),
+  );
+  if (ordinals.size) {
+    return ordinals.size;
+  }
+  const terminal = matching.filter((event) =>
+    ["completed", "succeeded", "failed", "declined"].includes(event.workStatus),
+  );
+  return terminal.length || 1;
+}
+
+function summarizeWorkRecord(events) {
+  const parts = [];
+  const commandCount = countToolActivities(events, "command_execution");
+  const observedFileCount = events
+    .filter((event) => event.workType === "workspace_change")
+    .reduce((sum, event) => sum + Math.max(0, Number(event.workCount) || 0), 0);
+  const workspaceEventCount = events.filter(
+    (event) => event.workType === "workspace_change",
+  ).length;
+  const fileEditCount = countToolActivities(events, "file_change");
+  const webSearchCount = countToolActivities(events, "web_search");
+  const mcpCount = countToolActivities(events, "mcp_tool_call");
+  const computerUseCount = countToolActivities(events, "computer_use");
+  if (commandCount) {
+    parts.push(`运行 ${formatNumber(commandCount)} 个命令`);
+  }
+  if (fileEditCount) {
+    parts.push(`编辑 ${formatNumber(fileEditCount)} 个文件`);
+  }
+  if (observedFileCount) {
+    parts.push(`检测到 ${formatNumber(observedFileCount)} 个文件变化`);
+  } else if (workspaceEventCount) {
+    parts.push(`检测工作区变化 ${formatNumber(workspaceEventCount)} 次`);
+  }
+  if (webSearchCount) {
+    parts.push(`查询公开资料 ${formatNumber(webSearchCount)} 次`);
+  }
+  if (mcpCount) {
+    parts.push(`调用 MCP 工具 ${formatNumber(mcpCount)} 次`);
+  }
+  if (computerUseCount) {
+    parts.push(`操作计算机 ${formatNumber(computerUseCount)} 次`);
+  }
+  return parts.length
+    ? parts.join(" · ")
+    : `${formatNumber(events.length)} 条安全工具活动`;
+}
+
+function renderWorkRecords(events) {
+  const fragment = document.createDocumentFragment();
+  for (const group of groupWorkRecords(events)) {
+    if (group.type === "compaction") {
+      const divider = createElement("div", "context-compaction-divider");
+      divider.textContent = group.event.detail
+        ? `${group.event.title} · ${group.event.detail}`
+        : group.event.title;
+      fragment.append(divider);
+      continue;
+    }
+    if (group.type === "work") {
+      const record = createElement("section", "work-record");
+      record.title = "仅展示安全状态、摘要和结果，不展示命令正文。";
+      const header = createElement("div", "work-record-header");
+      const heading = createElement("div");
+      heading.append(createElement("span", "node-kind", "工作记录"));
+      heading.append(
+        createElement("h3", "", "工作记录"),
+      );
+      header.append(
+        heading,
+        createElement("span", "quiet-label", `${formatNumber(group.events.length)} 条事件`),
+      );
+      record.append(header);
+      record.append(
+        createElement(
+          "p",
+          "work-record-summary",
+          summarizeWorkRecord(group.events),
+        ),
+      );
+      const list = createElement("ol", "work-record-list");
+      for (const event of group.events) {
+        appendWorkRecordItem(list, event);
+      }
+      record.append(list);
+      fragment.append(record);
+      continue;
+    }
+
+    const event = group.event;
+    const activity = createElement("article", "conversation-activity");
+    activity.dataset.tone = normalizedTone(event.tone);
+    const header = createElement("div", "conversation-activity-header");
+    const heading = createElement("div");
+    heading.append(createElement("span", "node-kind", "运行状态"));
+    heading.append(createElement("h3", "", event.title));
+    header.append(heading, createElement("time", "", formatDateTime(event.time)));
+    activity.append(header);
+    if (event.detail) {
+      activity.append(createElement("p", "", event.detail));
+    }
+    fragment.append(activity);
+  }
+  elements.conversationWorkRecords.replaceChildren(fragment);
+}
+
+function conversationTimelineEvents(detail) {
+  return timelineEvents({ ...detail, events: state.timelineEvents });
+}
+
+function conversationScrollContainer() {
+  return window.matchMedia("(max-width: 680px)").matches
+    ? document.scrollingElement || elements.conversationPane
+    : elements.conversationPane;
+}
+
+function conversationDistanceFromEnd() {
+  const container = conversationScrollContainer();
+  return container.scrollHeight - container.clientHeight - container.scrollTop;
+}
+
+function returnConversationToLatest({ behavior = "auto" } = {}) {
+  const container = conversationScrollContainer();
+  container.scrollTo({ top: container.scrollHeight, behavior });
+}
+
+function clearConversationNewEventsIfAtEnd() {
+  if (conversationDistanceFromEnd() <= 48 && state.conversationPendingCount > 0) {
+    state.conversationPendingCount = 0;
+    elements.conversationNewEvents.hidden = true;
   }
 }
 
-function renderDetail(detail) {
+function updateConversationNewEvents(detail, events, { runChanged, followEnd }) {
+  const latestSequence = Number(
+    state.timelinePage?.latest_sequence || eventSequence(state.timelineEvents.at(-1)),
+  );
+  if (runChanged) {
+    state.conversationLatestSequence = Number.isFinite(latestSequence) ? latestSequence : 0;
+    state.conversationPendingCount = 0;
+    elements.conversationNewEvents.hidden = true;
+    return;
+  }
+  const newlyArrived = Number.isFinite(latestSequence)
+    ? Math.max(0, latestSequence - state.conversationLatestSequence)
+    : 0;
+  state.conversationLatestSequence = Math.max(
+    state.conversationLatestSequence,
+    Number.isFinite(latestSequence) ? latestSequence : 0,
+  );
+  if (followEnd) {
+    state.conversationPendingCount = 0;
+    elements.conversationNewEvents.hidden = true;
+    return;
+  }
+  if (newlyArrived > 0) {
+    state.conversationPendingCount += newlyArrived;
+  }
+  const laterCount = state.conversationPendingCount;
+  elements.conversationNewEvents.hidden = laterCount === 0 || events.length === 0;
+  if (laterCount > 0) {
+    elements.conversationNewEvents.textContent = `新增 ${formatNumber(laterCount)} 条`;
+  }
+}
+
+function renderConversation(detail) {
   state.selectedDetail = detail;
   state.durationObservedAt = Date.now();
   if (isActive(detail)) {
     state.lastActiveRefresh = Date.now();
   }
+  const jobId = String(firstDefined(detail.job_id, detail.id, state.selectedJobId, ""));
+  const runChanged = jobId !== state.conversationJobId;
+  const followEnd = runChanged || conversationDistanceFromEnd() <= 48;
+  state.conversationJobId = jobId;
+
   const info = statusInfo(detail);
-  elements.emptyState.hidden = true;
-  elements.detailContent.hidden = false;
+  elements.conversationEmptyState.hidden = true;
+  elements.conversationContent.hidden = false;
+  elements.inspectorEmptyState.hidden = true;
+  elements.inspectorContent.hidden = false;
   elements.runStatus.textContent = info.label;
   elements.runStatus.dataset.tone = info.tone;
-  elements.runId.textContent = String(firstDefined(detail.job_id, detail.id, state.selectedJobId, ""));
+  elements.runId.textContent = jobId;
   elements.runTitle.textContent = runTitle(detail);
+  elements.conversationLabel.textContent = conversationLabel(detail);
+  elements.conversationMeta.textContent = `${modelName(detail)} · ${executionMode(detail)} · ${formatDateTime(
+    firstDefined(detail.updated_utc, detail.created_utc),
+  )}`;
 
   const tokens = tokenSummary(detail);
   const context = contextSummary(detail);
@@ -1354,26 +1659,29 @@ function renderDetail(detail) {
   elements.contextDetail.textContent = context.detail;
   elements.metrics.tps.title = tps;
 
-  const result = extractResult(detail);
-  renderDraft(detail);
-  elements.resultContent.textContent = formatStructured(
-    result,
-    isCompleted(detail)
-      ? "任务已完成，但没有返回结果"
-      : isActive(detail)
-        ? "等待任务完成"
-        : "任务已结束，但没有可展示结果",
-  );
   updateTimelineState(detail);
+  renderDraft(detail);
+  const events = conversationTimelineEvents(detail);
+  renderWorkRecords(events);
   renderTimeline(detail);
   renderChecks(detail);
   elements.receiptContent.textContent = formatStructured(receiptPayload(detail), "暂无回执");
+  updateConversationNewEvents(detail, events, { runChanged, followEnd });
+  if (followEnd) {
+    returnConversationToLatest();
+  }
+}
+
+function renderDetail(detail) {
+  renderConversation(detail);
 }
 
 function renderNoSelection() {
   state.selectedDetail = null;
-  elements.emptyState.hidden = false;
-  elements.detailContent.hidden = true;
+  elements.conversationEmptyState.hidden = false;
+  elements.conversationContent.hidden = true;
+  elements.inspectorEmptyState.hidden = false;
+  elements.inspectorContent.hidden = true;
   clearTimelineItems();
   elements.timeline.querySelector(".timeline-placeholder")?.remove();
   state.timelineJobId = null;
@@ -1382,6 +1690,11 @@ function renderNoSelection() {
   state.timelineBrowsingEarlier = false;
   state.draftJobId = null;
   state.draftText = "";
+  state.conversationJobId = null;
+  state.conversationLatestSequence = 0;
+  state.conversationPendingCount = 0;
+  elements.conversationNewEvents.hidden = true;
+  elements.conversationWorkRecords.replaceChildren();
   elements.timelineStatus.textContent = "未选择";
 }
 
@@ -1579,7 +1892,7 @@ async function loadEarlierEvents() {
       latest_sequence: state.timelinePage?.latest_sequence,
     };
     state.timelineBrowsingEarlier = true;
-    renderTimeline(state.selectedDetail || { job_id: state.selectedJobId });
+    renderConversation(state.selectedDetail || { job_id: state.selectedJobId });
     const retainedAnchor = anchorKey ? timelineItemCache.get(anchorKey)?.item : null;
     elements.timeline.scrollTop = retainedAnchor
       ? retainedAnchor.offsetTop - anchorOffset
@@ -1631,13 +1944,25 @@ function tickActiveDetail() {
   }
 }
 
-async function selectRun(jobId, { quiet = false } = {}) {
+async function selectRun(
+  jobId,
+  { quiet = false, revealConversation = false } = {},
+) {
   if (!jobId) {
     return;
   }
   state.selectedJobId = jobId;
   renderRunList();
+  if (revealConversation && window.matchMedia("(max-width: 680px)").matches) {
+    document.body.dataset.mobileView = "conversation";
+  }
   await loadDetail(jobId, { quiet });
+}
+
+function setInspectorOpen(open) {
+  const isOpen = Boolean(open);
+  document.body.dataset.inspectorOpen = String(isOpen);
+  elements.inspectorToggle.setAttribute("aria-expanded", String(isOpen));
 }
 
 function scheduleRefresh() {
@@ -1726,35 +2051,21 @@ elements.copyIdButton.addEventListener("click", () => {
   }
 });
 
-for (const button of document.querySelectorAll("[data-copy-target]")) {
-  button.addEventListener("click", () => {
-    const target = document.querySelector(`#${button.dataset.copyTarget}`);
-    if (target) {
-      copyText(target.textContent, "内容已复制");
-    }
-  });
-}
-
-for (const tab of elements.detailTabs) {
-  tab.addEventListener("click", () => selectDetailTab(tab.dataset.tab));
-  tab.addEventListener("keydown", (event) => {
-    const currentIndex = elements.detailTabs.indexOf(tab);
-    let nextIndex = currentIndex;
-    if (event.key === "ArrowRight") {
-      nextIndex = (currentIndex + 1) % elements.detailTabs.length;
-    } else if (event.key === "ArrowLeft") {
-      nextIndex = (currentIndex - 1 + elements.detailTabs.length) % elements.detailTabs.length;
-    } else if (event.key === "Home") {
-      nextIndex = 0;
-    } else if (event.key === "End") {
-      nextIndex = elements.detailTabs.length - 1;
-    } else {
-      return;
-    }
-    event.preventDefault();
-    selectDetailTab(elements.detailTabs[nextIndex].dataset.tab, { focus: true });
-  });
-}
+elements.mobileBackButton.addEventListener("click", () => {
+  document.body.dataset.mobileView = "list";
+  elements.runSearch.focus({ preventScroll: true });
+});
+elements.inspectorToggle.addEventListener("click", () =>
+  setInspectorOpen(document.body.dataset.inspectorOpen !== "true"),
+);
+elements.inspectorCloseButton.addEventListener("click", () => setInspectorOpen(false));
+elements.conversationNewEvents.addEventListener("click", () => {
+  returnConversationToLatest({ behavior: "smooth" });
+  state.conversationPendingCount = 0;
+  elements.conversationNewEvents.hidden = true;
+});
+elements.conversationPane.addEventListener("scroll", clearConversationNewEventsIfAtEnd);
+window.addEventListener("scroll", clearConversationNewEventsIfAtEnd, { passive: true });
 
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {

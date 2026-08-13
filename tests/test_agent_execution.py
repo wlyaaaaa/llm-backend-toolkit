@@ -2076,6 +2076,8 @@ class AgentExecutionTests(unittest.TestCase):
                         "input_tokens": 120,
                         "cached_input_tokens": 32,
                         "output_tokens": 8,
+                        "reasoning_output_tokens": 4,
+                        "total_tokens": 132,
                         "current_context_tokens": 202000,
                         "context_window_tokens": 258400,
                     },
@@ -2114,6 +2116,8 @@ class AgentExecutionTests(unittest.TestCase):
                     "input_tokens": 120,
                     "cached_input_tokens": 32,
                     "output_tokens": 8,
+                    "reasoning_output_tokens": 4,
+                    "total_tokens": 132,
                     "current_context_tokens": 202000,
                     "context_window_tokens": 258400,
                 },
@@ -2676,6 +2680,8 @@ class AgentExecutionTests(unittest.TestCase):
                         "input_tokens": 120,
                         "cached_input_tokens": 32,
                         "output_tokens": 40,
+                        "reasoning_output_tokens": 12,
+                        "total_tokens": 172,
                         "current_context_tokens": 202000,
                         "context_window_tokens": 258400,
                     },
@@ -2693,9 +2699,10 @@ class AgentExecutionTests(unittest.TestCase):
                     "prompt_tokens": 120,
                     "cached_tokens": 32,
                     "completion_tokens": 40,
+                    "reasoning_tokens": 12,
                     "current_context_tokens": 202000,
                     "context_window_tokens": 258400,
-                    "total_tokens": 160,
+                    "total_tokens": 172,
                     "elapsed_seconds": 2.0,
                     "tps": 20.0,
                     "tps_source": "wall_clock_estimate",
@@ -2703,6 +2710,25 @@ class AgentExecutionTests(unittest.TestCase):
                 result["usage"],
             )
             self.assertNotIn("eval_duration_ns", result["usage"])
+
+    def test_agent_usage_fallback_total_includes_reasoning_without_upstream_total(self):
+        usage = Toolkit._agent_usage(
+            AgentResponse(
+                content='{"answer": 56}',
+                runner="codex-cli",
+                model="qwen-main-v1",
+                exit_code=0,
+                duration_ms=2000,
+                usage={
+                    "input_tokens": 120,
+                    "output_tokens": 40,
+                    "reasoning_output_tokens": 12,
+                },
+            )
+        )
+
+        self.assertEqual(172, usage["total_tokens"])
+        self.assertEqual(12, usage["reasoning_tokens"])
 
     def test_zero_tool_call_budget_is_preserved_instead_of_replaced_by_the_default(self):
         with tempfile.TemporaryDirectory() as temp:

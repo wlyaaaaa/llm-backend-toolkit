@@ -185,6 +185,17 @@ class ObserverWindowsSourceTests(unittest.TestCase):
         self.assertNotIn("AppActivate", source)
         self.assertNotIn("SetForegroundWindow", source)
 
+    def test_launcher_assigns_a_truthful_independent_taskbar_identity(self) -> None:
+        source = STARTER.read_text(encoding="utf-8-sig")
+
+        self.assertIn("Wly.LlmBackendToolkit.Observer", source)
+        self.assertIn("SHGetPropertyStoreForWindow", source)
+        self.assertIn("PKEY_AppUserModel_ID", source)
+        self.assertIn("PKEY_AppUserModel_RelaunchIconResource", source)
+        self.assertIn("Set-ObserverWindowIdentity", source)
+        self.assertIn("assets\\observer-console.ico", source)
+        self.assertNotIn("SetCurrentProcessExplicitAppUserModelID", source)
+
     def test_installer_uses_known_folder_without_onedrive_assumption(self) -> None:
         source = INSTALLER.read_text(encoding="utf-8-sig")
 
@@ -273,6 +284,12 @@ class ObserverWindowsBehaviorTests(unittest.TestCase):
         self.assertEqual("ok", result["observer_status"])
         self.assertEqual("http://127.0.0.1:8765/", result["url"])
         self.assertFalse(result["launched"])
+        self.assertEqual(
+            "Wly.LlmBackendToolkit.Observer",
+            result["app_user_model_id"],
+        )
+        self.assertEqual(str(ICON.resolve()), result["taskbar_icon"])
+        self.assertFalse(result["taskbar_identity_applied"])
 
     def test_launcher_rejects_non_loopback_observer_url(self) -> None:
         completed = subprocess.run(

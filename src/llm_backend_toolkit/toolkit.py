@@ -880,6 +880,7 @@ class Toolkit:
             "input_tokens": "prompt_tokens",
             "cached_input_tokens": "cached_tokens",
             "output_tokens": "completion_tokens",
+            "reasoning_output_tokens": "reasoning_tokens",
         }
         for source, target in field_map.items():
             value = raw_usage.get(source)
@@ -892,9 +893,14 @@ class Toolkit:
             value = raw_usage.get(field_name)
             if type(value) is int and value >= 0:
                 normalized[field_name] = value
-        if "prompt_tokens" in normalized and "completion_tokens" in normalized:
+        upstream_total = raw_usage.get("total_tokens")
+        if type(upstream_total) is int and upstream_total >= 0:
+            normalized["total_tokens"] = upstream_total
+        elif "prompt_tokens" in normalized and "completion_tokens" in normalized:
             normalized["total_tokens"] = (
-                normalized["prompt_tokens"] + normalized["completion_tokens"]
+                normalized["prompt_tokens"]
+                + normalized["completion_tokens"]
+                + normalized.get("reasoning_tokens", 0)
             )
         duration_ms = getattr(response, "duration_ms", None)
         if (

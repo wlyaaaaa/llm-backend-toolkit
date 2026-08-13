@@ -4,11 +4,13 @@
 
 模型调用观察台是 `llm-backend-toolkit` 的本机只读可观察面。用户只需从桌面或开始菜单打开一次白底纯绿 GUI；此后 AI 通过受管 skill 发起的任务会自动出现并实时更新，不需要手动刷新，也不会由每次调用反复抢焦点。
 
-界面由三部分组成：
+界面采用 Remote 风格的三栏只读工作区：
 
-1. 调用记录与历史：显示并发任务、独立对话和 continuation 轮次，支持筛选、搜索和分页加载旧历史。
-2. 中文工作时间线：显示排队、输入整理、GPU/模型连接、推理活动、安全命令与文件编辑活动、OCR/ASR、上下文压缩、校验和交付事件；每次先取最近 160 个，可按页加载更早记录。
-3. 详情：展示流式公开草稿、最终输出、校验回执、经安全复验的本机完整路径和调用方 opt-in 的有界 diff，以及模型、推理等级、累计 Token、当前上下文、Token/s、耗时、GPU 与交付状态。
+1. Runs：调用记录与历史，显示并发任务、独立对话和 continuation 轮次，支持筛选、搜索和分页加载旧历史。
+2. Conversation：连续任务流。一个助手公开输出节点在同一位置从流式草稿过渡到最终结果；连续命令和文件活动会合并为工作记录，自动上下文压缩保留独立分隔节点。这里不提供输入、停止、重试、账户或额度控制。
+3. Inspector：保留详细中文时间线、校验回执、经安全复验的本机完整路径和调用方 opt-in 的有界 diff，以及模型、推理等级、累计 Token、当前上下文、Token/s、耗时、GPU 与交付状态。
+
+桌面窗口宽度不超过 1100px 时 Inspector 收为可打开侧栏，主任务流仍保持可读；本项目的正式验收范围是电脑端 Web 观察台。
 
 所有历史以耐久 job artifact 为准；读取 GUI 不增加轮询计数，也不等于 Codex 已取回结果。只有结果读取入口会记录 `handoff.collected`。
 
@@ -57,7 +59,7 @@ Token/s 指标必须说明依据：
 - `public_content_estimate`：运行中公开输出的估算 token 数除以该公开输出观察窗的墙钟时间，近似；
 - `unavailable` / `not_applicable`：无法可靠计算，OCR/ASR 不冒充 token TPS。
 
-Token 卡片的主值是总计，可展开直接查看输入、输出和缓存；输入兼容 `prompt_tokens` / `input_tokens`，输出兼容 `completion_tokens` / `output_tokens`，缓存兼容 `cached_tokens` / `cached_input_tokens`。缓存属于输入子集，不再次加到总数。Token/s 一律带“输出 token/秒”单位，并明确标出“模型评估时段精确值”“整段执行墙钟估算”或“公开输出观察窗估算”。
+Token 卡片的主值是上游本次运行累计总计，可展开直接查看输入、输出、推理输出和缓存；输入兼容 `prompt_tokens` / `input_tokens`，输出兼容 `completion_tokens` / `output_tokens`，缓存兼容 `cached_tokens` / `cached_input_tokens`。Codex/AICLI 的累计字段来自 `tokenUsage.total`，绝不把 `TokenUsage.last.outputTokens` 冒充整场输出；当前上下文仍只取 `last.totalTokens`。缓存属于输入子集，不再次加到总数；缓存为零或缺失时不显示，不据此宣称本地模型支持缓存统计。Token/s 一律带“输出 token/秒”单位，并明确标出“模型评估时段精确值”“整段执行墙钟估算”或“公开输出观察窗估算”。
 
 “当前上下文”与累计 Token 严格分离：
 
@@ -92,6 +94,10 @@ Toolkit 自己的 `context.compaction.completed` 是模型调用前的确定性�
 
 Toolkit 调用 OCR/ASR 时会把开始/完成阶段写入同一个模型 job。各专项服务的 `/observer/jobs` 和 `/observer/jobs/{id}` 只用于安全聚合，不取代原有诊断接口，也不授权启动、取消或重试。
 
+千问、DeepSeek、Spark 或本地模型只有经 `llm-backend-toolkit submit` / `probe` 建立受管 job 时才会出现在观察台。受管 direct Ollama 可显示流式草稿与最终原生 usage；受管 OpenAI-compatible API 目前只在完成后显示该次请求的真实 usage；已登记的 Codex/AICLI agent route 才会获得 app-server 的公开消息、工具活动和上下文信号。直接运行 `aicli start/run`、Codex Desktop、同步 `llm-backend-toolkit invoke` 或任意第三方 API 客户端都不会写入 Toolkit JobStore，观察台不会全局嗅探或伪称已经记录。
+
+当前默认注册表中，本地 Ollama、云 Qwen/DeepSeek direct job 都能进入观察台；local Qwen Codex routes、`cloud-qwen3-8-max-agent` 与 Spark agent route 已接入 AICLI/Codex 事件链。`cloud-qwen-flash` 和 `cloud-deepseek-v4-flash` 当前是 direct-only，不能显示 Codex 工具/上下文事件；AICLI Profile Manager 自身存在某个 Profile 也不等于 Toolkit 已登记相应 agent route。
+
 ## 四基座边界
 
 - `.agents`：AI 能力路由、skill 和自动打开观察台的个人 wrapper。
@@ -104,11 +110,13 @@ Toolkit 调用 OCR/ASR 时会把开始/完成阶段写入同一个模型 job。�
 - `/api/stream` 只发送 refresh 信号，详情仍由同源 loopback JSON API 读取；连接会持续发送 heartbeat，直到客户端主动断开，不会在任务仍运行时静默到期。
 - 浏览器断线时降级为有界轮询；SSE 恢复后停止通用轮询。选中的活跃任务仍用本地 1 秒 ticker 更新耗时，并每 5 秒低频复核详情，使静默工具阶段和 `monitor_until_utc` 过期仍能及时反映；终态耗时冻结。
 - GUI 首屏只加载最近 100 条，旧历史按页加载。
-- 单个任务详情只加载最近 160 个事件，`/api/runs/{job_id}/events` 以 `before_sequence` 向前分页；前端最多渲染 240 个节点，并将旧版连续 `agent.output.delta` 合并为一个公开片段摘要。
+- 单个任务详情只加载最近 160 个事件，`/api/runs/{job_id}/events` 以 `before_sequence` 向前分页；前端最多渲染 240 个节点，并将旧版连续 `agent.output.delta` 合并为一个公开片段摘要。Conversation 在用户离开底部时提示“新增 N 条”，而 Inspector 保留“返回最新事件”。
 - 服务缓存未变化的终态摘要；活跃任务继续计算新鲜耗时。
 - 列表和详情分开请求，静态资源无外部依赖，长输出使用滚动容器和安全 `textContent`。
 
 ## Windows 桌面入口
+
+正式启动器会在精确观察台窗口上写入独立 `AppUserModelID=Wly.LlmBackendToolkit.Observer` 与项目 ICO 的窗口级任务栏身份；属性写入或回读失败时返回失败，新启动且未完成身份设置的观察台窗口会被关闭，不把 Edge 身份冒充为已修复。
 
 `Start-LlmBackendObserver.ps1` 先确保 loopback 服务存活，再以 Edge `--app=<url>` 打开正式窗口。它用同用户互斥锁和精确窗口标题去重，不激活已有窗口。`Install-LlmBackendObserverShortcut.ps1` 使用 Windows Known Folder 同时创建当前用户桌面与开始菜单 Programs 快捷方式，不假设 OneDrive 或用户名路径，并绑定项目自带的白绿 ICO。安装、升级和 `-Remove` 都会验证 PowerShell 目标、完整 launcher/toolkit 参数、工作目录与描述；只有能证明属于本工具的链接才会修改或删除，旧 Edge 图标可安全迁移。首次全体预检会避免开始时已经存在的同名冲突导致半更新；每个目标在变更或确认 `unchanged` / `absent` 前还会按文件身份和链接契约最终复验。两个独立 Known Folder 不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，已经完成的本工具链接更新或删除可能保留，可在处理冲突后幂等重跑恢复。
 

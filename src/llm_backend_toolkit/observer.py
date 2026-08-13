@@ -77,6 +77,7 @@ _USAGE_NUMBER_FIELDS = frozenset(
         "total_tokens",
         "input_tokens",
         "output_tokens",
+        "reasoning_tokens",
         "cached_tokens",
         "cached_input_tokens",
         "estimated_output_tokens",

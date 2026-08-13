@@ -43,11 +43,11 @@ class ObserverUiTests(unittest.TestCase):
         parser.feed(self.html)
 
         self.assertEqual(
-            ["/assets/styles.css?v=20260813-observer-live"],
+            ["/assets/styles.css?v=20260813-observer-remote-3"],
             parser.stylesheets,
         )
         self.assertEqual(
-            ["/assets/app.js?v=20260813-observer-live"],
+            ["/assets/app.js?v=20260813-observer-remote-3"],
             parser.scripts,
         )
         self.assertIn('href="/assets/favicon.svg"', self.html)
@@ -64,14 +64,17 @@ class ObserverUiTests(unittest.TestCase):
         self.assertTrue(
             {
                 "run-list",
+                "conversation-stream",
+                "conversation-output",
+                "conversation-new-events",
+                "run-inspector",
                 "timeline",
                 "load-earlier-events",
                 "return-latest-events",
                 "draft-panel",
-                "result-panel",
                 "receipt-panel",
                 "connection-state",
-                "empty-state",
+                "conversation-empty-state",
             }.issubset(parser.ids)
         )
         self.assertNotRegex(self.html, r'id="run-list"[^>]*aria-live')
@@ -80,20 +83,58 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn('setAttribute("aria-current"', self.js)
         self.assertIn(":focus-visible", self.css)
 
-    def test_output_and_verification_use_keyboard_accessible_tabs(self) -> None:
-        self.assertIn('role="tablist"', self.html)
-        self.assertIn('role="tab"', self.html)
-        self.assertIn('role="tabpanel"', self.html)
-        self.assertIn('aria-controls="receipt-panel"', self.html)
-        self.assertIn("function selectDetailTab", self.js)
-        self.assertIn('event.key === "ArrowRight"', self.js)
-        self.assertIn('event.key === "ArrowLeft"', self.js)
-        self.assertIn(".detail-tab[aria-selected=\"true\"]", self.css)
+    def test_remote_inspired_read_only_conversation_workspace(self) -> None:
+        self.assertIn('class="conversation-pane"', self.html)
+        self.assertIn('id="conversation-stream"', self.html)
+        self.assertIn('class="read-only-chip"', self.html)
+        self.assertIn('id="mobile-back-button"', self.html)
+        self.assertIn('id="run-inspector"', self.html)
+        self.assertIn("只读观察", self.html)
+        self.assertIn("function renderConversation(detail)", self.js)
+        self.assertIn("function groupWorkRecords(events)", self.js)
+        self.assertIn('createElement("h3", "", "工作记录")', self.js)
+        self.assertIn("summarizeWorkRecord(group.events)", self.js)
+        self.assertIn("运行 ${formatNumber(commandCount)} 个命令", self.js)
+        self.assertIn("编辑 ${formatNumber(fileEditCount)} 个文件", self.js)
+        self.assertIn("检测到 ${formatNumber(observedFileCount)} 个文件变化", self.js)
+        self.assertIn("查询公开资料 ${formatNumber(webSearchCount)} 次", self.js)
+        self.assertIn('web_search: "查询公开资料"', self.js)
+        self.assertIn("context-compaction-divider", self.js)
+        self.assertIn("conversation-new-events", self.js)
+        self.assertIn("新增 ${formatNumber(laterCount)} 条", self.js)
+        self.assertIn("function conversationScrollContainer", self.js)
+        self.assertIn("function returnConversationToLatest", self.js)
+        self.assertIn("elements.conversationPane.addEventListener(\"scroll\"", self.js)
+        self.assertIn('document.body.dataset.mobileView = "conversation"', self.js)
+        self.assertIn('document.body.dataset.mobileView = "list"', self.js)
+        self.assertIn("revealConversation = false", self.js)
+        self.assertIn("{ revealConversation: true }", self.js)
+        self.assertIn('grid-template-areas: "runs conversation inspector"', self.css)
+        self.assertIn('grid-template-areas: "runs conversation"', self.css)
+        self.assertIn('body[data-mobile-view="conversation"] .run-sidebar', self.css)
+        self.assertIn("position: sticky", self.css)
+
+    def test_read_only_output_and_inspector_keep_semantic_controls(self) -> None:
+        self.assertIn('id="conversation-output"', self.html)
+        self.assertIn('id="conversation-output-state"', self.html)
+        self.assertIn('id="inspector-toggle"', self.html)
+        self.assertIn('aria-controls="run-inspector"', self.html)
+        self.assertIn('aria-expanded="false"', self.html)
+        self.assertIn('id="inspector-close-button"', self.html)
+        self.assertNotIn('role="tablist"', self.html)
+        self.assertNotIn("<textarea", self.html)
+        self.assertNotIn('type="submit"', self.html)
+        self.assertNotIn('method: "POST"', self.js)
+        self.assertNotIn('method: "PUT"', self.js)
+        self.assertNotIn('method: "DELETE"', self.js)
+        self.assertIn("function setInspectorOpen", self.js)
+        self.assertIn('document.body.dataset.inspectorOpen', self.js)
+        self.assertIn("同一输出节点原位切换为最终结果", self.js)
 
     def test_ui_contains_required_chinese_observer_labels(self) -> None:
         for label in (
             "调用记录",
-            "工作时间线",
+            "详细时间线",
             "实时草稿",
             "最终结果",
             "校验回执",
@@ -126,7 +167,7 @@ class ObserverUiTests(unittest.TestCase):
         self.assertNotIn("state.eventSource = null", error_handler)
 
     def test_history_and_conversations_are_visible_without_manual_refresh(self) -> None:
-        self.assertIn("调用记录与历史", self.html)
+        self.assertIn("历史与连续对话，仅供查看", self.html)
         self.assertIn('id="load-more-button"', self.html)
         self.assertIn("next_offset", self.js)
         self.assertIn("root_job_id", self.js)
@@ -207,7 +248,10 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("总计 ${formatNumber(totalTokens)}", self.js)
         self.assertIn("输入 ${formatNumber(promptTokens)}", self.js)
         self.assertIn("输出 ${formatNumber(completionTokens)}", self.js)
+        self.assertIn("推理 ${formatNumber(reasoningTokens)}", self.js)
+        self.assertIn("numericPrompt + numericCompletion +", self.js)
         self.assertIn("缓存 ${formatNumber(cachedTokens)}", self.js)
+        self.assertIn("Number(cachedTokens) > 0", self.js)
         self.assertIn('id="metric-token-detail"', self.html)
         self.assertIn("输出 token/秒（整段墙钟估算）", self.js)
         self.assertIn("输出 token/秒（模型评估时段精确）", self.js)
@@ -256,12 +300,21 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("function renderDraft(detail)", self.js)
         self.assertIn("nextText.startsWith(state.draftText)", self.js)
         self.assertIn("document.createTextNode(suffix)", self.js)
-        render_detail = self.js.split("function renderDetail(detail)", 1)[1].split(
-            "function renderNoSelection", 1
+        render_conversation = self.js.split("function renderConversation(detail)", 1)[1].split(
+            "function renderDetail", 1
         )[0]
-        self.assertIn("renderDraft(detail)", render_detail)
-        self.assertNotIn("elements.draftContent.textContent =", render_detail)
-        self.assertIn("逐段更新中", self.html)
+        self.assertIn("renderDraft(detail)", render_conversation)
+        self.assertIn("renderWorkRecords(events)", render_conversation)
+        self.assertNotIn("elements.conversationOutput.textContent =", render_conversation)
+        render_draft = self.js.split("function renderDraft(detail)", 1)[1].split(
+            "function extractResult", 1
+        )[0]
+        self.assertIn("elements.conversationOutput.textContent = nextText", render_draft)
+        self.assertIn("elements.conversationOutputNode.dataset.outputState", render_draft)
+        self.assertIn("最终结果", render_draft)
+        self.assertNotIn("elements.draftContent", self.js)
+        self.assertNotIn("elements.resultContent", self.js)
+        self.assertIn("逐段更新中", self.js)
         self.assertIn("public_preview_truncated", self.js)
         self.assertIn("草稿预览已达到安全上限", self.js)
 
@@ -274,12 +327,57 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn('id="return-latest-events"', self.html)
         self.assertIn("function returnToLatestEvents()", self.js)
         self.assertIn("更晚 ${formatNumber(laterCount)} 个", self.js)
+        self.assertIn("新增 ${formatNumber(laterCount)} 条", self.js)
         self.assertIn(".slice(-MAX_TIMELINE_EVENTS)", self.js)
         self.assertIn(".slice(0, MAX_TIMELINE_EVENTS)", self.js)
         self.assertIn("timelineItemCache.get(anchorKey)", self.js)
         self.assertIn("latest_sequence: detail.event_page.latest_sequence", self.js)
         self.assertIn("任务已结束，但没有可展示结果", self.js)
         self.assertNotIn('matchMedia("(max-width: 1100px)")', self.js)
+
+    def test_conversation_work_records_keep_safe_grouping_boundary(self) -> None:
+        grouping = self.js.split("function groupWorkRecords(events)", 1)[1].split(
+            "function appendWorkRecordItem", 1
+        )[0]
+        work_classifier = self.js.split("function isWorkRecordEvent(event)", 1)[1].split(
+            "function isContextCompactionEvent", 1
+        )[0]
+        self.assertIn('event.kind === "agent.tool.activity"', work_classifier)
+        self.assertIn('event.kind === "workspace.change.observed"', work_classifier)
+        self.assertIn('event.kind === "agent.context.usage.updated"', grouping)
+        self.assertIn('type: "compaction"', grouping)
+        self.assertIn("不展示命令正文", self.js)
+        self.assertIn("context-compaction-divider", self.js)
+        self.assertIn("conversationWorkRecords.replaceChildren(fragment)", self.js)
+
+    def test_layout_handles_edge_app_window_and_long_content(self) -> None:
+        self.assertIn("#17e04b", self.css.lower())
+        self.assertIn("100dvh", self.css)
+        self.assertIn("minmax(0, 1fr)", self.css)
+        self.assertIn("overflow-wrap: anywhere", self.css)
+        self.assertRegex(self.css, r"@media\s*\(max-width:\s*1100px\)")
+        self.assertRegex(self.css, r"@media\s*\(max-width:\s*680px\)")
+        self.assertIn("prefers-reduced-motion", self.css)
+        self.assertIn("--quiet: #657169", self.css)
+        self.assertIn("outline: 2px solid var(--green-deep)", self.css)
+        self.assertIn("repeat(auto-fit, minmax(96px, 1fr))", self.css)
+        self.assertIn('grid-template-areas: "runs conversation inspector"', self.css)
+        self.assertRegex(
+            self.css,
+            r"\.conversation-new-events\s*\{[^}]*position:\s*sticky",
+        )
+        narrow_workspace = self.css.split("@media (max-width: 1100px)", 1)[1].split(
+            "@media (max-width: 680px)", 1
+        )[0]
+        self.assertIn('grid-template-areas: "runs conversation"', narrow_workspace)
+        self.assertIn("position: fixed", narrow_workspace)
+        self.assertIn("transform: translateX", narrow_workspace)
+        self.assertIn('body[data-inspector-open="true"] .inspector-pane', narrow_workspace)
+        mobile_workspace = self.css.split("@media (max-width: 680px)", 1)[1]
+        self.assertIn('body[data-mobile-view="conversation"] .run-sidebar', mobile_workspace)
+        self.assertIn('body[data-mobile-view="list"] .conversation-pane', mobile_workspace)
+        self.assertNotIn("grid-auto-flow: column", mobile_workspace)
+        self.assertNotIn("grid-auto-columns", mobile_workspace)
 
     def test_timeline_summarizes_native_compaction_and_safe_tool_progress(self) -> None:
         self.assertIn("第 ${compactionCount} 次自动压缩", self.js)
@@ -318,24 +416,6 @@ class ObserverUiTests(unittest.TestCase):
         self.assertIn("textContent", self.js)
         self.assertNotIn("innerHTML", self.js)
 
-    def test_layout_handles_edge_app_window_and_long_content(self) -> None:
-        self.assertIn("#17e04b", self.css.lower())
-        self.assertIn("100dvh", self.css)
-        self.assertIn("minmax(0, 1fr)", self.css)
-        self.assertIn("overflow-wrap: anywhere", self.css)
-        self.assertRegex(self.css, r"@media\s*\(max-width:\s*1100px\)")
-        self.assertRegex(self.css, r"@media\s*\(max-width:\s*680px\)")
-        self.assertIn("prefers-reduced-motion", self.css)
-        self.assertIn("--quiet: #657169", self.css)
-        self.assertIn("outline: 2px solid var(--green-deep)", self.css)
-        self.assertIn("repeat(auto-fit, minmax(96px, 1fr))", self.css)
-        narrow_timeline = self.css.split("@media (max-width: 1100px)", 1)[1].split(
-            "@media (max-width: 680px)", 1
-        )[0]
-        self.assertIn("overflow-y: auto", narrow_timeline)
-        self.assertIn("overflow-x: hidden", narrow_timeline)
-        self.assertNotIn("grid-auto-flow: column", narrow_timeline)
-        self.assertNotIn("grid-auto-columns", narrow_timeline)
 
 
 if __name__ == "__main__":
