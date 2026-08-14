@@ -43,11 +43,11 @@ class ObserverUiTests(unittest.TestCase):
         parser = _DocumentParser()
         parser.feed(self.html)
         self.assertEqual(
-            ["/assets/styles.css?v=20260814-conversations-15"],
+            ["/assets/styles.css?v=20260814-conversations-16"],
             parser.stylesheets,
         )
         self.assertEqual(
-            ["/assets/app.js?v=20260814-conversations-15"],
+            ["/assets/app.js?v=20260814-conversations-16"],
             parser.scripts,
         )
         self.assertIn('href="/assets/favicon.svg"', self.html)
@@ -121,6 +121,11 @@ class ObserverUiTests(unittest.TestCase):
             "elements.title.textContent = taskLabel(first(turns[0], listItem));",
             self.js,
         )
+
+    def test_conversation_list_surfaces_cross_turn_tool_and_search_totals(self) -> None:
+        self.assertIn("conversation.activity_totals || {}", self.js)
+        self.assertIn("`工具 ${toolCalls} 次`", self.js)
+        self.assertIn("`网络搜索 ${webSearches} 次`", self.js)
 
     def test_new_managed_conversation_auto_follows_without_stealing_history(self) -> None:
         self.assertIn("followLatestConversation: true", self.js)
@@ -335,6 +340,15 @@ const failed = outputData({
 });
 if (failed.final || failed.live || failed.state !== "partial") {
   throw new Error(`failed draft must be archived partial output: ${JSON.stringify(failed)}`);
+}
+const partial = outputData({
+  job_status: "completed",
+  result_status: "partial",
+  progress: {},
+  result: { status: "partial", output: "失败前公开输出" },
+});
+if (partial.final || partial.live || partial.state !== "partial") {
+  throw new Error(`partial result must not be labelled final: ${JSON.stringify(partial)}`);
 }
 const completed = outputData({
   job_status: "completed",

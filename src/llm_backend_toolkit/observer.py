@@ -992,9 +992,10 @@ def _model_name(result: dict[str, Any], state: dict[str, Any]) -> str:
     provider = result.get("provider") or {}
     backend = result.get("backend") or {}
     return str(
-        provider.get("actual")
-        or backend.get("model")
+        backend.get("model")
+        or result.get("model")
         or state.get("model")
+        or provider.get("actual")
         or state.get("backend")
         or "unknown"
     )
@@ -1193,6 +1194,18 @@ class ObserverStore:
         elapsed = _elapsed_seconds(state, progress)
         display = _safe_display(state.get("display"))
         events = read_events(directory)
+        execution_receipt = _project_execution_receipt(
+            result.get("execution_receipt")
+        )
+        activity_totals: dict[str, int] = {}
+        tool_calls = execution_receipt.get("tool_calls")
+        if type(tool_calls) is int and tool_calls > 0:
+            activity_totals["tool_calls"] = tool_calls
+        web_search = execution_receipt.get("web_search")
+        if isinstance(web_search, dict):
+            searches = web_search.get("searches")
+            if type(searches) is int and searches > 0:
+                activity_totals["web_searches"] = searches
         value = {
             "job_id": directory.name,
             "job_status": effective_status,
@@ -1213,6 +1226,8 @@ class ObserverStore:
                 "max_turns": _conversation_max_turns(state),
             },
         }
+        if activity_totals:
+            value["activity_totals"] = activity_totals
         with self._cache_lock:
             self._summary_cache[directory.name] = (signature, dict(value))
         return value
@@ -1368,6 +1383,28 @@ class ObserverStore:
                 "turn_count": turn_count,
                 "max_turns": max_turns,
             }
+            activity_totals: dict[str, int] = {}
+            for (
+                _member_updated,
+                _member_job_id,
+                member_directory,
+                member_state,
+            ) in grouped[root_job_id]:
+                member_summary = self._run_summary(
+                    member_directory,
+                    state=member_state,
+                )
+                if member_summary is None:
+                    continue
+                member_totals = member_summary.get("activity_totals")
+                if not isinstance(member_totals, dict):
+                    continue
+                for key in ("tool_calls", "web_searches"):
+                    count = member_totals.get(key)
+                    if type(count) is int and count > 0:
+                        activity_totals[key] = activity_totals.get(key, 0) + count
+            if activity_totals:
+                summary["activity_totals"] = activity_totals
             page.append(summary)
         next_offset = bounded_offset + len(selected)
         if next_offset >= total:

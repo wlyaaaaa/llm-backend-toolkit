@@ -215,9 +215,20 @@ function renderList() {
       String(conversation.summary_zh || "暂无公开进度摘要"),
     );
     const meta = createElement("span", "item-meta");
+    const activityTotals = conversation.activity_totals || {};
+    const activityParts = [];
+    const toolCalls = Number(activityTotals.tool_calls || 0);
+    const webSearches = Number(activityTotals.web_searches || 0);
+    if (Number.isInteger(toolCalls) && toolCalls > 0) activityParts.push(`工具 ${toolCalls} 次`);
+    if (Number.isInteger(webSearches) && webSearches > 0) activityParts.push(`网络搜索 ${webSearches} 次`);
+    const turnMeta = [
+      `${Number(conversation.turn_count || 1)} 轮`,
+      ...activityParts,
+      formatDate(conversation.updated_utc, "short"),
+    ].join(" · ");
     meta.append(
       createElement("span", "item-model", modelName(conversation)),
-      createElement("span", "item-turns", `${Number(conversation.turn_count || 1)} 轮 · ${formatDate(conversation.updated_utc, "short")}`),
+      createElement("span", "item-turns", turnMeta),
     );
     button.append(top, summary, meta);
     button.addEventListener("click", () => selectConversation(rootId, {
@@ -1200,7 +1211,7 @@ function outputData(turn) {
   const status = statusName(turn.job_status);
   const resultStatus = statusName(first(turn.result_status, turn.result?.status));
   const completed = status === "completed"
-    && !["failed", "error", "blocked", "cancelled", "stale"].includes(resultStatus);
+    && (!resultStatus || ["ok", "completed", "succeeded", "success"].includes(resultStatus));
   const terminal = ["completed", "failed", "cancelled", "stale", "blocked"].includes(status);
   if (!terminal) return draft
     ? {

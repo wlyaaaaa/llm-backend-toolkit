@@ -1476,6 +1476,10 @@ class ObserverStoreTests(unittest.TestCase):
                         "model": "qwen-main-v1",
                         "context_window_tokens": 262144,
                     },
+                    "provider": {
+                        "requested": "local-default",
+                        "actual": "aicli_ollama_main",
+                    },
                     "context_receipt": {
                         "mode": "compact",
                         "executed": True,
@@ -1741,6 +1745,15 @@ class ObserverStoreTests(unittest.TestCase):
                     "status": "ok",
                     "output": "第一轮公开答复",
                     "usage": {"input_tokens": 12, "output_tokens": 8},
+                    "execution_receipt": {
+                        "tool_calls": 5,
+                        "web_search": {
+                            "enabled": True,
+                            "provider": "bing-rss-v1",
+                            "searches": 3,
+                            "event_evidence": "runtime-lifecycle",
+                        },
+                    },
                 },
             )
             continuation = request()
@@ -1752,7 +1765,11 @@ class ObserverStoreTests(unittest.TestCase):
             store.claim(second["job_id"])
             store.complete(
                 second["job_id"],
-                {"status": "ok", "output": "第二轮公开答复"},
+                {
+                    "status": "ok",
+                    "output": "第二轮公开答复",
+                    "execution_receipt": {"tool_calls": 2},
+                },
             )
             independent = store.submit(request(), force=True)
 
@@ -1788,6 +1805,10 @@ class ObserverStoreTests(unittest.TestCase):
                 if item["root_job_id"] == first["job_id"]
             )
             self.assertEqual(2, grouped["turn_count"])
+            self.assertEqual(
+                {"tool_calls": 7, "web_searches": 3},
+                grouped["activity_totals"],
+            )
             self.assertEqual(first["job_id"], detail["root_job_id"])
             self.assertEqual(2, detail["conversation"]["turn_count"])
             self.assertEqual(
