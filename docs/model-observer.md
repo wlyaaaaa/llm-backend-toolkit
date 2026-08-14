@@ -106,7 +106,7 @@ Toolkit 自己的 `context.compaction.completed` 是模型调用前的确定性�
 
 Toolkit 调用 OCR/ASR 时会把开始/完成阶段写入同一个模型 job。各专项服务的 `/observer/jobs` 和 `/observer/jobs/{id}` 只用于安全聚合，不取代原有诊断接口，也不授权启动、取消或重试。
 
-千问、DeepSeek、Spark 或本地模型只有经 `llm-backend-toolkit submit` / `probe` 建立受管 job 时才会出现在观察台。受管 direct Ollama 可显示流式草稿与最终原生 usage；受管 OpenAI-compatible API 目前只在完成后显示该次请求的真实 usage；已登记的 Codex/AICLI agent route 才会获得 app-server 的公开消息、工具活动和上下文信号。直接运行 `aicli start/run`、Codex Desktop、同步 `llm-backend-toolkit invoke` 或任意第三方 API 客户端都不会写入 Toolkit JobStore，观察台不会全局嗅探或伪称已经记录。
+千问、DeepSeek、Spark 或本地模型经 `llm-backend-toolkit invoke` / `submit` / `probe` 都会先建立受管 job 并进入观察台；`invoke` 在同一进程完成该 job 后同步返回原结果，`submit` / `probe` 保持非阻塞 worker 语义。受管 direct Ollama 可显示流式草稿与最终原生 usage；受管 OpenAI-compatible API 目前只在完成后显示该次请求的真实 usage；已登记的 Codex/AICLI agent route 才会获得 app-server 的公开消息、工具活动和上下文信号。直接运行 `aicli start/run`、Codex Desktop、直接 `codex` 或任意第三方 API 客户端仍不会写入 Toolkit JobStore，观察台不会全局嗅探或伪称已经记录。
 
 当前默认注册表中，本地 Ollama、云 Qwen/DeepSeek direct job 都能进入观察台；local Qwen Codex routes 与 Spark agent route 已接入 AICLI/Codex 事件链。`cloud-qwen-flash` 和 `cloud-deepseek-v4-flash` 当前是 direct-only，只显示受管 job 生命周期、公开输出和实际存在的最终 usage，不能显示 Codex 工具/上下文事件。旧 `cloud-qwen3-8-max-agent` 已因当前 AICLI catalog 缺少精确 Profile 而撤出可选注册表，仅保留 `unverified/selectable=false` 的 reserved 记录；不会借用 Qwen 3.7 Profile 或历史回执。AICLI Profile Manager 自身存在某个 Profile 也不等于 Toolkit 已登记相应 agent route。
 

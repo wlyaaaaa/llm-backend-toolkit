@@ -66,7 +66,9 @@ python -m venv .venv
 .\.venv\Scripts\llm-backend-toolkit.exe job --id <job_id> --full-result
 ```
 
-`invoke` 是同步底层接口，不是 Codex 调用本地大模型的默认入口。
+`invoke` 保留同步返回结果的接口语义，但执行前同样创建一个受管 JobStore job，
+因此实时进度与最终结果也会自动进入观察台；它每次都建立新尝试，不复用结果
+cache。Codex 的默认入口仍建议使用非阻塞的 `submit`。
 
 外部 source/media 可在引用上成对声明 `expected_sha256` 与 `expected_bytes`：
 
@@ -81,7 +83,7 @@ python -m venv .venv
 
 异步 worker 在 provider 实际消费前把字节流式复制到 job 私有目录，同时校验源文件在读取期间未变化、声明的 SHA-256/字节数以及私有副本回读结果。Windows 上从创建副本开始持有拒绝写入/删除的受保护句柄，贯穿 SourceLoader、MediaProcessor 和 provider 消费；job 目录、input-spool 及其内部祖先发现 symlink/junction/reparse 或 canonical containment 失败时一律关闭失败。任一步不一致都会在调用 provider 和发布 result/cache 前失败关闭。
 
-未提供声明的旧请求仍会进入私有 spool 并兼容执行，但引用只标为 `captured_unverified`、整体只标为 `spooled_unverified`，不能成为 cache hit；在非 Windows 平台，缺少等价不可变路径绑定时，带声明请求也会关闭失败而不是冒充已验证。安全回执只记录引用 ID、声明值、实测摘要和状态，不回显正文、原始路径或原始 cache key。worker 的 PID、进程创建身份和阶段写入耐久 lease；只有确认该进程已经死亡，`get`/`cleanup_inputs` 才会把运行中 job 原子转为 failed/cancelled 并清理 spool，活 worker 不会被误清理。进入终态后私有副本与 prepared request 会清理，并留下可重复验证的清理回执；撤回与接管可使用 Python `JobStore.cancel(job_id)` 和 `JobStore.cleanup_inputs(job_id)`，不提供绕过 owner 判断的公共批量 purge CLI。带完整性声明的请求不能直接调用同步 `invoke`，必须经 `submit`/job worker 取得实际消费边界证明。
+未提供声明的旧请求仍会进入私有 spool 并兼容执行，但引用只标为 `captured_unverified`、整体只标为 `spooled_unverified`，不能成为 cache hit；在非 Windows 平台，缺少等价不可变路径绑定时，带声明请求也会关闭失败而不是冒充已验证。安全回执只记录引用 ID、声明值、实测摘要和状态，不回显正文、原始路径或原始 cache key。worker 的 PID、进程创建身份和阶段写入耐久 lease；只有确认该进程已经死亡，`get`/`cleanup_inputs` 才会把运行中 job 原子转为 failed/cancelled 并清理 spool，活 worker 不会被误清理。进入终态后私有副本与 prepared request 会清理，并留下可重复验证的清理回执；撤回与接管可使用 Python `JobStore.cancel(job_id)` 和 `JobStore.cleanup_inputs(job_id)`，不提供绕过 owner 判断的公共批量 purge CLI。同步 `invoke` 与异步 `submit` 现在都经过同一套 job claim、输入消费边界、公开进度和清理回执；差别只在调用方是否等待结果。
 
 不含外部文件引用的相同请求默认复用已完成结果；agent workspace、source 或 media 等可变引用默认不缓存。只有调用者在 `execution.cache_key` 提供通过验证、绑定真实内容与派生版本的语义身份，才允许这类请求命中缓存。显式 key 会忽略 `target_tokens`、预算和 workspace 等调度/工作元数据，但仍强制绑定已解析 backend、model、agent route/profile、隐私、reasoning、媒体与输出协议，不能跨 provider/model 或隐私边界误命中。v2 回执的 `cache_identity.mode=explicit` 只公开原始 key 的 SHA-256 `caller_cache_key_hash`，从不回显原始 key；两种模式都声明 `canonicalization=stdlib-json-sort-compact-utf8-v1`，对应 `json.dumps(..., ensure_ascii=False, sort_keys=True, separators=(",", ":"))` 的 UTF-8 SHA-256。显式 `digest` 还绑定解析后的完整安全 scope，供调用方作为不透明身份比较，不要求仅凭精简回执字段复算；无显式 key 时，`mode=request_digest` 的 `digest` 仍等于当前 `JobStore.request_digest`。v1 或缺失身份的旧 job 仍可按 ID 查询，但不会被新 v2 提交当作缓存证明。失败、取消和非 cacheable 结果不会成为命中目标。明确需要一次新尝试时使用 `submit --force`。
 回执同时给出 `recommended_check_utc` 与 `monitor_until_utc`。初次建议等待 30-60 秒，过早读取后指数退避；任务超过硬期限会显示 `stale`、停止建议轮询，并把重试或接管交回顶级模型。
@@ -116,7 +118,7 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 
 正式启动器使用项目自带的无控制台 WinForms/WebView2 宿主，而不是 Edge app-mode。宿主使用独立 profile，并在页面导航成功后才显示默认最大化窗口；重复启动会激活已有观察台。窗口和快捷方式仍写入项目图标与 Shell 身份属性，但 Explorer 任务栏最终渲染未纳入本轮验收，不能把属性回读冒充任务栏图标视觉成功。宿主显式清除仅限当前进程的 WebView2 环境覆盖，避免 Windows Search/Widgets 的共享 profile 造成 `ERROR_INVALID_STATE` 页面加载失败。
 
-启动器只创建一个 loopback 服务和一个原生观察台窗口。快捷方式直接指向 `LlmBackendObserverHost.exe`，后台服务和 AICLI/PowerShell 子进程均用 `CREATE_NO_WINDOW` / Hidden 语义，失败只写本机诊断文件，不弹控制台或错误框。窗口打开后通过 SSE 自动接收后续调用，不需要手动刷新；重复调用会把已有观察台带到前台。安装器会同时创建当前用户桌面和开始菜单中的“模型调用观察台”快捷方式；它只升级或删除能由启动目标、完整参数、工作目录和描述共同证明属于本工具的链接，同名第三方文件会冲突失败而不会被覆盖。首次全体预检会拦截开始时已经存在的冲突；每个目标在最终变更或状态确认前还会复验。桌面和开始菜单是两个独立 Known Folder，不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，已经完成的本工具链接操作可能保留，可在处理冲突后幂等重跑。需要移除这两个精确入口时使用 `-Remove`。`Show-LlmBackendDashboard.ps1` 继续作为 PowerShell 降级视图。
+启动器只创建一个 loopback 服务和一个原生观察台窗口。快捷方式直接指向 `LlmBackendObserverHost.exe`，后台服务和 AICLI/PowerShell 子进程均用 `CREATE_NO_WINDOW` / Hidden 语义，失败只写本机诊断文件，不弹控制台或错误框。窗口打开后通过 SSE 自动接收后续 `invoke` / `submit` / `probe` 受管调用，不需要手动刷新；处于最新对话时会自动切换到新调用，手动回看历史时不会抢走页面。重复启动会把已有观察台带到前台。安装器会同时创建当前用户桌面和开始菜单中的“模型调用观察台”快捷方式；它只升级或删除能由启动目标、完整参数、工作目录和描述共同证明属于本工具的链接，同名第三方文件会冲突失败而不会被覆盖。首次全体预检会拦截开始时已经存在的冲突；每个目标在最终变更或状态确认前还会复验。桌面和开始菜单是两个独立 Known Folder，不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，已经完成的本工具链接操作可能保留，可在处理冲突后幂等重跑。需要移除这两个精确入口时使用 `-Remove`。`Show-LlmBackendDashboard.ps1` 继续作为 PowerShell 降级视图。
 
 观察台显示的是经过净化的可验证工作过程，不是隐藏 chain-of-thought。prompt、隐藏 thinking/reasoning 正文、原始命令和参数、工具输入输出、环境变量、OCR/ASR 正文及绝对私密路径都不会进入公开事件日志。正式 skill 只使用受管 AICLI 入口，不会因旧安装态缺少事件能力而静默降级。当前实装验收基线是 AICLI `0.3.5` 与 `codex-cli 0.147.0`；未来更新默认尝试，但必要字段、通知、生命周期或清理协议漂移会返回明确错误。
 

@@ -88,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     invoke = subparsers.add_parser("invoke", help="Invoke one explicitly selected backend")
     invoke.add_argument("--request", default="-", help="JSON request path, or - for stdin")
+    invoke.add_argument("--state-dir")
     submit = subparsers.add_parser("submit", help="Submit a non-blocking background job")
     submit.add_argument("--request", default="-", help="JSON request path, or - for stdin")
     submit.add_argument("--state-dir")
@@ -130,13 +131,94 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _execute_job(store: JobStore, job_id: str) -> None:
+    progress = None
+    try:
+        request = store.claim(job_id)
+        registry_source = None
+        try:
+            worker_contract = store.read_worker_contract(job_id)
+        except ValueError:
+            worker_registry = None
+        else:
+            worker_contract, contract_anchor = store.read_worker_contract_binding(job_id)
+            worker_registry = registry_from_worker_contract(
+                worker_contract,
+                expected_anchor=contract_anchor,
+            )
+            if worker_registry is not None:
+                registry_source = contract_anchor["registry_source"]
+        if not store.begin_execution(job_id):
+            return
+        expected = ((request.get("task") or {}).get("expected_output") or {})
+        output_format = str(expected.get("format") or "text").lower()
+        progress = store.progress_recorder(
+            job_id,
+            allow_public_preview=output_format in {"", "text", "plain", "markdown", "md"},
+        )
+        progress({"phase": "accepted"})
+        result = Toolkit(registry=worker_registry).invoke(
+            request,
+            progress_callback=progress,
+        )
+        if registry_source is not None:
+            if not isinstance(result, dict):
+                raise ValueError("Benchmark worker result must be an object")
+            execution_receipt = result.get("execution_receipt")
+            if execution_receipt is None:
+                execution_receipt = {}
+            if not isinstance(execution_receipt, dict):
+                raise ValueError("Benchmark worker execution receipt must be an object")
+            result = dict(result)
+            result["execution_receipt"] = {
+                **execution_receipt,
+                "local_async_worker_registry_source": registry_source,
+            }
+        store.complete(job_id, result)
+    except (InputIntegrityError, JobNotRunnableError):
+        return
+    except Exception as exc:
+        if progress is not None:
+            progress({"phase": "failed"})
+        store.fail(job_id, f"Worker failed: {type(exc).__name__}")
+
+
+def _recorded_invoke(request: dict[str, Any], state_dir: str | None) -> dict[str, Any]:
+    store = JobStore(state_dir, spawner=lambda job_id, root: None)
+    submission = store.submit(request, force=True)
+    job_id = str(submission["job_id"])
+    _execute_job(store, job_id)
+    collected = store.collect(job_id, full_result=True)
+    result = collected.get("result")
+    if isinstance(result, dict):
+        return result
+    return {
+        "status": "blocked",
+        "job_id": job_id,
+        "error": dict(
+            collected.get("error")
+            or {
+                "category": "worker_failed",
+                "summary": "The recorded synchronous invocation did not produce a result.",
+                "retryable": True,
+            }
+        ),
+        "decision": dict(
+            collected.get("decision")
+            or {"owner": "top_model", "options": ["inspect-job", "retry"]}
+        ),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         if args.command == "invoke":
-            toolkit = Toolkit()
-            result = toolkit.invoke(_read_request(args.request))
+            result = _recorded_invoke(
+                _read_request(args.request),
+                args.state_dir,
+            )
         elif args.command == "submit":
             result = JobStore(args.state_dir).submit(_read_request(args.request), force=args.force)
         elif args.command == "job":
@@ -170,61 +252,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "_worker":
             store = JobStore(args.state_dir)
-            progress = None
-            try:
-                request = store.claim(args.job_id)
-                registry_source = None
-                try:
-                    worker_contract = store.read_worker_contract(args.job_id)
-                except ValueError:
-                    worker_registry = None
-                else:
-                    worker_contract, contract_anchor = (
-                        store.read_worker_contract_binding(args.job_id)
-                    )
-                    worker_registry = registry_from_worker_contract(
-                        worker_contract,
-                        expected_anchor=contract_anchor,
-                    )
-                    if worker_registry is not None:
-                        registry_source = contract_anchor["registry_source"]
-                if not store.begin_execution(args.job_id):
-                    return 0
-                expected = ((request.get("task") or {}).get("expected_output") or {})
-                output_format = str(expected.get("format") or "text").lower()
-                progress = store.progress_recorder(
-                    args.job_id,
-                    allow_public_preview=output_format in {"", "text", "plain", "markdown", "md"},
-                )
-                progress({"phase": "accepted"})
-                result = Toolkit(registry=worker_registry).invoke(
-                    request,
-                    progress_callback=progress,
-                )
-                if registry_source is not None:
-                    if not isinstance(result, dict):
-                        raise ValueError(
-                            "Benchmark worker result must be an object"
-                        )
-                    execution_receipt = result.get("execution_receipt")
-                    if execution_receipt is None:
-                        execution_receipt = {}
-                    if not isinstance(execution_receipt, dict):
-                        raise ValueError(
-                            "Benchmark worker execution receipt must be an object"
-                        )
-                    result = dict(result)
-                    result["execution_receipt"] = {
-                        **execution_receipt,
-                        "local_async_worker_registry_source": registry_source,
-                    }
-                store.complete(args.job_id, result)
-            except (InputIntegrityError, JobNotRunnableError):
-                return 0
-            except Exception as exc:
-                if progress is not None:
-                    progress({"phase": "failed"})
-                store.fail(args.job_id, f"Worker failed: {type(exc).__name__}")
+            _execute_job(store, args.job_id)
             return 0
         elif args.command == "_observer":
             run_observer(
