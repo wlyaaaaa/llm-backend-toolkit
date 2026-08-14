@@ -13,7 +13,11 @@ from unittest.mock import patch
 import llm_backend_toolkit.jobs as jobs_module
 from llm_backend_toolkit.backends import BackendRegistry
 from llm_backend_toolkit.jobs import JobStore
-from llm_backend_toolkit.observability import append_event, read_events
+from llm_backend_toolkit.observability import (
+    append_event,
+    read_conversation_process,
+    read_events,
+)
 
 
 def _registry(
@@ -487,16 +491,6 @@ class JobStoreTests(unittest.TestCase):
 
             progress_path = Path(temp) / receipt["job_id"] / "progress.json"
             progress = json.loads(progress_path.read_text(encoding="utf-8"))
-            self.assertEqual(
-                [
-                    {
-                        "summary_group": 1,
-                        "summary_index": 0,
-                        "text": "正在核对公开配置。",
-                    }
-                ],
-                progress["public_reasoning_summaries"],
-            )
             self.assertNotIn("public_preview", progress)
             summary_events = [
                 event
@@ -509,6 +503,13 @@ class JobStoreTests(unittest.TestCase):
             )
             self.assertEqual([1, 1], [event["payload"]["summary_group"] for event in summary_events])
             self.assertEqual([0, 0], [event["payload"]["summary_index"] for event in summary_events])
+            summary = progress["public_reasoning_summaries"][0]
+            self.assertEqual(
+                (1, 0, "正在核对公开配置。"),
+                (summary["summary_group"], summary["summary_index"], summary["text"]),
+            )
+            self.assertEqual(summary_events[0]["sequence"], summary["first_sequence"])
+            self.assertEqual(summary_events[-1]["sequence"], summary["last_sequence"])
 
     def test_progress_recorder_blocks_a_secret_split_across_reasoning_summary_deltas(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -610,14 +611,234 @@ class JobStoreTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
+            summaries = progress["public_reasoning_summaries"]
             self.assertEqual(
                 [
-                    {"summary_group": 1, "summary_index": 0, "text": "第一段前半后半。"},
-                    {"summary_group": 1, "summary_index": 1, "text": "第二段。"},
-                    {"summary_group": 2, "summary_index": 0, "text": "第三段。"},
+                    (1, 0, "第一段前半后半。"),
+                    (1, 1, "第二段。"),
+                    (2, 0, "第三段。"),
                 ],
-                progress["public_reasoning_summaries"],
+                [
+                    (item["summary_group"], item["summary_index"], item["text"])
+                    for item in summaries
+                ],
             )
+            events_by_key = {}
+            for event in read_events(Path(temp) / receipt["job_id"]):
+                if event["kind"] == "agent.reasoning.summary.delta":
+                    key = (
+                        event["payload"]["summary_group"],
+                        event["payload"]["summary_index"],
+                    )
+                    events_by_key.setdefault(key, []).append(event["sequence"])
+            for summary in summaries:
+                key = (summary["summary_group"], summary["summary_index"])
+                self.assertEqual(events_by_key[key][0], summary["first_sequence"])
+                self.assertEqual(events_by_key[key][-1], summary["last_sequence"])
+
+    def test_reasoning_nodes_beyond_live_cache_remain_in_full_conversation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(
+                receipt["job_id"],
+                allow_public_preview=True,
+                write_interval_seconds=0.05,
+            )
+
+            for group in range(1, 14):
+                recorder(
+                    {
+                        "phase": "thinking",
+                        "reasoning_summary_delta": {
+                            "summary_group": group,
+                            "summary_index": 0,
+                            "delta": f"公开摘要 {group}。",
+                        },
+                    }
+                )
+                recorder(
+                    {
+                        "phase": "waiting",
+                        "public_event": {
+                            "kind": "agent.tool.activity",
+                            "summary_zh": "智能体已完成执行命令。",
+                            "payload": {
+                                "item_type": "command_execution",
+                                "status": "completed",
+                                "tool_calls": group,
+                            },
+                        },
+                    }
+                )
+            recorder({"phase": "completed"})
+
+            job_dir = Path(temp) / receipt["job_id"]
+            progress = json.loads((job_dir / "progress.json").read_text(encoding="utf-8"))
+            process = read_conversation_process(job_dir)
+
+        self.assertEqual(12, len(progress["public_reasoning_summaries"]))
+        self.assertTrue(progress["public_reasoning_summaries_truncated"])
+        self.assertEqual(13, len(process["thought_nodes"]))
+        self.assertEqual(
+            [f"公开摘要 {group}。" for group in range(1, 14)],
+            [node["text"] for node in process["thought_nodes"]],
+        )
+        self.assertEqual(13, len(process["activity_segments"]))
+        self.assertEqual(
+            13,
+            sum(
+                activity["count"]
+                for segment in process["activity_segments"]
+                for activity in segment["activities"]
+                if activity["type"] == "command"
+            ),
+        )
+
+    def test_commentary_group_is_split_around_intervening_activity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(
+                receipt["job_id"],
+                allow_public_preview=True,
+                write_interval_seconds=0.05,
+            )
+            recorder(
+                {
+                    "phase": "thinking",
+                    "commentary_delta": {
+                        "commentary_group": 1,
+                        "delta": "命令前。",
+                    },
+                }
+            )
+            recorder(
+                {
+                    "phase": "waiting",
+                    "public_event": {
+                        "kind": "agent.tool.activity",
+                        "summary_zh": "智能体已完成执行命令。",
+                        "payload": {
+                            "item_type": "command_execution",
+                            "status": "completed",
+                            "tool_calls": 1,
+                        },
+                    },
+                }
+            )
+            recorder(
+                {
+                    "phase": "thinking",
+                    "commentary_delta": {
+                        "commentary_group": 1,
+                        "delta": "命令后。",
+                    },
+                }
+            )
+            recorder({"phase": "completed"})
+
+            process = read_conversation_process(Path(temp) / receipt["job_id"])
+
+        self.assertEqual(
+            ["命令前。", "命令后。"],
+            [node["text"] for node in process["thought_nodes"]],
+        )
+        self.assertEqual(1, len(process["activity_segments"]))
+        before, after = process["thought_nodes"]
+        activity = process["activity_segments"][0]
+        self.assertLess(before["last_sequence"], activity["first_sequence"])
+        self.assertLess(activity["last_sequence"], after["first_sequence"])
+
+    def test_commentary_completion_replaces_uninterrupted_draft(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(
+                receipt["job_id"], allow_public_preview=True
+            )
+            recorder(
+                {
+                    "phase": "thinking",
+                    "commentary_delta": {
+                        "commentary_group": 1,
+                        "delta": "旧草稿。",
+                    },
+                }
+            )
+            recorder(
+                {
+                    "phase": "thinking",
+                    "commentary_replace": {
+                        "commentary_group": 1,
+                        "content_replace": "已完成的新结论。",
+                    },
+                }
+            )
+            recorder({"phase": "completed"})
+
+            process = read_conversation_process(Path(temp) / receipt["job_id"])
+
+        self.assertEqual(
+            ["已完成的新结论。"],
+            [node["text"] for node in process["thought_nodes"]],
+        )
+
+    def test_commentary_completion_after_activity_becomes_new_part(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(
+                receipt["job_id"], allow_public_preview=True
+            )
+            recorder(
+                {
+                    "phase": "thinking",
+                    "commentary_delta": {
+                        "commentary_group": 1,
+                        "delta": "命令前草稿。",
+                    },
+                }
+            )
+            recorder(
+                {
+                    "phase": "waiting",
+                    "public_event": {
+                        "kind": "agent.tool.activity",
+                        "summary_zh": "智能体已完成执行命令。",
+                        "payload": {
+                            "item_type": "command_execution",
+                            "status": "completed",
+                            "tool_calls": 1,
+                        },
+                    },
+                }
+            )
+            recorder(
+                {
+                    "phase": "thinking",
+                    "commentary_replace": {
+                        "commentary_group": 1,
+                        "content_replace": "命令后形成的新结论。",
+                    },
+                }
+            )
+            recorder({"phase": "completed"})
+
+            process = read_conversation_process(Path(temp) / receipt["job_id"])
+
+        self.assertEqual(
+            ["命令前草稿。", "命令后形成的新结论。"],
+            [node["text"] for node in process["thought_nodes"]],
+        )
+        before, after = process["thought_nodes"]
+        activity = process["activity_segments"][0]
+        self.assertLess(before["last_sequence"], activity["first_sequence"])
+        self.assertLess(activity["last_sequence"], after["first_sequence"])
 
     def test_progress_recorder_propagates_explicit_reasoning_summary_truncation(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -651,6 +872,98 @@ class JobStoreTests(unittest.TestCase):
                 if item["kind"] == "agent.reasoning.summary.delta"
             )
             self.assertTrue(event["payload"]["truncated"])
+
+    def test_progress_recorder_freezes_completed_commentary_and_anchors_public_ranges(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = JobStore(Path(temp), spawner=lambda *_: None)
+            receipt = store.submit({"backend": "local-default", "task": {"goal": "g"}})
+            store.claim(receipt["job_id"])
+            recorder = store.progress_recorder(
+                receipt["job_id"], allow_public_preview=True
+            )
+
+            recorder(
+                {
+                    "phase": "thinking",
+                    "commentary_delta": {
+                        "commentary_group": 2,
+                        "delta": "正在执行公开检查。",
+                    },
+                    "reasoning_summary_delta": {
+                        "summary_group": 1,
+                        "summary_index": 0,
+                        "delta": "正在核对。",
+                    },
+                    "reasoning": "PRIVATE_RAW_REASONING_CANARY",
+                }
+            )
+            recorder(
+                {
+                    "phase": "thinking",
+                    "commentary_replace": {
+                        "commentary_group": 2,
+                        "content_replace": "公开检查已完成。",
+                    },
+                }
+            )
+            recorder(
+                {
+                    "phase": "thinking",
+                    "commentary_delta": {
+                        "commentary_group": 2,
+                        "delta": "不得追加。",
+                    },
+                }
+            )
+            for delta in ("sk", "-abcdefghijklmnop"):
+                recorder(
+                    {
+                        "phase": "thinking",
+                        "commentary_delta": {
+                            "commentary_group": 3,
+                            "delta": delta,
+                        },
+                    }
+                )
+            recorder({"phase": "completed"})
+
+            job_dir = Path(temp) / receipt["job_id"]
+            raw = (job_dir / "progress.json").read_text(encoding="utf-8")
+            progress = json.loads(raw)
+            commentary_events = [
+                event
+                for event in read_events(job_dir)
+                if event["kind"] in {
+                    "agent.commentary.delta",
+                    "agent.commentary.completed",
+                }
+            ]
+            self.assertEqual(
+                [
+                    {
+                        "commentary_group": 2,
+                        "text": "公开检查已完成。",
+                        "first_sequence": commentary_events[0]["sequence"],
+                        "last_sequence": commentary_events[1]["sequence"],
+                    }
+                ],
+                progress["public_commentary_segments"],
+            )
+            self.assertEqual(
+                ["agent.commentary.delta", "agent.commentary.completed"],
+                [event["kind"] for event in commentary_events],
+            )
+            summary = progress["public_reasoning_summaries"][0]
+            summary_event = next(
+                event
+                for event in read_events(job_dir)
+                if event["kind"] == "agent.reasoning.summary.delta"
+            )
+            self.assertEqual(summary_event["sequence"], summary["first_sequence"])
+            self.assertEqual(summary_event["sequence"], summary["last_sequence"])
+            self.assertNotIn("不得追加。", raw)
+            self.assertNotIn("PRIVATE_RAW_REASONING_CANARY", raw)
+            self.assertNotIn("sk-abcdefghijklmnop", raw)
 
     def test_progress_recorder_completed_reply_sets_preview_without_deltas(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -778,6 +1091,19 @@ class JobStoreTests(unittest.TestCase):
         }
 
         self.assertEqual(1920, JobStore._timeout_seconds(request))
+
+    def test_agent_job_monitor_deadline_uses_default_watchdog_budget(self):
+        request = {
+            "provider": "qwen-main-v1",
+            "task": {"goal": "g"},
+            "execution": {
+                "mode": "agent",
+                "runner": "data_factory",
+                "workspace": "C:/work",
+            },
+        }
+
+        self.assertEqual(1020, JobStore._timeout_seconds(request))
 
     def test_mutable_agent_workspace_is_not_cached_without_an_explicit_cache_key(self):
         with tempfile.TemporaryDirectory() as temp:

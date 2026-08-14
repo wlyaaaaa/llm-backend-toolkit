@@ -377,6 +377,52 @@ class ObserverStoreTests(unittest.TestCase):
             self.assertEqual(617, event["payload"]["duration_ms"])
             self.assertNotIn("PRIVATE_COMMAND", json.dumps(event, ensure_ascii=False))
 
+    def test_web_search_activity_preserves_only_verified_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = JobStore(root, spawner=lambda *_: None)
+            job_id = store.submit(request(), force=True)["job_id"]
+            store.claim(job_id)
+            recorder = store.progress_recorder(job_id, allow_public_preview=True)
+            recorder(
+                {
+                    "phase": "waiting",
+                    "public_event": {
+                        "kind": "agent.tool.activity",
+                        "summary_zh": "智能体已完成查询公开资料。",
+                        "payload": {
+                            "status": "completed",
+                            "item_type": "web_search",
+                            "tool_name": "public_web_search",
+                            "search_provider": "bing-rss-v1",
+                            "tool_calls": 2,
+                            "query": "PRIVATE_SEARCH_QUERY",
+                            "result": "PRIVATE_SEARCH_RESULT",
+                        },
+                    },
+                }
+            )
+
+            event = next(
+                item
+                for item in ObserverStore(root).get_run(job_id)["events"]
+                if item["kind"] == "agent.tool.activity"
+            )
+
+            self.assertEqual(
+                {
+                    "status": "completed",
+                    "item_type": "web_search",
+                    "tool_name": "public_web_search",
+                    "search_provider": "bing-rss-v1",
+                    "tool_calls": 2,
+                },
+                event["payload"],
+            )
+            serialized = json.dumps(event, ensure_ascii=False)
+            self.assertNotIn("PRIVATE_SEARCH_QUERY", serialized)
+            self.assertNotIn("PRIVATE_SEARCH_RESULT", serialized)
+
     def test_run_detail_retains_public_reasoning_summary_and_paged_deltas(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -404,15 +450,18 @@ class ObserverStoreTests(unittest.TestCase):
 
             detail = ObserverStore(root).get_run(job_id)
 
+            summary = detail["progress"]["public_reasoning_summaries"][0]
             self.assertEqual(
-                [
-                    {
-                        "summary_group": 1,
-                        "summary_index": 0,
-                        "text": "正在核对公开配置。",
-                    }
-                ],
-                detail["progress"]["public_reasoning_summaries"],
+                (1, 0, "正在核对公开配置。"),
+                (
+                    summary["summary_group"],
+                    summary["summary_index"],
+                    summary["text"],
+                ),
+            )
+            self.assertNotIn(
+                "agent.reasoning.summary.delta",
+                [event["kind"] for event in detail["events"]],
             )
             summary_event = next(
                 event
@@ -429,9 +478,72 @@ class ObserverStoreTests(unittest.TestCase):
                 },
                 summary_event["payload"],
             )
+            self.assertEqual(summary_event["sequence"], summary["first_sequence"])
+            self.assertEqual(summary_event["sequence"], summary["last_sequence"])
             self.assertNotIn(
                 "PRIVATE_RAW_REASONING_CANARY",
                 json.dumps({"detail": detail, "event": summary_event}, ensure_ascii=False),
+            )
+
+    def test_run_detail_projects_completed_commentary_with_durable_anchors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = JobStore(root, spawner=lambda *_: None)
+            job_id = store.submit(request(), force=True)["job_id"]
+            store.claim(job_id)
+            recorder = store.progress_recorder(job_id, allow_public_preview=True)
+            recorder(
+                {
+                    "phase": "thinking",
+                    "commentary_delta": {
+                        "commentary_group": 4,
+                        "delta": "正在执行公开检查。",
+                    },
+                    "item_id": "PRIVATE_ITEM_ID_CANARY",
+                }
+            )
+            recorder(
+                {
+                    "phase": "thinking",
+                    "commentary_replace": {
+                        "commentary_group": 4,
+                        "content_replace": "公开检查已完成。",
+                    },
+                }
+            )
+            recorder({"phase": "completed"})
+            store.complete(job_id, {"status": "ok", "output": "完成。"})
+
+            observer = ObserverStore(root)
+            detail = observer.get_run(job_id)
+            segment = detail["progress"]["public_commentary_segments"][0]
+            page = observer.get_event_page(job_id, limit=20)
+            commentary_events = [
+                event
+                for event in page["events"]
+                if event["kind"] in {
+                    "agent.commentary.delta",
+                    "agent.commentary.completed",
+                }
+            ]
+
+            self.assertEqual(4, segment["commentary_group"])
+            self.assertEqual("公开检查已完成。", segment["text"])
+            self.assertEqual(
+                commentary_events[0]["sequence"], segment["first_sequence"]
+            )
+            self.assertEqual(
+                commentary_events[-1]["sequence"], segment["last_sequence"]
+            )
+            self.assertNotIn(
+                "agent.commentary.delta", [event["kind"] for event in detail["events"]]
+            )
+            self.assertNotIn(
+                "agent.commentary.completed", [event["kind"] for event in detail["events"]]
+            )
+            self.assertNotIn(
+                "PRIVATE_ITEM_ID_CANARY",
+                json.dumps({"detail": detail, "page": page}, ensure_ascii=False),
             )
 
     def test_active_elapsed_advances_past_stale_runner_metric(self) -> None:
@@ -770,6 +882,14 @@ class ObserverStoreTests(unittest.TestCase):
                             "events_seen": 5,
                             "raw_log": private_canary,
                         },
+                        "web_search": {
+                            "enabled": True,
+                            "provider": "bing-rss-v1",
+                            "searches": 2,
+                            "event_evidence": "runtime-lifecycle",
+                            "query": private_canary,
+                            "result": private_canary,
+                        },
                     },
                 },
             )
@@ -797,6 +917,15 @@ class ObserverStoreTests(unittest.TestCase):
             self.assertIn("completion_tokens", projected)
             self.assertNotIn("raw_log", projected)
             self.assertIn("修复缓存身份回执", projected)
+            self.assertEqual(
+                {
+                    "enabled": True,
+                    "provider": "bing-rss-v1",
+                    "searches": 2,
+                    "event_evidence": "runtime-lifecycle",
+                },
+                observer.get_run(job_id)["result"]["execution_receipt"]["web_search"],
+            )
 
     def test_run_detail_adds_local_absolute_paths_without_persisting_them(self) -> None:
         with (
@@ -1144,6 +1273,160 @@ class ObserverStoreTests(unittest.TestCase):
             self.assertEqual(281, older["events"][0]["sequence"])
             self.assertEqual(440, older["events"][-1]["sequence"])
             self.assertEqual(600, older["event_page"]["latest_sequence"])
+
+    def test_conversation_process_projects_all_semantic_activity_beyond_event_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = JobStore(root, spawner=lambda *_: None)
+            job_id = store.submit(request(), force=True)["job_id"]
+            job_dir = root / job_id
+            progress_path = job_dir / "progress.json"
+            progress: dict[str, object] = {}
+            progress["public_reasoning_summaries"] = [
+                {
+                    "summary_group": index,
+                    "summary_index": 0,
+                    "text": f"公开思路 {index}",
+                    "first_sequence": sequence,
+                    "last_sequence": sequence,
+                }
+                for index, sequence in enumerate((10, 200, 400), start=1)
+            ]
+            progress_path.write_text(
+                json.dumps(progress, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            special: dict[int, tuple[str, dict[str, object]]] = {
+                20: (
+                    "agent.tool.activity",
+                    {
+                        "item_type": "command_execution",
+                        "tool_calls": 1,
+                        "command_status": "in_progress",
+                        "command": "PRIVATE_COMMAND",
+                    },
+                ),
+                21: (
+                    "agent.tool.activity",
+                    {
+                        "item_type": "command_execution",
+                        "tool_calls": 1,
+                        "command_status": "succeeded",
+                        "command": "PRIVATE_COMMAND",
+                    },
+                ),
+                250: (
+                    "agent.tool.activity",
+                    {
+                        "item_type": "web_search",
+                        "tool_name": "public_web_search",
+                        "search_provider": "bing-rss-v1",
+                        "tool_calls": 2,
+                        "status": "started",
+                        "query": "PRIVATE_QUERY",
+                    },
+                ),
+                251: (
+                    "agent.tool.activity",
+                    {
+                        "item_type": "web_search",
+                        "tool_name": "public_web_search",
+                        "search_provider": "bing-rss-v1",
+                        "tool_calls": 2,
+                        "status": "completed",
+                        "result": "PRIVATE_RESULT",
+                    },
+                ),
+                450: (
+                    "agent.tool.activity",
+                    {
+                        "item_type": "command_execution",
+                        "tool_calls": 3,
+                        "command_status": "succeeded",
+                    },
+                ),
+                600: (
+                    "workspace.change.observed",
+                    {
+                        "changed_files": 3,
+                        "scan_status": "scoped_complete",
+                        "provenance": "workspace_before_after",
+                        "attribution": "unverified_concurrent_window",
+                        "detail_policy": "caller_public_safe_include",
+                        "changes": [
+                            {
+                                "relative_path": f"notes/file-{index}.md",
+                                "change_kind": "added",
+                                "lines_added": 1,
+                                "lines_deleted": 0,
+                                "diff_status": "metadata_only",
+                            }
+                            for index in range(1, 4)
+                        ],
+                    },
+                ),
+                650: ("run.completed", {"result_status": "ok"}),
+            }
+            encoded = []
+            for sequence in range(1, 651):
+                kind, payload = special.get(
+                    sequence,
+                    ("reasoning.activity", {"phase": "thinking"}),
+                )
+                encoded.append(
+                    json.dumps(
+                        {
+                            "schema": EVENT_SCHEMA,
+                            "job_id": job_id,
+                            "event_id": f"{job_id}:{sequence}",
+                            "sequence": sequence,
+                            "occurred_utc": "2026-08-13T12:00:00Z",
+                            "kind": kind,
+                            "visibility": "public",
+                            "summary_zh": f"公开事件 {sequence}",
+                            "payload": payload,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            (job_dir / "events.jsonl").write_text(
+                "\n".join(encoded) + "\n",
+                encoding="utf-8",
+            )
+
+            detail = ObserverStore(root).get_run(job_id)
+            process = detail["conversation_process"]
+            activity_types = [
+                activity
+                for segment in process["activity_segments"]
+                for activity in segment["activities"]
+            ]
+
+            self.assertEqual(160, len(detail["events"]))
+            self.assertGreater(detail["events"][0]["sequence"], 251)
+            self.assertEqual(
+                ["command", "web_search", "command"],
+                [activity["type"] for activity in activity_types],
+            )
+            self.assertEqual([1, 1, 1], [activity["count"] for activity in activity_types])
+            self.assertEqual(
+                [20, 250, 450],
+                [segment["first_sequence"] for segment in process["activity_segments"]],
+            )
+            self.assertEqual(
+                3,
+                process["activity_segments"][-1]["workspace_changed_files"],
+            )
+            self.assertEqual(
+                ["run.completed"],
+                [event["kind"] for event in process["events"]],
+            )
+            serialized = json.dumps(process, ensure_ascii=False)
+            self.assertNotIn("PRIVATE_COMMAND", serialized)
+            self.assertNotIn("PRIVATE_QUERY", serialized)
+            self.assertNotIn("PRIVATE_RESULT", serialized)
+            self.assertFalse(process["truncated"])
 
     def test_runtime_identity_isolated_for_sibling_state_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -15,6 +15,7 @@ from typing import Any
 
 from .errors import ToolError, classify_agent_process_error
 from .public_progress import (
+    PUBLIC_COMMENTARY_DELTA_MAX_CHARS,
     PUBLIC_REASONING_SUMMARY_DELTA_MAX_CHARS,
     bounded_public_draft,
     bounded_public_text,
@@ -23,6 +24,24 @@ from .public_progress import (
 
 PUBLIC_PROGRESS_MAX_CHARS = 500
 PUBLIC_DRAFT_MAX_CHARS = 20_000
+
+_AICLI_NATIVE_ARGS_SENTINEL = "__LLM_TOOLKIT_AICLI_NATIVE_ARGS__"
+_POWERSHELL_AICLI_ENTRY_BRIDGE = r"""
+if ($args.Count -lt 1) { exit 2 }
+$entry = [string] $args[0]
+$tokens = [System.Collections.Generic.List[string]]::new()
+for ($index = 1; $index -lt $args.Count; $index++) {
+    $token = [string] $args[$index]
+    if ($token -ceq '__LLM_TOOLKIT_AICLI_NATIVE_ARGS__') {
+        [void] $tokens.Add('--')
+    } else {
+        [void] $tokens.Add($token)
+    }
+}
+$invokeArgs = $tokens.ToArray()
+& $entry @invokeArgs
+exit $LASTEXITCODE
+""".strip()
 
 _AUDITED_AICLI_VERSION = "0.3.3"
 _AUDITED_AICLI_SOURCE_BUNDLE_SHA256 = (
@@ -79,6 +98,7 @@ class AgentResponse:
     budget_mode: str = ""
     runtime_identity: dict[str, Any] = field(default_factory=dict)
     aicli_preflight: dict[str, Any] = field(default_factory=dict)
+    web_search: dict[str, Any] = field(default_factory=dict)
 
 
 class AgentRunnerError(Exception):
@@ -352,6 +372,28 @@ def _safe_aicli_usage(value: Any) -> dict[str, int]:
     return usage
 
 
+def _safe_aicli_web_search(value: Any) -> dict[str, Any]:
+    """Project the AICLI web-search receipt without query or result bodies."""
+    if not isinstance(value, dict) or type(value.get("enabled")) is not bool:
+        return {}
+    if value["enabled"] is False:
+        return {"enabled": False}
+    searches = value.get("searches")
+    if (
+        value.get("provider") != "bing-rss-v1"
+        or type(searches) is not int
+        or not 0 <= searches <= 10_000
+        or value.get("eventEvidence") != "runtime-lifecycle"
+    ):
+        return {}
+    return {
+        "enabled": True,
+        "provider": "bing-rss-v1",
+        "searches": searches,
+        "event_evidence": "runtime-lifecycle",
+    }
+
+
 def _extract_text(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -553,7 +595,18 @@ class AiCliProfileRunner:
         pwsh = shutil.which("pwsh")
         if not pwsh:
             raise _runner_error("agent_runner_unavailable", "PowerShell 7 is unavailable.")
-        return [pwsh, "-NoProfile", "-File", str(entry)]
+        # PowerShell consumes a literal ``--`` placed after ``-File`` or
+        # ``-Command`` before the target script can inspect ``$args``.  AICLI
+        # uses that delimiter to separate its own flags from native Codex
+        # arguments.  Pass a private sentinel through the process boundary and
+        # restore exactly one delimiter inside the child PowerShell process.
+        return [
+            pwsh,
+            "-NoProfile",
+            "-CommandWithArgs",
+            _POWERSHELL_AICLI_ENTRY_BRIDGE,
+            str(entry),
+        ]
 
     @staticmethod
     def _benchmark_source_receipt(entry: Path) -> dict[str, Any]:
@@ -984,6 +1037,8 @@ class AiCliProfileRunner:
         command_status = None
         safe_exit_code = None
         safe_duration_ms = None
+        safe_tool_name = None
+        safe_search_provider = None
         if kind == "tool.activity" and item_type == "command_execution":
             raw_command_status = event.get("command_status")
             if raw_command_status is not None:
@@ -1006,12 +1061,29 @@ class AiCliProfileRunner:
                 and 0 <= raw_duration_ms <= (2**63) - 1
             ):
                 safe_duration_ms = raw_duration_ms
+        if kind == "tool.activity" and item_type == "web_search":
+            if event.get("tool_name") == "public_web_search":
+                safe_tool_name = "public_web_search"
+            if event.get("search_provider") == "bing-rss-v1":
+                safe_search_provider = "bing-rss-v1"
         public_text = ""
         public_draft = ""
         public_draft_truncated = False
         public_text_truncated = False
+        commentary_group = None
         summary_group = None
         summary_index = None
+        if kind in {"commentary.delta", "commentary.completed"}:
+            # AICLI explicitly marks commentary as public.  Do not accept
+            # generic item/message fields: they can include private content.
+            raw_commentary_group = event.get("commentary_group")
+            if (
+                type(raw_commentary_group) is not int
+                or not 1 <= raw_commentary_group <= 1_000_000
+            ):
+                return
+            commentary_group = raw_commentary_group
+            public_text_truncated = event.get("public_text_truncated") is True
         if kind == "reasoning.summary.delta":
             # AICLI deliberately labels this field public.  Do not accept a
             # generic reasoning field as a fallback: it may contain hidden
@@ -1032,14 +1104,20 @@ class AiCliProfileRunner:
         if kind in {
             "output.delta",
             "output.completed",
+            "commentary.delta",
+            "commentary.completed",
             "reasoning.summary.delta",
         }:
             public_draft, public_draft_truncated = _bounded_public_draft(
                 event.get("public_text"),
                 max_chars=(
-                    PUBLIC_REASONING_SUMMARY_DELTA_MAX_CHARS
-                    if kind == "reasoning.summary.delta"
-                    else PUBLIC_DRAFT_MAX_CHARS
+                    PUBLIC_COMMENTARY_DELTA_MAX_CHARS
+                    if kind in {"commentary.delta", "commentary.completed"}
+                    else (
+                        PUBLIC_REASONING_SUMMARY_DELTA_MAX_CHARS
+                        if kind == "reasoning.summary.delta"
+                        else PUBLIC_DRAFT_MAX_CHARS
+                    )
                 ),
             )
             public_text = _bounded_public_text(public_draft)
@@ -1051,6 +1129,12 @@ class AiCliProfileRunner:
             summary = (
                 "智能体正在进行内部分析；只展示活动状态，不展示隐藏思维正文。"
             )
+        elif kind == "commentary.delta":
+            phase = "thinking"
+            summary = "公开执行说明正在更新。"
+        elif kind == "commentary.completed":
+            phase = "thinking"
+            summary = "公开执行说明已完成。"
         elif kind == "reasoning.summary.delta":
             phase = "thinking"
             summary = "公开工作思路正在更新。"
@@ -1131,6 +1215,12 @@ class AiCliProfileRunner:
             allowed_payload["exit_code"] = safe_exit_code
         if safe_duration_ms is not None:
             allowed_payload["duration_ms"] = safe_duration_ms
+        if safe_tool_name is not None:
+            allowed_payload["tool_name"] = safe_tool_name
+        if safe_search_provider is not None:
+            allowed_payload["search_provider"] = safe_search_provider
+        if commentary_group is not None:
+            allowed_payload["commentary_group"] = commentary_group
         if summary_group is not None:
             allowed_payload["summary_group"] = summary_group
         if summary_index is not None:
@@ -1147,6 +1237,18 @@ class AiCliProfileRunner:
             progress["content_delta"] = public_draft
         elif kind == "output.completed":
             progress["content_replace"] = public_draft
+        elif kind == "commentary.delta":
+            progress["commentary_delta"] = {
+                "commentary_group": commentary_group,
+                "delta": public_draft,
+                "truncated": public_text_truncated or public_draft_truncated,
+            }
+        elif kind == "commentary.completed":
+            progress["commentary_replace"] = {
+                "commentary_group": commentary_group,
+                "content_replace": public_draft,
+                "truncated": public_text_truncated or public_draft_truncated,
+            }
         elif kind == "reasoning.summary.delta":
             progress["reasoning_summary_delta"] = {
                 "summary_group": summary_group,
@@ -1154,9 +1256,12 @@ class AiCliProfileRunner:
                 "delta": public_draft,
                 "truncated": public_text_truncated or public_draft_truncated,
             }
-        if (
-            kind == "reasoning.summary.delta"
-            and (public_text_truncated or public_draft_truncated)
+        if kind in {"commentary.delta", "commentary.completed"} and (
+            public_text_truncated or public_draft_truncated
+        ):
+            progress["public_commentary_truncated"] = True
+        elif kind == "reasoning.summary.delta" and (
+            public_text_truncated or public_draft_truncated
         ):
             progress["public_reasoning_summaries_truncated"] = True
         elif public_draft_truncated:
@@ -1182,7 +1287,7 @@ class AiCliProfileRunner:
                 budget.get(name) is not None
                 for name in ("timeout_seconds", "max_steps", "max_tool_calls")
             )
-            limit_mode = "bounded" if has_legacy_cutoff else "completion_driven"
+            limit_mode = "bounded" if has_legacy_cutoff else "watchdog_only"
         else:
             limit_mode = str(requested_limit_mode)
         if limit_mode not in {"completion_driven", "bounded", "watchdog_only"}:
@@ -1203,13 +1308,22 @@ class AiCliProfileRunner:
                 "invalid_request",
                 "Agent idle_timeout_seconds must be 0 or between 60 and 604800.",
             )
+        if limit_mode == "completion_driven":
+            raise _runner_error(
+                "agent_runner_incompatible",
+                (
+                    "The selected AICLI runtime does not expose the legacy "
+                    "completion-driven idle-lease contract; use watchdog_only "
+                    "or bounded explicitly."
+                ),
+            )
         model = str(execution.get("model") or "qwen-main-v1")
         profile = str(execution.get("profile") or self.default_profile)
         native_images = [str(path) for path in execution.get("native_images") or []]
         if self.engine == "codex":
             native = [
                 "exec", "--json", "--ephemeral", "--dangerously-bypass-approvals-and-sandbox",
-                "--skip-git-repo-check", "--disable", "plugins", "--model", model,
+                "--skip-git-repo-check", "--disable", "plugins",
             ]
             for path in native_images:
                 native.extend(["--image", path])
@@ -1281,10 +1395,8 @@ class AiCliProfileRunner:
             "--max-output-chars", "1000000",
         ]
         watchdog_only = limit_mode == "watchdog_only"
-        completion_driven = limit_mode == "completion_driven"
-        if completion_driven:
-            command.extend(["--idle-timeout-seconds", str(idle_timeout_seconds)])
-        elif watchdog_only:
+        completion_driven = False
+        if watchdog_only:
             command.extend(
                 ["--timeout-seconds", str(budget["timeout_seconds"]), "--watchdog-only"]
             )
@@ -1308,7 +1420,7 @@ class AiCliProfileRunner:
             event_path = Path(event_temp.name) / "events.jsonl"
             event_path.touch()
             command.extend(["--event-file", str(event_path)])
-        command.extend(["--", *native])
+        command.extend([_AICLI_NATIVE_ARGS_SENTINEL, *native])
         try:
             code, stdout, stderr, duration_ms = _bounded_process(
                 command,
@@ -1402,6 +1514,7 @@ class AiCliProfileRunner:
         child_stdout = str(run.get("stdout") or "")
         child_values = _json_values(child_stdout)
         usage = _safe_aicli_usage(run.get("usage"))
+        web_search = _safe_aicli_web_search(run.get("webSearch"))
         limit_enforcement = dict(run.get("limitEnforcement") or {})
         budget_mode = str(run.get("budgetMode") or "")
         limit_usage = dict(run.get("limitUsage") or {})
@@ -1497,6 +1610,8 @@ class AiCliProfileRunner:
                 else "lifecycle"
             ),
         }
+        if web_search:
+            receipt["web_search"] = web_search
         if execution.get("require_network_proof") is True:
             network_proof, network_failures = self._runtime_network_proof(
                 preflight=aicli_preflight,
@@ -1648,6 +1763,7 @@ class AiCliProfileRunner:
             budget_mode=budget_mode,
             runtime_identity=runtime_identity,
             aicli_preflight=aicli_preflight,
+            web_search=web_search,
         )
 
 

@@ -314,18 +314,46 @@ button:focus-visible,
 .turn-index { color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
 .turn-time { color: var(--quiet); font-size: 10px; font-variant-numeric: tabular-nums; }
 
-.reasoning-summary { margin: 0 0 16px 30px; }
-.assistant-message + .reasoning-summary { margin-top: 14px; }
-.reasoning-summary-heading { display: inline-flex; align-items: center; gap: 8px; min-height: 24px; color: var(--muted); cursor: pointer; font-size: 10px; list-style: none; }
-.reasoning-summary-heading::-webkit-details-marker { display: none; }
-.reasoning-summary-heading::before { content: "⌄"; color: var(--quiet); transition: transform 140ms ease; }
-.reasoning-summary:not([open]) .reasoning-summary-heading::before { transform: rotate(-90deg); }
-.reasoning-summary-heading strong { color: var(--ink-2); font-size: 11px; font-weight: 650; }
-.reasoning-summary-state { color: var(--muted); }
-.reasoning-summary[data-live="true"][open] .reasoning-summary-state::before { content: ""; display: inline-block; width: 5px; height: 5px; margin: 0 5px 1px 0; border-radius: 50%; background: var(--green); animation: pulse 1.4s ease-in-out infinite; }
-.reasoning-summary-body { display: grid; gap: 10px; margin: 6px 0 2px; padding-left: 14px; border-left: 1px solid var(--line-strong); }
-.reasoning-summary-text { color: var(--ink-2); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
-.reasoning-summary-limit { color: var(--warning); font-size: 9px; }
+.work-thought { margin: 8px 0 16px 30px; }
+.work-thought-heading { display: inline-flex; align-items: center; gap: 8px; min-height: 24px; color: var(--muted); cursor: pointer; font-size: 10px; list-style: none; }
+.work-thought-heading::-webkit-details-marker { display: none; }
+.work-thought-heading::before { content: "⌄"; color: var(--quiet); transition: transform 140ms ease; }
+.work-thought:not([open]) .work-thought-heading::before { transform: rotate(-90deg); }
+.work-thought-heading strong { color: var(--ink-2); font-size: 11px; font-weight: 650; }
+.work-thought-source { color: var(--muted); font-size: 9px; }
+.work-thought[data-live="true"][open] .work-thought-source::before { content: ""; display: inline-block; width: 5px; height: 5px; margin: 0 5px 1px 0; border-radius: 50%; background: var(--green); animation: pulse 1.4s ease-in-out infinite; }
+.work-thought-body { margin: 6px 0 2px; padding-left: 14px; border-left: 1px solid var(--line-strong); }
+.work-thought-text { color: var(--ink-2); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.work-thought-limit { margin-top: 6px; color: var(--warning); font-size: 9px; }
+.process-pagination { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 14px; }
+
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body > :last-child { margin-bottom: 0; }
+.markdown-body p { margin: 0 0 9px; white-space: pre-wrap; }
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 { margin: 14px 0 7px; color: var(--ink); line-height: 1.35; }
+.markdown-body h1 { font-size: 19px; }
+.markdown-body h2 { font-size: 17px; }
+.markdown-body h3 { font-size: 15px; }
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 { font-size: 13px; }
+.markdown-body ul,
+.markdown-body ol { margin: 6px 0 10px; padding-left: 22px; }
+.markdown-body li + li { margin-top: 3px; }
+.markdown-body blockquote { margin: 8px 0; padding: 2px 0 2px 12px; border-left: 3px solid var(--green-line); color: var(--muted); }
+.markdown-body code { padding: 1px 4px; border-radius: 4px; background: var(--surface-3); font-family: "Cascadia Code", Consolas, monospace; font-size: .92em; }
+.markdown-body pre { margin: 9px 0; overflow: auto; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: #f7faf8; }
+.markdown-body pre code { padding: 0; background: transparent; white-space: pre; }
+.markdown-body a { color: var(--green-deep); text-decoration: underline; text-underline-offset: 2px; }
+.markdown-table { display: block; max-width: 100%; margin: 9px 0; overflow-x: auto; border-collapse: collapse; font-size: 11px; }
+.markdown-table th,
+.markdown-table td { padding: 6px 8px; border: 1px solid var(--line-strong); text-align: left; vertical-align: top; }
+.markdown-table th { background: var(--surface-3); color: var(--ink-2); font-weight: 650; }
 
 .work-log { margin: 8px 0 18px; border-top: 1px solid var(--line); }
 .work-log-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; min-height: 44px; overflow: hidden; color: var(--muted); cursor: pointer; font-size: 11px; list-style: none; }

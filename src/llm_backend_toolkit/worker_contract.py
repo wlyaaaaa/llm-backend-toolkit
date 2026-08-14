@@ -707,7 +707,7 @@ class LocalAsyncWorker:
                 budget.get(name) is not None
                 for name in ("timeout_seconds", "max_steps", "max_tool_calls")
             )
-            limit_mode = "bounded" if has_legacy_cutoff else "completion_driven"
+            limit_mode = "bounded" if has_legacy_cutoff else "watchdog_only"
         else:
             limit_mode = str(requested_limit_mode)
         if limit_mode not in {"completion_driven", "bounded", "watchdog_only"}:

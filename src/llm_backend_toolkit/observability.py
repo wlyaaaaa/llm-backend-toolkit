@@ -8,13 +8,15 @@ import os
 import re
 import threading
 import time
+from bisect import bisect_right
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Collection, Iterator
 
 from .public_progress import (
+    PUBLIC_COMMENTARY_DELTA_MAX_CHARS,
     PUBLIC_REASONING_SUMMARY_DELTA_MAX_CHARS,
     bounded_public_draft,
     has_potential_secret_suffix,
@@ -79,6 +81,37 @@ _WORKSPACE_CHANGE_KINDS = frozenset(
 )
 _WORKSPACE_DIFF_STATUSES = frozenset(
     {"available", "truncated", "metadata_only"}
+)
+_CONVERSATION_PROCESS_EVENT_KINDS = frozenset(
+    {
+        "context.compaction.completed",
+        "agent.context.compaction.completed",
+        "run.completed",
+        "run.failed",
+        "run.cancelled",
+        "handoff.collected",
+        "agent.limit.hit",
+        "limit.hit",
+    }
+)
+_ACTIVITY_TYPE_ORDER = (
+    "command",
+    "file_change",
+    "web_search",
+    "web",
+    "mcp",
+    "computer",
+    "file",
+    "tool",
+)
+_ACTIVITY_COMPLETED_STATUSES = frozenset(
+    {"completed", "succeeded", "success", "ok"}
+)
+_ACTIVITY_FAILED_STATUSES = frozenset(
+    {"failed", "declined", "cancelled", "canceled", "error", "rejected"}
+)
+_ACTIVITY_ACTIVE_STATUSES = frozenset(
+    {"started", "running", "in_progress", "queued", "pending"}
 )
 
 
@@ -406,6 +439,48 @@ def _public_payload(kind: str, payload: Any) -> dict[str, Any]:
             ),
             bool_fields=frozenset({"applied", "lossy"}),
         )
+    if kind == "agent.commentary.completed":
+        content_replace, _ = bounded_public_draft(
+            payload.get("content_replace"),
+            max_chars=PUBLIC_COMMENTARY_DELTA_MAX_CHARS,
+        )
+        if not content_replace or has_potential_secret_suffix(content_replace):
+            return {}
+        commentary_group = payload.get("commentary_group")
+        if (
+            type(commentary_group) is not int
+            or not 1 <= commentary_group <= 1_000_000
+        ):
+            return {}
+        projected = {
+            "commentary_group": commentary_group,
+            "content_replace": content_replace,
+        }
+        if payload.get("truncated") is True:
+            projected["truncated"] = True
+        return projected
+    if kind == "agent.commentary.delta":
+        # Commentary is independently public and separately accumulated. Do
+        # not let generic agent projection retain raw message/item fields.
+        delta, _ = bounded_public_draft(
+            payload.get("delta"),
+            max_chars=PUBLIC_COMMENTARY_DELTA_MAX_CHARS,
+        )
+        if not delta or has_potential_secret_suffix(delta):
+            return {}
+        commentary_group = payload.get("commentary_group")
+        if (
+            type(commentary_group) is not int
+            or not 1 <= commentary_group <= 1_000_000
+        ):
+            return {}
+        projected = {
+            "commentary_group": commentary_group,
+            "delta": delta,
+        }
+        if payload.get("truncated") is True:
+            projected["truncated"] = True
+        return projected
     if kind == "agent.reasoning.summary.delta":
         # This event is intentionally narrower than generic agent activity:
         # only the explicitly public incremental summary is available to a
@@ -433,6 +508,20 @@ def _public_payload(kind: str, payload: Any) -> dict[str, Any]:
         }
         if payload.get("truncated") is True:
             projected["truncated"] = True
+        return projected
+    if kind == "agent.tool.activity":
+        projected = _project_flat_payload(
+            payload,
+            text_fields=frozenset({"status", "item_type", "command_status"}),
+            number_fields=frozenset(
+                {"steps", "tool_calls", "events_seen", "exit_code", "duration_ms"}
+            ),
+        )
+        if payload.get("item_type") == "web_search":
+            if payload.get("tool_name") == "public_web_search":
+                projected["tool_name"] = "public_web_search"
+            if payload.get("search_provider") == "bing-rss-v1":
+                projected["search_provider"] = "bing-rss-v1"
         return projected
     if kind.startswith("agent."):
         return _project_flat_payload(
@@ -498,6 +587,7 @@ def read_events(
     after_sequence: int = 0,
     limit: int = 500,
     before_sequence: int | None = None,
+    exclude_kinds: Collection[str] = (),
 ) -> list[dict[str, Any]]:
     path = Path(job_dir) / "events.jsonl"
     if not path.is_file():
@@ -532,6 +622,8 @@ def read_events(
                 continue
             public_event = dict(event)
             kind = str(public_event.get("kind") or "")
+            if kind in exclude_kinds:
+                continue
             public_event["summary_zh"] = str(
                 public_event.get("summary_zh") or ""
             )[:500]
@@ -541,6 +633,416 @@ def read_events(
             )
             events.append(public_event)
     return list(events)
+
+
+def _conversation_activity_type(payload: dict[str, Any]) -> str | None:
+    raw = str(payload.get("item_type") or "").strip().lower()
+    if not raw:
+        return None
+    if "command" in raw or "shell" in raw or "exec" in raw:
+        return "command"
+    if "web_search" in raw or raw == "search":
+        if (
+            payload.get("tool_name") == "public_web_search"
+            and payload.get("search_provider") == "bing-rss-v1"
+        ):
+            return "web_search"
+        return "web"
+    if "mcp" in raw:
+        return "mcp"
+    if "computer" in raw:
+        return "computer"
+    if "file_change" in raw or "edit" in raw or "patch" in raw:
+        return "file_change"
+    if "web" in raw or "browser" in raw:
+        return "web"
+    if "file" in raw:
+        return "file"
+    return "tool"
+
+
+def _conversation_activity_state(payload: dict[str, Any]) -> str:
+    status = str(
+        payload.get("command_status") or payload.get("status") or ""
+    ).strip().lower()
+    if status in _ACTIVITY_COMPLETED_STATUSES:
+        return "completed"
+    if status in _ACTIVITY_FAILED_STATUSES:
+        return "failed"
+    if status in _ACTIVITY_ACTIVE_STATUSES:
+        return "active"
+    return "recorded"
+
+
+def read_conversation_process(
+    job_dir: Path,
+    *,
+    thought_sequences: Collection[int] = (),
+) -> dict[str, Any]:
+    """Project the complete public conversation semantics without a raw-event cap.
+
+    Raw event pagination remains intentionally bounded.  This projection instead
+    scans the durable stream once, coalesces tool start/finish pairs, and groups
+    the resulting counts between public thought anchors.  Its output size is
+    bounded by the number of public thought nodes rather than by raw callbacks.
+    """
+
+    anchors = sorted(
+        {
+            value
+            for value in thought_sequences
+            if type(value) is int and value > 0
+        }
+    )
+    path = Path(job_dir) / "events.jsonl"
+    empty = {
+        "schema": "llm-backend-toolkit.observer-conversation-process.v1",
+        "thought_nodes": [],
+        "activity_segments": [],
+        "events": [],
+        "truncated": False,
+    }
+    if not path.is_file():
+        return empty
+
+    thought_nodes_by_key: dict[str, dict[str, Any]] = {}
+    thought_node_keys_by_base: dict[str, list[str]] = {}
+    blocked_thought_keys: set[str] = set()
+    activity_epoch = 0
+    try:
+        thought_stream = path.open("r", encoding="utf-8")
+    except (OSError, UnicodeError):
+        return empty
+    with thought_stream:
+        for line in thought_stream:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (
+                not isinstance(event, dict)
+                or event.get("schema") != EVENT_SCHEMA
+                or event.get("visibility") != "public"
+            ):
+                continue
+            try:
+                sequence = int(event.get("sequence") or 0)
+            except (TypeError, ValueError):
+                continue
+            if sequence <= 0:
+                continue
+            kind = str(event.get("kind") or "")
+            if kind in {
+                "agent.tool.activity",
+                "workspace.change.observed",
+                *_CONVERSATION_PROCESS_EVENT_KINDS,
+            }:
+                activity_epoch += 1
+                continue
+            if kind not in {
+                "agent.commentary.delta",
+                "agent.commentary.completed",
+                "agent.reasoning.summary.delta",
+            }:
+                continue
+            payload = _public_payload(kind, event.get("payload"))
+            if not payload:
+                continue
+            if kind.startswith("agent.commentary"):
+                group = payload.get("commentary_group")
+                if type(group) is not int:
+                    continue
+                base_key = f"commentary:{group}"
+                source = "commentary"
+                content = (
+                    payload.get("content_replace")
+                    if kind == "agent.commentary.completed"
+                    else payload.get("delta")
+                )
+                replace = kind == "agent.commentary.completed"
+            else:
+                group = payload.get("summary_group")
+                index = payload.get("summary_index")
+                if type(group) is not int or type(index) is not int:
+                    continue
+                base_key = f"reasoning:{group}:{index}"
+                source = "reasoning"
+                content = payload.get("delta")
+                replace = False
+            if base_key in blocked_thought_keys or not isinstance(content, str):
+                continue
+            base_node_keys = thought_node_keys_by_base.setdefault(base_key, [])
+            node = (
+                thought_nodes_by_key.get(base_node_keys[-1])
+                if base_node_keys
+                else None
+            )
+            if replace and node is not None:
+                combined = "".join(
+                    str(thought_nodes_by_key[node_key]["text"])
+                    for node_key in base_node_keys
+                )
+                replacement, replacement_truncated = bounded_public_draft(
+                    content,
+                    max_chars=PUBLIC_COMMENTARY_DELTA_MAX_CHARS,
+                )
+                if not replacement or has_potential_secret_suffix(replacement):
+                    for node_key in base_node_keys:
+                        thought_nodes_by_key.pop(node_key, None)
+                    thought_node_keys_by_base.pop(base_key, None)
+                    blocked_thought_keys.add(base_key)
+                    continue
+                # A completed commentary item normally repeats the accumulated
+                # public text. Append only its genuine suffix. A non-prefix
+                # completion is still authoritative public content: replace a
+                # single uninterrupted draft in place, or create a new part at
+                # the completion sequence after an intervening activity.
+                if replacement.startswith(combined):
+                    content = replacement[len(combined):]
+                    replace = False
+                    if not content:
+                        node["last_sequence"] = sequence
+                        if payload.get("truncated") is True or replacement_truncated:
+                            node["truncated"] = True
+                        continue
+                else:
+                    uninterrupted = (
+                        len(base_node_keys) == 1
+                        and node.get("_activity_epoch") == activity_epoch
+                    )
+                    if uninterrupted:
+                        node["text"] = replacement
+                        node["last_sequence"] = sequence
+                        node.pop("truncated", None)
+                        if payload.get("truncated") is True or replacement_truncated:
+                            node["truncated"] = True
+                        continue
+                    content = replacement
+                    node = None
+            if node is None or node.get("_activity_epoch") != activity_epoch:
+                node = None
+                current = ""
+            else:
+                current = str(node["text"])
+            candidate = content if replace else current + content
+            text, text_truncated = bounded_public_draft(
+                candidate,
+                max_chars=(
+                    PUBLIC_COMMENTARY_DELTA_MAX_CHARS
+                    if source == "commentary"
+                    else PUBLIC_REASONING_SUMMARY_DELTA_MAX_CHARS
+                ),
+            )
+            if not text or has_potential_secret_suffix(text):
+                for node_key in base_node_keys:
+                    thought_nodes_by_key.pop(node_key, None)
+                thought_node_keys_by_base.pop(base_key, None)
+                blocked_thought_keys.add(base_key)
+                continue
+            if node is None:
+                key = f"{base_key}:part:{len(base_node_keys) + 1}"
+                node = {
+                    "source": source,
+                    "key": key,
+                    "text": text,
+                    "first_sequence": sequence,
+                    "last_sequence": sequence,
+                    "_activity_epoch": activity_epoch,
+                }
+                thought_nodes_by_key[key] = node
+                base_node_keys.append(key)
+            else:
+                node["text"] = text
+                node["last_sequence"] = sequence
+            if payload.get("truncated") is True or text_truncated:
+                node["truncated"] = True
+
+    thought_nodes = sorted(
+        (
+            {key: value for key, value in item.items() if key != "_activity_epoch"}
+            for item in thought_nodes_by_key.values()
+        ),
+        key=lambda item: (item["first_sequence"], item["key"]),
+    )
+    anchors = sorted(
+        set(anchors).union(
+            item["first_sequence"] for item in thought_nodes
+        )
+    )
+
+    segments: dict[int, dict[str, Any]] = {}
+    # These are conversation-level milestones (compaction, terminal outcome,
+    # handoff), not the high-frequency raw event stream. Keep every one so the
+    # main conversation is complete; only technical events remain paged.
+    process_events: list[dict[str, Any]] = []
+
+    def accumulator(sequence: int) -> dict[str, Any]:
+        interval = bisect_right(anchors, sequence)
+        current = segments.get(interval)
+        if current is None:
+            current = {
+                "first_sequence": sequence,
+                "last_sequence": sequence,
+                "keyed": {},
+                "pending": {},
+                "unkeyed": {},
+                "workspace_changed_files": 0,
+                "changes": [],
+                "change_keys": set(),
+            }
+            segments[interval] = current
+        else:
+            current["first_sequence"] = min(current["first_sequence"], sequence)
+            current["last_sequence"] = max(current["last_sequence"], sequence)
+        return current
+
+    try:
+        stream = path.open("r", encoding="utf-8")
+    except (OSError, UnicodeError):
+        return empty
+
+    with stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (
+                not isinstance(event, dict)
+                or event.get("schema") != EVENT_SCHEMA
+                or event.get("visibility") != "public"
+            ):
+                continue
+            try:
+                sequence = int(event.get("sequence") or 0)
+            except (TypeError, ValueError):
+                continue
+            if sequence <= 0:
+                continue
+            kind = str(event.get("kind") or "")
+            payload = _public_payload(kind, event.get("payload"))
+
+            if kind == "agent.tool.activity":
+                activity_type = _conversation_activity_type(payload)
+                if activity_type is None:
+                    continue
+                current = accumulator(sequence)
+                state = _conversation_activity_state(payload)
+                ordinal = payload.get("tool_calls")
+                if type(ordinal) is int and ordinal > 0:
+                    current["keyed"][(activity_type, ordinal)] = state
+                    continue
+
+                pending = current["pending"]
+                unkeyed = current["unkeyed"].setdefault(
+                    activity_type,
+                    {"completed": 0, "failed": 0, "recorded": 0},
+                )
+                if state == "active":
+                    pending[activity_type] = pending.get(activity_type, 0) + 1
+                elif state in {"completed", "failed"}:
+                    if pending.get(activity_type, 0) > 0:
+                        pending[activity_type] -= 1
+                    unkeyed[state] += 1
+                else:
+                    unkeyed["recorded"] += 1
+                continue
+
+            if kind == "workspace.change.observed" and payload:
+                current = accumulator(sequence)
+                changed_files = payload.get("changed_files")
+                if type(changed_files) is int:
+                    current["workspace_changed_files"] = max(
+                        current["workspace_changed_files"],
+                        changed_files,
+                    )
+                for change in payload.get("changes") or ():
+                    if not isinstance(change, dict):
+                        continue
+                    key = (
+                        change.get("relative_path"),
+                        change.get("change_kind"),
+                    )
+                    if key in current["change_keys"]:
+                        continue
+                    current["change_keys"].add(key)
+                    if len(current["changes"]) < 8:
+                        current["changes"].append(change)
+                continue
+
+            if kind in _CONVERSATION_PROCESS_EVENT_KINDS:
+                process_events.append(
+                    {
+                        "sequence": sequence,
+                        "kind": kind,
+                        "summary_zh": str(event.get("summary_zh") or "")[:500],
+                        "payload": payload,
+                    }
+                )
+
+    projected_segments: list[dict[str, Any]] = []
+    order = {name: index for index, name in enumerate(_ACTIVITY_TYPE_ORDER)}
+    for interval in sorted(segments):
+        current = segments[interval]
+        totals: dict[str, dict[str, int]] = {}
+        for (activity_type, _ordinal), state in current["keyed"].items():
+            counts = totals.setdefault(
+                activity_type,
+                {"count": 0, "completed": 0, "failed": 0, "active": 0, "recorded": 0},
+            )
+            counts["count"] += 1
+            counts[state] += 1
+        for activity_type, values in current["unkeyed"].items():
+            counts = totals.setdefault(
+                activity_type,
+                {"count": 0, "completed": 0, "failed": 0, "active": 0, "recorded": 0},
+            )
+            for state in ("completed", "failed", "recorded"):
+                counts[state] += int(values.get(state) or 0)
+            active = int(current["pending"].get(activity_type) or 0)
+            counts["active"] += active
+            counts["count"] += sum(
+                counts_value for counts_value in (
+                    int(values.get("completed") or 0),
+                    int(values.get("failed") or 0),
+                    int(values.get("recorded") or 0),
+                    active,
+                )
+            )
+
+        activities = [
+            {"type": activity_type, **counts}
+            for activity_type, counts in sorted(
+                totals.items(),
+                key=lambda item: (order.get(item[0], len(order)), item[0]),
+            )
+            if counts["count"] > 0
+        ]
+        changed_files = int(current["workspace_changed_files"] or 0)
+        if not activities and changed_files <= 0 and not current["changes"]:
+            continue
+        segment = {
+            "first_sequence": current["first_sequence"],
+            "last_sequence": current["last_sequence"],
+            "activities": activities,
+        }
+        if changed_files > 0:
+            segment["workspace_changed_files"] = changed_files
+        if current["changes"]:
+            segment["changes"] = current["changes"]
+        projected_segments.append(segment)
+
+    return {
+        "schema": "llm-backend-toolkit.observer-conversation-process.v1",
+        "thought_nodes": thought_nodes,
+        "activity_segments": projected_segments,
+        "events": process_events,
+        "truncated": False,
+    }
 
 
 def _last_valid_event_sequence(path: Path) -> int:

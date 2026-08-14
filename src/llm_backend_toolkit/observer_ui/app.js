@@ -326,7 +326,10 @@ function toolType(event) {
   if (raw.includes("command") || raw.includes("shell") || raw.includes("exec")) return "command";
   if (raw.includes("mcp")) return "mcp";
   if (raw.includes("computer")) return "computer";
+  if (raw.includes("web_search") || raw.includes("search")) return "web_search";
   if (raw.includes("web") || raw.includes("browser")) return "web";
+  if (raw.includes("file_change") || raw.includes("edit") || raw.includes("patch")) return "file_change";
+  if (raw.includes("file")) return "file";
   return raw || (String(event.kind).includes("tool") ? "tool" : "");
 }
 
@@ -352,16 +355,19 @@ function workLabel(type, event) {
   const ordinal = eventOrdinal(event);
   const suffix = ordinal ? ` ${ordinal}` : "";
   if (type === "command") return `命令${suffix}`;
+  if (type === "web_search") return `网络搜索${suffix}`;
   if (type === "web") return `网页操作${suffix}`;
   if (type === "mcp") return `MCP 调用${suffix}`;
   if (type === "computer") return `电脑操作${suffix}`;
+  if (type === "file_change") return `编辑文件${suffix}`;
+  if (type === "file") return `文件操作${suffix}`;
   if (type === "tool") return `工具活动${suffix}`;
   return "工作进度";
 }
 
 function specificWorkSummary(event) {
   const safeSummary = String(first(event.summary_zh, event.payload?.summary_zh, "")).trim();
-  const genericSummary = /^(智能体)?(正在|已)?(执行)?(命令|工具|网页|浏览器|mcp|电脑|计算机)(活动|调用|操作|执行|成功|完成|失败)?(?:[（(][^）)]*[）)])?[。.]?$/i;
+  const genericSummary = /^(智能体)?(正在|已)?(完成)?(执行|编辑|查询|调用|操作)?(命令|工具|网页|浏览器|网络搜索|公开资料|文件|mcp|电脑|计算机)(活动|调用|操作|执行|编辑|查询|成功|完成|失败)?(?:[（(][^）)]*[）)])?[。.]?$/i;
   return safeSummary && !genericSummary.test(safeSummary) ? safeSummary : "";
 }
 
@@ -399,6 +405,7 @@ function normalizedWork(events) {
   const rows = [];
   const indexed = new Map();
   const workspace = [];
+  let workspaceCount = 0;
   const compactions = [];
   const outcomes = [];
 
@@ -415,6 +422,8 @@ function normalizedWork(events) {
     if (event.kind === "workspace.change.observed") {
       const changes = Array.isArray(event.payload?.changes) ? event.payload.changes : [];
       workspace.push(...changes);
+      const declaredCount = optionalNumber(event.payload?.changed_files);
+      workspaceCount = Math.max(workspaceCount, declaredCount ?? changes.length);
       continue;
     }
 
@@ -448,7 +457,43 @@ function normalizedWork(events) {
       rows.push(row);
     }
   }
-  return { rows, workspace, compactions, outcomes };
+  return { rows, workspace, workspaceCount, compactions, outcomes };
+}
+
+function normalizedActivitySegment(segment) {
+  const allowedTypes = new Set([
+    "command", "file_change", "web_search", "web", "mcp", "computer", "file", "tool",
+  ]);
+  const activityCounts = [];
+  for (const raw of Array.isArray(segment?.activities) ? segment.activities : []) {
+    const type = String(raw?.type || "");
+    const count = Number(raw?.count);
+    if (!allowedTypes.has(type) || !Number.isInteger(count) || count <= 0) continue;
+    const bounded = (name) => {
+      const value = Number(raw?.[name]);
+      return Number.isInteger(value) && value >= 0 ? Math.min(value, count) : 0;
+    };
+    activityCounts.push({
+      type,
+      count,
+      completed: bounded("completed"),
+      failed: bounded("failed"),
+      active: bounded("active"),
+      recorded: bounded("recorded"),
+    });
+  }
+  const workspace = (Array.isArray(segment?.changes) ? segment.changes : [])
+    .filter((change) => change && typeof change === "object")
+    .slice(0, 8);
+  const declaredCount = optionalNumber(segment?.workspace_changed_files);
+  return {
+    rows: [],
+    workspace,
+    workspaceCount: Math.max(0, declaredCount ?? workspace.length),
+    activityCounts,
+    compactions: [],
+    outcomes: [],
+  };
 }
 
 function visibleWorkRows(rows) {
@@ -461,23 +506,34 @@ function visibleWorkRows(rows) {
 
 function workSummary(work) {
   const counts = new Map();
+  for (const item of work.activityCounts || []) {
+    counts.set(item.type, (counts.get(item.type) || 0) + item.count);
+  }
   for (const item of work.rows) counts.set(item.type, (counts.get(item.type) || 0) + 1);
   const labels = {
     command: "命令",
+    web_search: "网络搜索",
     web: "网页操作",
     mcp: "MCP 调用",
     computer: "电脑操作",
+    file_change: "编辑文件",
+    file: "文件操作",
     tool: "工具活动",
   };
   const parts = [...counts.entries()].map(([type, count]) =>
     `${labels[type] || "工作活动"} ${count} 次`);
-  if (work.workspace.length) parts.push(`工作区变化 ${work.workspace.length} 项`);
+  if (work.workspaceCount) parts.push(`工作区变化 ${work.workspaceCount} 项`);
 
-  const failed = work.rows.filter((item) => ["failed", "declined", "cancelled"].includes(item.status)).length;
-  const active = work.rows.filter((item) => ["started", "running", "in_progress"].includes(item.status)).length;
+  const failed = (work.activityCounts || []).reduce((total, item) => total + item.failed, 0)
+    + work.rows.filter((item) => ["failed", "declined", "cancelled"].includes(item.status)).length;
+  const active = (work.activityCounts || []).reduce((total, item) => total + item.active, 0)
+    + work.rows.filter((item) => ["started", "running", "in_progress"].includes(item.status)).length;
+  const recorded = (work.activityCounts || []).reduce((total, item) => total + item.recorded, 0);
+  const activityTotal = [...counts.values()].reduce((total, count) => total + count, 0);
   if (failed) parts.push(`${failed} 项未成功`);
   else if (active) parts.push(`${active} 项进行中`);
-  else if (work.rows.length) parts.push("已完成");
+  else if (activityTotal && recorded === activityTotal) parts.push("已记录");
+  else if (activityTotal) parts.push("已完成");
   return parts.join(" · ") || "已记录工作区变化";
 }
 
@@ -506,13 +562,13 @@ function compactionText(event) {
   return facts.length ? `${base} · ${facts.join(" · ")}` : base;
 }
 
-function appendWorkspaceNote(container, changes) {
-  if (!changes.length) return;
+function appendWorkspaceNote(container, changes, totalCount) {
+  if (!changes.length && !totalCount) return;
   const note = createElement("div", "workspace-note");
   note.append(createElement(
     "span",
     "",
-    `观察到工作区变化 ${changes.length} 项；变化归因未验证。`,
+    `观察到工作区变化 ${totalCount || changes.length} 项；变化归因未验证。`,
   ));
   const visibleChanges = changes
     .filter((change) => change && change.relative_path)
@@ -523,11 +579,15 @@ function appendWorkspaceNote(container, changes) {
     for (const change of visibleChanges) {
       const row = createElement("div", "workspace-change-row");
       row.append(
-        createElement("span", "workspace-change-kind", kindLabels[String(change.kind || "").toLowerCase()] || "变化"),
+        createElement(
+          "span",
+          "workspace-change-kind",
+          kindLabels[String(first(change.change_kind, change.kind, "")).toLowerCase()] || "变化",
+        ),
         createElement("code", "", String(change.relative_path)),
       );
-      const added = optionalNumber(first(change.added_lines, change.added));
-      const removed = optionalNumber(first(change.removed_lines, change.removed));
+      const added = optionalNumber(first(change.lines_added, change.added_lines, change.added));
+      const removed = optionalNumber(first(change.lines_deleted, change.removed_lines, change.removed));
       if (added !== null || removed !== null) {
         const counts = createElement("span", "workspace-change-counts");
         if (added !== null) counts.append(createElement("span", "is-added", `+${formatNumber(added)}`));
@@ -541,127 +601,560 @@ function appendWorkspaceNote(container, changes) {
   container.append(note);
 }
 
-function isReasoningSummaryEvent(event) {
+function workThoughtEventSource(event) {
   const kind = String(event?.kind || "").toLowerCase();
-  return kind === "reasoning.summary.delta" || kind === "agent.reasoning.summary.delta";
+  if (kind === "agent.commentary.delta" || kind === "agent.commentary.completed") {
+    return "commentary";
+  }
+  if (kind === "agent.reasoning.summary.delta") return "reasoning";
+  return "";
 }
 
-function reasoningSummaryData(turn, events) {
-  const raw = Array.isArray(turn.progress?.public_reasoning_summaries)
-    ? turn.progress.public_reasoning_summaries
-    : [];
-  const accumulated = [];
-  let accumulatedChars = 0;
-  let accumulatedTruncated = turn.progress?.public_reasoning_summaries_truncated === true;
-  for (const item of raw) {
-    if (
-      !Number.isInteger(item?.summary_group)
-      || item.summary_group <= 0
-      || !Number.isInteger(item?.summary_index)
-      || item.summary_index < 0
-      || typeof item?.text !== "string"
-      || !item.text
-    ) continue;
-    if (accumulated.length >= 12) {
-      accumulatedTruncated = true;
-      continue;
-    }
-    const available = Math.min(4_000, 20_000 - accumulatedChars);
-    if (available <= 0) {
-      accumulatedTruncated = true;
-      continue;
-    }
-    const text = item.text.slice(0, available);
-    accumulated.push({
-      summary_group: item.summary_group,
-      summary_index: item.summary_index,
-      text,
-    });
-    accumulatedChars += text.length;
-    if (text.length < item.text.length) accumulatedTruncated = true;
+function workThoughtEventKey(event) {
+  const source = workThoughtEventSource(event);
+  const payload = event?.payload || {};
+  if (source === "commentary" && Number.isInteger(payload.commentary_group)) {
+    return `commentary:${payload.commentary_group}`;
   }
-  if (accumulated.length) {
-    return { items: accumulated, truncated: accumulatedTruncated };
+  if (
+    source === "reasoning"
+    && Number.isInteger(payload.summary_group)
+    && Number.isInteger(payload.summary_index)
+  ) return `reasoning:${payload.summary_group}:${payload.summary_index}`;
+  return "";
+}
+
+function workThoughtData(turn, events) {
+  const progress = turn.progress || {};
+  const fullThoughtNodes = turn?.conversation_process?.thought_nodes;
+  if (Array.isArray(fullThoughtNodes)) {
+    let truncated = false;
+    const items = [];
+    for (const raw of fullThoughtNodes) {
+      const source = raw?.source;
+      const key = String(raw?.key || "");
+      const text = raw?.text;
+      const sequence = Number(raw?.first_sequence);
+      if (
+        !["commentary", "reasoning"].includes(source)
+        || !key
+        || typeof text !== "string"
+        || !text
+        || !Number.isInteger(sequence)
+        || sequence <= 0
+      ) continue;
+      items.push({
+        source,
+        key,
+        text,
+        sequence,
+        stableOrder: items.length,
+      });
+      if (raw.truncated === true) truncated = true;
+    }
+    items.sort((a, b) => a.sequence - b.sequence || a.stableOrder - b.stableOrder);
+    return { items, truncated };
+  }
+  const orderedEvents = mergeEvents(events, Array.isArray(turn.events) ? turn.events : []);
+  const eventAnchors = new Map();
+  for (const event of orderedEvents) {
+    const key = workThoughtEventKey(event);
+    if (key && !eventAnchors.has(key)) eventAnchors.set(key, eventSequence(event));
+  }
+  const hasCommentaryCanonical = Array.isArray(progress.public_commentary_segments)
+    || progress.public_commentary_truncated === true;
+  const hasReasoningCanonical = Array.isArray(progress.public_reasoning_summaries)
+    || progress.public_reasoning_summaries_truncated === true;
+  const canonical = [];
+  let truncated = progress.public_commentary_truncated === true
+    || progress.public_reasoning_summaries_truncated === true;
+  const sourceChars = { commentary: 0, reasoning: 0 };
+  const sourceCounts = { commentary: 0, reasoning: 0 };
+  const seenCanonical = new Set();
+
+  function appendCanonical(source, key, text, firstSequence) {
+    if (seenCanonical.has(key) || typeof text !== "string" || !text) return;
+    if (sourceCounts[source] >= 12) {
+      truncated = true;
+      return;
+    }
+    const available = Math.min(4_000, 20_000 - sourceChars[source]);
+    if (available <= 0) {
+      truncated = true;
+      return;
+    }
+    const bounded = text.slice(0, available);
+    const explicitSequence = Number(firstSequence);
+    canonical.push({
+      source,
+      key,
+      text: bounded,
+      sequence: Number.isFinite(explicitSequence) && explicitSequence > 0
+        ? explicitSequence
+        : eventAnchors.has(key) ? eventAnchors.get(key) : Number.POSITIVE_INFINITY,
+      stableOrder: canonical.length,
+    });
+    seenCanonical.add(key);
+    sourceCounts[source] += 1;
+    sourceChars[source] += bounded.length;
+    if (bounded.length < text.length) truncated = true;
   }
 
-  // Compatibility contract for observer backends that expose only the safe
-  // projected event. Never use summary_zh: it is an activity label, not model
-  // authored work-thought content.
-  const byKey = new Map();
-  let totalChars = 0;
-  let truncated = false;
-  for (const event of mergeEvents(events, Array.isArray(turn.events) ? turn.events : [])) {
-    if (!isReasoningSummaryEvent(event)) continue;
-    const payload = event.payload || {};
-    if (payload.truncated === true || event.public_reasoning_summaries_truncated === true) {
-      truncated = true;
+  if (Array.isArray(progress.public_commentary_segments)) {
+    for (const item of progress.public_commentary_segments) {
+      const group = item?.commentary_group;
+      if (!Number.isInteger(group) || group <= 0 || group > 1_000_000) continue;
+      appendCanonical("commentary", `commentary:${group}`, item.text, item.first_sequence);
     }
-    const summaryGroup = first(payload.summary_group, event.summary_group);
-    const summaryIndex = first(payload.summary_index, event.summary_index);
-    const delta = first(payload.delta, payload.public_text, event.delta, event.public_text);
-    if (
-      !Number.isInteger(summaryGroup)
-      || summaryGroup <= 0
-      || !Number.isInteger(summaryIndex)
-      || summaryIndex < 0
-      || typeof delta !== "string"
-      || !delta
-    ) continue;
-    const key = `${summaryGroup}:${summaryIndex}`;
+  }
+  if (Array.isArray(progress.public_reasoning_summaries)) {
+    for (const item of progress.public_reasoning_summaries) {
+      const group = item?.summary_group;
+      const index = item?.summary_index;
+      if (
+        !Number.isInteger(group) || group <= 0 || group > 1_000_000
+        || !Number.isInteger(index) || index < 0 || index > 1_000_000
+      ) continue;
+      appendCanonical("reasoning", `reasoning:${group}:${index}`, item.text, item.first_sequence);
+    }
+  }
+
+  // When a canonical field or its truncation marker is present, it is
+  // authoritative even when empty. This prevents a revoked accumulated segment
+  // from being reconstructed from older paged deltas.
+  const eventItems = [];
+  const byKey = new Map();
+  for (const event of orderedEvents) {
+    const source = workThoughtEventSource(event);
+    if (!source) continue;
+    if (source === "commentary" && hasCommentaryCanonical) continue;
+    if (source === "reasoning" && hasReasoningCanonical) continue;
+    const payload = event.payload || {};
+    if (payload.truncated === true) truncated = true;
+    const group = source === "commentary" ? payload.commentary_group : payload.summary_group;
+    const index = source === "reasoning" ? payload.summary_index : null;
+    if (!Number.isInteger(group) || group <= 0 || group > 1_000_000) continue;
+    if (source === "reasoning" && (!Number.isInteger(index) || index < 0 || index > 1_000_000)) continue;
+    const key = source === "commentary"
+      ? `commentary:${group}`
+      : `reasoning:${group}:${index}`;
+    const completed = String(event.kind || "").toLowerCase() === "agent.commentary.completed";
+    const content = completed ? payload.content_replace : payload.delta;
+    if (typeof content !== "string" || !content) continue;
     let item = byKey.get(key);
     if (!item) {
-      if (byKey.size >= 12) {
+      if (sourceCounts[source] >= 12) {
         truncated = true;
         continue;
       }
-      item = { summary_group: summaryGroup, summary_index: summaryIndex, text: "" };
+      item = {
+        source,
+        key,
+        text: "",
+        frozen: false,
+        sequence: eventSequence(event),
+        stableOrder: eventItems.length,
+      };
       byKey.set(key, item);
+      eventItems.push(item);
+      sourceCounts[source] += 1;
     }
-    const available = Math.min(4_000 - item.text.length, 20_000 - totalChars);
+    if (item.frozen) continue;
+    const retainedChars = sourceChars[source] - item.text.length;
+    const available = completed
+      ? Math.min(4_000, 20_000 - retainedChars)
+      : Math.min(4_000 - item.text.length, 20_000 - sourceChars[source]);
     if (available <= 0) {
       truncated = true;
       continue;
     }
-    const piece = delta.slice(0, available);
-    item.text += piece;
-    totalChars += piece.length;
-    if (piece.length < delta.length) truncated = true;
+    const piece = content.slice(0, available);
+    if (completed) {
+      sourceChars[source] = retainedChars + piece.length;
+      item.text = piece;
+      item.frozen = true;
+    } else {
+      item.text += piece;
+      sourceChars[source] += piece.length;
+    }
+    if (piece.length < content.length) truncated = true;
   }
-  return { items: [...byKey.values()].filter((item) => item.text), truncated };
+  const visibleEvents = eventItems
+    .filter((item) => item.text)
+    .map(({ frozen: _frozen, ...item }) => item);
+  const anyCanonical = hasCommentaryCanonical || hasReasoningCanonical;
+  const items = anyCanonical
+    ? ["commentary", "reasoning"].flatMap((source) => [
+      ...canonical.filter((item) => item.source === source),
+      ...visibleEvents.filter((item) => item.source === source),
+    ])
+    : visibleEvents;
+  items.sort((a, b) => a.sequence - b.sequence || a.stableOrder - b.stableOrder);
+  return { items, truncated };
 }
 
-function renderReasoningSummaries(turn, events) {
-  const view = reasoningSummaryData(turn, events);
-  const summaries = view.items;
-  if (!summaries.length) return null;
-  const terminal = ["completed", "failed", "cancelled", "stale", "blocked"]
-    .includes(statusName(turn.job_status));
-  const details = createElement("details", "reasoning-summary");
-  details.open = !terminal;
+function renderWorkThought(item, terminal, truncated = false) {
+  const details = createElement("details", "work-thought");
+  details.open = true;
   details.dataset.live = String(!terminal);
-  const heading = createElement("summary", "reasoning-summary-heading");
+  const heading = createElement("summary", "work-thought-heading");
   heading.append(
     createElement("strong", "", "工作思路"),
     createElement(
       "span",
-      "reasoning-summary-state",
-      terminal ? `${summaries.length} 段` : "正在更新",
+      "work-thought-source",
+      item.source === "commentary" ? "公开过程消息" : "公开推理摘要",
     ),
   );
   details.append(heading);
-  const body = createElement("div", "reasoning-summary-body");
-  for (const item of summaries) {
-    const text = createElement("div", "reasoning-summary-text", item.text);
-    text.dataset.summaryKey = `${item.summary_group}:${item.summary_index}`;
-    text.setAttribute("aria-live", terminal ? "off" : "polite");
-    text.setAttribute("aria-atomic", "false");
-    body.append(text);
-  }
-  if (view.truncated) {
-    body.append(createElement("div", "reasoning-summary-limit", "工作思路显示已截断。"));
+  const body = createElement("div", "work-thought-body");
+  const text = createElement("div", "work-thought-text markdown-body");
+  appendMarkdown(text, item.text);
+  text.dataset.markdownSource = item.text;
+  text.dataset.workThoughtKey = item.key;
+  text.setAttribute("aria-live", terminal ? "off" : "polite");
+  text.setAttribute("aria-atomic", "false");
+  body.append(text);
+  if (truncated) {
+    body.append(createElement("div", "work-thought-limit", "工作思路显示已截断。"));
   }
   details.append(body);
   return details;
+}
+
+function chronologicalProcessData(turn, events) {
+  const thoughtView = workThoughtData(turn, events);
+  const canonicalProcess = turn?.conversation_process;
+  if (
+    canonicalProcess?.schema === "llm-backend-toolkit.observer-conversation-process.v1"
+    && Array.isArray(canonicalProcess.activity_segments)
+    && Array.isArray(canonicalProcess.events)
+  ) {
+    const ordered = [];
+    thoughtView.items.forEach((item, stableOrder) => ordered.push({
+      type: "thought",
+      item,
+      sequence: item.sequence,
+      priority: 0,
+      stableOrder,
+    }));
+    canonicalProcess.activity_segments.forEach((segment, stableOrder) => {
+      const firstSequence = Number(segment?.first_sequence);
+      const lastSequence = Number(segment?.last_sequence);
+      if (!Number.isInteger(firstSequence) || firstSequence <= 0) return;
+      const work = normalizedActivitySegment(segment);
+      if (!(work.activityCounts.length || work.workspace.length || work.workspaceCount)) return;
+      ordered.push({
+        type: "activity",
+        work,
+        key: `full:${firstSequence}:${Number.isInteger(lastSequence) ? lastSequence : firstSequence}`,
+        fullHistory: true,
+        sequence: firstSequence,
+        priority: 1,
+        stableOrder,
+      });
+    });
+    canonicalProcess.events.forEach((event, stableOrder) => {
+      if (!isCompaction(event) && !isOutcomeEvent(event)) return;
+      ordered.push({
+        type: "event",
+        event,
+        sequence: eventSequence(event),
+        priority: 2,
+        stableOrder,
+      });
+    });
+    ordered.sort((a, b) =>
+      a.sequence - b.sequence || a.priority - b.priority || a.stableOrder - b.stableOrder);
+    return {
+      blocks: ordered.map(({ sequence: _sequence, priority: _priority, stableOrder: _stable, ...block }) => block),
+      truncated: thoughtView.truncated,
+      fullHistory: true,
+      processTruncated: canonicalProcess.truncated === true,
+    };
+  }
+  const thoughtByKey = new Map(thoughtView.items.map((item) => [item.key, item]));
+  const seenThoughts = new Set();
+  const blocks = [];
+  let activityEvents = [];
+  const flushActivity = () => {
+    if (!activityEvents.length) return;
+    const work = normalizedWork(activityEvents);
+    if (work.rows.length || work.workspace.length) blocks.push({
+      type: "activity",
+      work,
+      key: `${eventSequence(activityEvents[0])}:${eventSequence(activityEvents.at(-1))}`,
+    });
+    activityEvents = [];
+  };
+  let thoughtIndex = 0;
+  const emitThoughtsThrough = (sequence) => {
+    while (
+      thoughtIndex < thoughtView.items.length
+      && thoughtView.items[thoughtIndex].sequence <= sequence
+    ) {
+      const item = thoughtView.items[thoughtIndex];
+      thoughtIndex += 1;
+      if (seenThoughts.has(item.key)) continue;
+      flushActivity();
+      blocks.push({ type: "thought", item });
+      seenThoughts.add(item.key);
+    }
+  };
+  for (const event of mergeEvents(events, Array.isArray(turn.events) ? turn.events : [])) {
+    emitThoughtsThrough(eventSequence(event) - 0.5);
+    const thoughtKey = workThoughtEventKey(event);
+    if (thoughtKey && thoughtByKey.has(thoughtKey)) {
+      if (!seenThoughts.has(thoughtKey)) {
+        flushActivity();
+        blocks.push({ type: "thought", item: thoughtByKey.get(thoughtKey) });
+        seenThoughts.add(thoughtKey);
+      }
+      continue;
+    }
+    if (event.kind === "agent.tool.activity" || event.kind === "workspace.change.observed") {
+      activityEvents.push(event);
+      continue;
+    }
+    if (isCompaction(event) || isOutcomeEvent(event)) {
+      flushActivity();
+      blocks.push({ type: "event", event });
+    }
+  }
+  flushActivity();
+  emitThoughtsThrough(Number.POSITIVE_INFINITY);
+  return { blocks, truncated: thoughtView.truncated };
+}
+
+function renderActivityBlock(block, windowIsLimited = false) {
+  const work = block.work;
+  const log = createElement("details", "work-log");
+  log.dataset.activityKey = block.key;
+  log.open = work.rows.some((item) =>
+    ["started", "running", "in_progress", "failed", "declined"].includes(item.status))
+    || (work.activityCounts || []).some((item) => item.active > 0 || item.failed > 0);
+  const heading = createElement("summary", "work-log-heading");
+  heading.append(
+    createElement("strong", "", log.open ? "正在工作" : "工作记录"),
+    createElement("span", "", windowIsLimited ? `当前窗口：${workSummary(work)}` : workSummary(work)),
+  );
+  log.append(heading);
+  const visibleRows = visibleWorkRows(work.rows);
+  if (visibleRows.length) {
+    const rows = createElement("div", "work-rows");
+    for (const item of visibleRows) {
+      const row = createElement("div", "work-row");
+      row.dataset.tone = workTone(item.status);
+      row.append(
+        createElement("span", "work-row-main", item.label),
+        createElement("span", "work-row-status", workStatusDetail(item)),
+      );
+      rows.append(row);
+    }
+    log.append(rows);
+  } else if (work.rows.length || (work.activityCounts || []).length) {
+    log.append(createElement(
+      "p",
+      "work-aggregate-note",
+      "完成活动已聚合；上游未公开可安全展示的命令、路径或查询正文。",
+    ));
+  }
+  appendWorkspaceNote(log, work.workspace, work.workspaceCount);
+  return log;
+}
+
+function renderProcessEvent(event) {
+  if (isCompaction(event)) return createElement("div", "compaction-divider", compactionText(event));
+  const kind = String(event.kind || "").toLowerCase();
+  const tone = kind.includes("failed") || kind.includes("limit") ? "danger" : "quiet";
+  const fallback = kind.includes("completed")
+    ? "本轮运行已完成"
+    : kind === "handoff.collected" ? "Codex 已取回本轮结果" : "本轮运行未成功完成";
+  const outcome = createElement(
+    "div",
+    "outcome-note",
+    String(first(event.summary_zh, event.payload?.summary_zh, fallback)),
+  );
+  outcome.dataset.tone = tone;
+  return outcome;
+}
+
+function safeLinkHref(raw) {
+  try {
+    const url = new URL(String(raw || ""));
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : "";
+  } catch (_error) {
+    return "";
+  }
+}
+
+function appendInlineMarkdown(container, text) {
+  const source = String(text || "");
+  const pattern = /(`[^`\n]+`|\[([^\]\n]+)\]\(([^)\s]+)\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|\*([^*\n]+)\*|_([^_\n]+)_)/g;
+  let cursor = 0;
+  let match;
+  while ((match = pattern.exec(source)) !== null) {
+    if (match.index > cursor) container.append(document.createTextNode(source.slice(cursor, match.index)));
+    const token = match[0];
+    if (token.startsWith("`")) {
+      container.append(createElement("code", "", token.slice(1, -1)));
+    } else if (token.startsWith("[")) {
+      const href = safeLinkHref(match[3]);
+      if (!href) {
+        container.append(document.createTextNode(token));
+      } else {
+        const link = createElement("a", "", match[2]);
+        link.setAttribute("href", href);
+        link.setAttribute("rel", "noreferrer noopener");
+        link.setAttribute("target", "_blank");
+        container.append(link);
+      }
+    } else if (token.startsWith("_") && (
+      /[\p{L}\p{N}]/u.test(source[match.index - 1] || "")
+      || /[\p{L}\p{N}]/u.test(source[pattern.lastIndex] || "")
+    )) {
+      // CommonMark does not treat underscores inside an identifier/word as
+      // emphasis. Keep model names, markers, and snake_case values intact.
+      container.append(document.createTextNode(token));
+    } else if (token.startsWith("**") || token.startsWith("__")) {
+      container.append(createElement("strong", "", first(match[4], match[5])));
+    } else {
+      container.append(createElement("em", "", first(match[6], match[7])));
+    }
+    cursor = pattern.lastIndex;
+  }
+  if (cursor < source.length) container.append(document.createTextNode(source.slice(cursor)));
+}
+
+function isTableDivider(line) {
+  const cells = splitTableRow(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+}
+
+function splitTableRow(line) {
+  const trimmed = String(line || "").trim().replace(/^\|/, "").replace(/\|$/, "");
+  return trimmed.includes("|") ? trimmed.split("|").map((cell) => cell.trim()) : [];
+}
+
+function appendMarkdown(container, markdown) {
+  const lines = String(markdown || "").replace(/\r\n?/g, "\n").split("\n");
+  let index = 0;
+  while (index < lines.length) {
+    if (!lines[index].trim()) {
+      index += 1;
+      continue;
+    }
+    const fence = lines[index].match(/^\s*```([^`]*)$/);
+    if (fence) {
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      const pre = createElement("pre", "markdown-code-block");
+      const code = createElement("code", "", codeLines.join("\n"));
+      const language = fence[1].trim().split(/\s+/)[0];
+      if (language) code.dataset.language = language;
+      pre.append(code);
+      container.append(pre);
+      continue;
+    }
+    const heading = lines[index].match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      const node = createElement(`h${heading[1].length}`, "");
+      appendInlineMarkdown(node, heading[2]);
+      container.append(node);
+      index += 1;
+      continue;
+    }
+    if (index + 1 < lines.length && splitTableRow(lines[index]).length && isTableDivider(lines[index + 1])) {
+      const table = createElement("table", "markdown-table");
+      const head = createElement("thead", "");
+      const headRow = createElement("tr", "");
+      for (const cell of splitTableRow(lines[index])) {
+        const th = createElement("th", "");
+        appendInlineMarkdown(th, cell);
+        headRow.append(th);
+      }
+      head.append(headRow);
+      table.append(head);
+      index += 2;
+      const body = createElement("tbody", "");
+      while (index < lines.length && splitTableRow(lines[index]).length) {
+        const row = createElement("tr", "");
+        for (const cell of splitTableRow(lines[index])) {
+          const td = createElement("td", "");
+          appendInlineMarkdown(td, cell);
+          row.append(td);
+        }
+        body.append(row);
+        index += 1;
+      }
+      table.append(body);
+      container.append(table);
+      continue;
+    }
+    if (/^\s*>\s?/.test(lines[index])) {
+      const quoteLines = [];
+      while (index < lines.length && /^\s*>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^\s*>\s?/, ""));
+        index += 1;
+      }
+      const quote = createElement("blockquote", "");
+      appendMarkdown(quote, quoteLines.join("\n"));
+      container.append(quote);
+      continue;
+    }
+    const listMatch = lines[index].match(/^\s*(?:([-+*])|(\d+)\.)\s+(.+)$/);
+    if (listMatch) {
+      const ordered = Boolean(listMatch[2]);
+      const list = createElement(ordered ? "ol" : "ul", "");
+      while (index < lines.length) {
+        const itemMatch = lines[index].match(/^\s*(?:([-+*])|(\d+)\.)\s+(.+)$/);
+        if (!itemMatch || Boolean(itemMatch[2]) !== ordered) break;
+        const item = createElement("li", "");
+        appendInlineMarkdown(item, itemMatch[3]);
+        list.append(item);
+        index += 1;
+      }
+      container.append(list);
+      continue;
+    }
+    const paragraphLines = [];
+    while (index < lines.length && lines[index].trim()) {
+      if (paragraphLines.length && (
+        /^\s*```/.test(lines[index])
+        || /^(#{1,6})\s+/.test(lines[index])
+        || /^\s*>\s?/.test(lines[index])
+        || /^\s*(?:[-+*]|\d+\.)\s+/.test(lines[index])
+        || (index + 1 < lines.length && splitTableRow(lines[index]).length && isTableDivider(lines[index + 1]))
+      )) break;
+      paragraphLines.push(lines[index]);
+      index += 1;
+    }
+    const paragraph = createElement("p", "");
+    appendInlineMarkdown(paragraph, paragraphLines.join("\n"));
+    container.append(paragraph);
+  }
+}
+
+function updateMarkdownElement(node, nextSource) {
+  const next = String(nextSource || "");
+  const prior = String(node.dataset.markdownSource || "");
+  if (next === prior) return;
+  const suffix = next.startsWith(prior) ? next.slice(prior.length) : "";
+  const plainAppend = suffix
+    && !/[`*_\[\]#>|\n]/.test(prior + suffix)
+    && node.lastElementChild?.tagName === "P";
+  if (plainAppend) {
+    node.lastElementChild.append(document.createTextNode(suffix));
+  } else {
+    node.replaceChildren();
+    appendMarkdown(node, next);
+  }
+  node.dataset.markdownSource = next;
 }
 
 function safeOutputText(raw) {
@@ -681,23 +1174,39 @@ function safeOutputText(raw) {
 function outputData(turn) {
   const finalOutput = safeOutputText(turn.result?.output);
   const draft = String(turn.progress?.public_preview || "");
-  const terminal = ["completed", "failed", "cancelled", "stale", "blocked"].includes(statusName(turn.job_status));
+  const status = statusName(turn.job_status);
+  const resultStatus = statusName(first(turn.result_status, turn.result?.status));
+  const completed = status === "completed"
+    && !["failed", "error", "blocked", "cancelled", "stale"].includes(resultStatus);
+  const terminal = ["completed", "failed", "cancelled", "stale", "blocked"].includes(status);
   if (!terminal) return draft
     ? {
         text: draft,
         final: false,
+        live: true,
+        state: "draft",
         truncated: turn.progress?.public_preview_truncated === true,
       }
-    : { text: "等待公开草稿…", final: false, truncated: false, empty: true };
-  if (finalOutput.text) return { text: finalOutput.text, final: true, truncated: finalOutput.truncated };
+    : { text: "等待公开草稿…", final: false, live: true, state: "draft", truncated: false, empty: true };
+  if (finalOutput.text) return {
+    text: finalOutput.text,
+    final: completed,
+    live: false,
+    state: completed ? "final" : "partial",
+    truncated: finalOutput.truncated,
+  };
   if (draft) return {
     text: draft,
-    final: true,
+    final: completed,
+    live: false,
+    state: completed ? "final" : "partial",
     truncated: turn.progress?.public_preview_truncated === true,
   };
   return {
     text: "本轮未提供公开答复。",
-    final: true,
+    final: completed,
+    live: false,
+    state: completed ? "final" : "partial",
     truncated: false,
     empty: true,
   };
@@ -748,6 +1257,23 @@ function receiptData(turn) {
     if (key === "duration_ms") display = formatDuration(Number(value) / 1000);
     else if (typeof value === "boolean") display = value ? "是" : "否";
     fields.push({ label: labels[key], value: String(display) });
+  }
+  const webSearch = receipt.execution.web_search;
+  if (webSearch && typeof webSearch === "object") {
+    if (webSearch.enabled === false) {
+      fields.push({ label: "网络搜索", value: "已关闭" });
+    } else if (
+      webSearch.enabled === true
+      && webSearch.provider === "bing-rss-v1"
+      && Number.isInteger(webSearch.searches)
+      && webSearch.searches >= 0
+      && webSearch.event_evidence === "runtime-lifecycle"
+    ) {
+      fields.push({
+        label: "网络搜索",
+        value: `${webSearch.provider} · ${webSearch.searches} 次 · 运行期事件`,
+      });
+    }
   }
   const cleanup = receipt.execution.limit_usage?.cleanup_confirmed;
   if (typeof cleanup === "boolean") fields.push({ label: "清理确认", value: cleanup ? "是" : "否" });
@@ -807,19 +1333,26 @@ function renderReceipt(turn) {
 
 function renderAssistant(output) {
   const assistant = createElement("section", "assistant-message");
-  assistant.dataset.outputState = output.final ? "final" : "draft";
+  const outputState = output.state || (output.final ? "final" : "draft");
+  const isPartial = outputState === "partial";
+  assistant.dataset.outputState = outputState;
   assistant.append(createElement("span", "assistant-avatar", "›_"));
   const assistantHeader = createElement("div", "assistant-message-header");
   const outputStatus = createElement(
     "span",
     "assistant-state",
-    output.final ? "最终答复" : "实时草稿",
+    output.final ? "最终答复" : isPartial ? "失败前草稿" : "实时草稿",
   );
-  outputStatus.dataset.live = String(!output.final);
-  assistantHeader.append(createElement("strong", "", output.final ? "回复" : "正在生成"), outputStatus);
-  const outputBody = createElement("div", `assistant-output${output.empty ? " is-empty" : ""}`, output.text);
+  outputStatus.dataset.live = String(output.live === true);
+  assistantHeader.append(
+    createElement("strong", "", output.final || isPartial ? "回复" : "正在生成"),
+    outputStatus,
+  );
+  const outputBody = createElement("div", `assistant-output markdown-body${output.empty ? " is-empty" : ""}`);
+  appendMarkdown(outputBody, output.text);
+  outputBody.dataset.markdownSource = output.text;
   outputBody.dataset.truncated = String(output.truncated);
-  outputBody.setAttribute("aria-live", output.final ? "off" : "polite");
+  outputBody.setAttribute("aria-live", output.live === true ? "polite" : "off");
   outputBody.setAttribute("aria-atomic", "false");
   assistant.append(assistantHeader, outputBody);
   return assistant;
@@ -838,97 +1371,62 @@ function renderTurn(turn, index) {
   article.append(heading);
 
   const events = eventsForTurn(turn);
-  const work = normalizedWork(events);
   const output = outputData(turn);
   const assistant = renderAssistant(output);
-  if (!output.final) article.append(assistant);
-
-  const reasoning = renderReasoningSummaries(turn, events);
-  if (reasoning) article.append(reasoning);
-
-  if (work.rows.length || work.workspace.length || turn.event_page?.has_earlier || state.eventPages.get(jobId)?.hasEarlier) {
-    const log = createElement("details", "work-log");
-    log.open = work.rows.some((item) =>
-      ["started", "running", "in_progress"].includes(item.status));
-    const page = state.eventPages.get(jobId);
-    const hasEarlier = page ? page.hasEarlier : turn.event_page?.has_earlier;
-    const windowIsLimited = Boolean(hasEarlier || page?.browsingEarlier);
-    const logHeading = createElement("summary", "work-log-heading");
-    logHeading.append(
-      createElement("strong", "", log.open ? "正在工作" : "工作记录"),
-      createElement("span", "", windowIsLimited ? `当前窗口：${workSummary(work)}` : workSummary(work)),
-    );
-    log.append(logHeading);
-    const visibleRows = visibleWorkRows(work.rows);
-    if (visibleRows.length) {
-      const rows = createElement("div", "work-rows");
-      for (const item of visibleRows) {
-        const row = createElement("div", "work-row");
-        row.dataset.tone = workTone(item.status);
-        row.append(
-          createElement("span", "work-row-main", item.label),
-          createElement("span", "work-row-status", workStatusDetail(item)),
-        );
-        rows.append(row);
-      }
-      log.append(rows);
-    } else if (work.rows.length) {
-      log.append(createElement(
-        "p",
-        "work-aggregate-note",
-        "完成活动已聚合；上游未公开可安全展示的命令或工具正文。",
+  const terminal = ["completed", "failed", "cancelled", "stale", "blocked"]
+    .includes(statusName(turn.job_status));
+  const page = state.eventPages.get(jobId);
+  const hasEarlier = page ? page.hasEarlier : turn.event_page?.has_earlier;
+  const windowIsLimited = Boolean(hasEarlier || page?.browsingEarlier);
+  const process = chronologicalProcessData(turn, events);
+  const lastThoughtIndex = process.blocks.reduce(
+    (last, block, blockIndex) => block.type === "thought" ? blockIndex : last,
+    -1,
+  );
+  process.blocks.forEach((block, blockIndex) => {
+    if (block.type === "thought") {
+      article.append(renderWorkThought(
+        block.item,
+        terminal,
+        process.truncated && blockIndex === lastThoughtIndex,
       ));
+    } else if (block.type === "activity") {
+      article.append(renderActivityBlock(block, block.fullHistory ? false : windowIsLimited));
+    } else {
+      article.append(renderProcessEvent(block.event));
     }
-    appendWorkspaceNote(log, work.workspace);
+  });
 
+  // The canonical process already contains the complete public semantic
+  // history. Raw-event paging is only a fallback for older records.
+  if (!process.fullHistory && (hasEarlier || page?.browsingEarlier)) {
+    const navigation = createElement("div", "process-pagination");
     if (hasEarlier) {
       const earlierCount = optionalNumber(first(page?.earlierCount, turn.event_page?.earlier_count));
       const earlier = createElement(
         "button",
         "older-events",
         earlierCount === null
-          ? "加载本轮更早的工作记录"
-          : `加载本轮更早的工作记录（${formatNumber(earlierCount)} 条原始事件）`,
+          ? "查看本轮更早的原始技术事件"
+          : `查看本轮更早的原始技术事件（${formatNumber(earlierCount)} 条）`,
       );
       earlier.type = "button";
       earlier.addEventListener("click", () => loadEarlierEvents(turn, earlier));
-      log.append(earlier);
+      navigation.append(earlier);
     }
     if (page?.browsingEarlier) {
-      const latest = createElement("button", "older-events", "返回本轮最新记录");
+      const latest = createElement("button", "older-events", "返回最新原始技术事件");
       latest.type = "button";
       latest.addEventListener("click", () => {
         state.eventPages.delete(jobId);
         renderConversation(state.selectedDetail, { preserveScroll: true });
       });
-      log.append(latest);
+      navigation.append(latest);
     }
-    article.append(log);
+    article.append(navigation);
   }
 
-  for (const event of work.compactions) {
-    article.append(createElement(
-      "div",
-      "compaction-divider",
-      compactionText(event),
-    ));
-  }
-
-  for (const event of work.outcomes) {
-    const kind = String(event.kind || "").toLowerCase();
-    const tone = kind.includes("failed") || kind.includes("limit") ? "danger" : "quiet";
-    const fallback = kind.includes("completed")
-      ? "本轮运行已完成"
-      : kind === "handoff.collected" ? "Codex 已取回本轮结果" : "本轮运行未成功完成";
-    const outcome = createElement(
-      "div",
-      "outcome-note",
-      String(first(event.summary_zh, event.payload?.summary_zh, fallback)),
-    );
-    outcome.dataset.tone = tone;
-    article.append(outcome);
-  }
-  if (output.final) article.append(assistant);
+  article.append(assistant);
 
   const receipt = renderReceipt(turn);
   if (receipt) article.append(receipt);
@@ -976,13 +1474,21 @@ function renderFacts(detail) {
     : `${tpsValue.toFixed(1)} Token/s${tpsSourceLabels[performance.tokens_per_second_source] ? `（${tpsSourceLabels[performance.tokens_per_second_source]}）` : ""}`;
   const handoff = latest.handoff || latestSummary.handoff || {};
   const context = latest.context || {};
+  const executionMode = statusName(pick(latest, "display.execution_mode"));
+  const directExecution = executionMode === "direct";
   const currentContext = optionalNumber(context.current_tokens);
   const contextWindow = optionalNumber(context.context_window_tokens);
-  let contextText = "不可用";
+  let contextText;
   if (currentContext !== null && contextWindow !== null && contextWindow > 0) {
     contextText = `${formatNumber(currentContext)} / ${formatNumber(contextWindow)}（${Math.round(currentContext / contextWindow * 100)}%）`;
   } else if (currentContext !== null) {
     contextText = formatNumber(currentContext);
+  } else if (directExecution) {
+    contextText = "直接调用，无 Codex 上下文";
+  } else if (isActive(status)) {
+    contextText = "等待 Codex 运行时实测";
+  } else {
+    contextText = "Codex 运行时未上报上下文";
   }
   const handoffLabels = {
     collected: "已取回",
@@ -1047,18 +1553,21 @@ function renderConversation(detail, { preserveScroll = true } = {}) {
 
   const priorOutputs = new Map();
   const priorWorkOpen = new Map();
-  const priorReasoningOpen = new Map();
-  const priorReasoningTexts = new Map();
+  const priorThoughtOpen = new Map();
+  const priorThoughtTexts = new Map();
   for (const article of elements.turns.querySelectorAll(".turn[data-job-id]")) {
     const jobId = String(article.dataset.jobId || "");
     const output = article.querySelector(".assistant-output");
     if (jobId && output) priorOutputs.set(jobId, output);
-    const workLog = article.querySelector(".work-log");
-    if (jobId && workLog) priorWorkOpen.set(jobId, workLog.open);
-    const reasoning = article.querySelector(".reasoning-summary");
-    if (jobId && reasoning) priorReasoningOpen.set(jobId, reasoning.open);
-    for (const text of article.querySelectorAll(".reasoning-summary-text[data-summary-key]")) {
-      if (jobId) priorReasoningTexts.set(`${jobId}:${text.dataset.summaryKey}`, text);
+    for (const workLog of article.querySelectorAll(".work-log[data-activity-key]")) {
+      if (jobId) priorWorkOpen.set(`${jobId}:${workLog.dataset.activityKey}`, workLog.open);
+    }
+    for (const thought of article.querySelectorAll(".work-thought")) {
+      const thoughtText = thought.querySelector(".work-thought-text[data-work-thought-key]");
+      if (!jobId || !thoughtText) continue;
+      const mapKey = `${jobId}:${thoughtText.dataset.workThoughtKey}`;
+      priorThoughtOpen.set(mapKey, thought.open);
+      priorThoughtTexts.set(mapKey, thoughtText);
     }
   }
 
@@ -1069,38 +1578,28 @@ function renderConversation(detail, { preserveScroll = true } = {}) {
     const nextOutput = article.querySelector(".assistant-output");
     const priorOutput = priorOutputs.get(jobId);
     if (nextOutput && priorOutput) {
-      const nextText = nextOutput.textContent || "";
-      const priorText = priorOutput.textContent || "";
+      const nextText = nextOutput.dataset.markdownSource || "";
       priorOutput.className = nextOutput.className;
       priorOutput.dataset.truncated = nextOutput.dataset.truncated;
-      if (nextText.startsWith(priorText)) {
-        priorOutput.append(document.createTextNode(nextText.slice(priorText.length)));
-      } else if (nextText !== priorText) {
-        priorOutput.textContent = nextText;
-      }
+      updateMarkdownElement(priorOutput, nextText);
       nextOutput.replaceWith(priorOutput);
     }
-    const workLog = article.querySelector(".work-log");
-    if (workLog && priorWorkOpen.has(jobId)) workLog.open = priorWorkOpen.get(jobId);
-    const reasoning = article.querySelector(".reasoning-summary");
-    if (reasoning && priorReasoningOpen.has(jobId)) {
-      reasoning.open = priorReasoningOpen.get(jobId);
+    for (const workLog of article.querySelectorAll(".work-log[data-activity-key]")) {
+      const key = `${jobId}:${workLog.dataset.activityKey}`;
+      if (priorWorkOpen.has(key)) workLog.open = priorWorkOpen.get(key);
     }
-    for (const nextReasoning of article.querySelectorAll(".reasoning-summary-text[data-summary-key]")) {
-      const key = `${jobId}:${nextReasoning.dataset.summaryKey}`;
-      const priorReasoning = priorReasoningTexts.get(key);
-      if (!priorReasoning) continue;
-      const nextText = nextReasoning.textContent || "";
-      const priorText = priorReasoning.textContent || "";
-      priorReasoning.className = nextReasoning.className;
-      priorReasoning.setAttribute("aria-live", nextReasoning.getAttribute("aria-live") || "off");
-      priorReasoning.setAttribute("aria-atomic", "false");
-      if (nextText.startsWith(priorText)) {
-        priorReasoning.append(document.createTextNode(nextText.slice(priorText.length)));
-      } else if (nextText !== priorText) {
-        priorReasoning.textContent = nextText;
-      }
-      nextReasoning.replaceWith(priorReasoning);
+    for (const nextThought of article.querySelectorAll(".work-thought")) {
+      const nextTextNode = nextThought.querySelector(".work-thought-text[data-work-thought-key]");
+      if (!nextTextNode) continue;
+      const key = `${jobId}:${nextTextNode.dataset.workThoughtKey}`;
+      const priorTextNode = priorThoughtTexts.get(key);
+      if (!priorTextNode) continue;
+      nextThought.open = priorThoughtOpen.get(key);
+      priorTextNode.className = nextTextNode.className;
+      priorTextNode.setAttribute("aria-live", nextTextNode.getAttribute("aria-live") || "off");
+      priorTextNode.setAttribute("aria-atomic", "false");
+      updateMarkdownElement(priorTextNode, nextTextNode.dataset.markdownSource || "");
+      nextTextNode.replaceWith(priorTextNode);
     }
     fragment.append(article);
   });
@@ -1165,7 +1664,7 @@ async function loadEarlierEvents(turn, button) {
     renderConversation(state.selectedDetail, { preserveScroll: true });
   } catch (error) {
     button.disabled = false;
-    button.textContent = "加载本轮更早的工作记录";
+    button.textContent = "查看本轮更早的原始技术事件";
     showToast(`无法加载更早记录：${error.message}`);
   }
 }

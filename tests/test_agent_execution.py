@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -117,6 +118,54 @@ def after_codex_machine_event_probe(run_result):
 
 
 class AgentExecutionTests(unittest.TestCase):
+    def test_powershell_aicli_entry_preserves_native_argument_delimiter(self):
+        pwsh = shutil.which("pwsh")
+        if not pwsh:
+            self.skipTest("PowerShell 7 is unavailable")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = root / "aicli.ps1"
+            entry.write_text(
+                "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n"
+                "$OutputEncoding = [Text.UTF8Encoding]::new($false)\n"
+                "[pscustomobject]@{ tokens = @($args) } | "
+                "ConvertTo-Json -Compress\n",
+                encoding="utf-8",
+            )
+            runner = AiCliProfileRunner(
+                name="codex-cli",
+                engine="codex",
+                default_profile="codex-ollama-main",
+                entry=str(entry),
+            )
+            command = runner._prefix() + [
+                "run",
+                "codex-ollama-main",
+                "__LLM_TOOLKIT_AICLI_NATIVE_ARGS__",
+                "exec",
+                "--json",
+            ]
+            options = {
+                "cwd": root,
+                "capture_output": True,
+                "timeout": 15,
+            }
+            if os.name == "nt":
+                options["creationflags"] = getattr(
+                    subprocess,
+                    "CREATE_NO_WINDOW",
+                    0,
+                )
+            completed = subprocess.run(command, **options)
+            stdout = completed.stdout.decode("utf-8", errors="strict")
+            stderr = completed.stderr.decode("utf-8", errors="replace")
+
+            self.assertEqual(0, completed.returncode, stderr)
+            self.assertEqual(
+                ["run", "codex-ollama-main", "--", "exec", "--json"],
+                json.loads(stdout)["tokens"],
+            )
+
     def test_codex_runner_does_not_discover_a_legacy_localappdata_install(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1517,6 +1566,14 @@ class AgentExecutionTests(unittest.TestCase):
                     "machineEventProjection": "aicli.machine-event.v1",
                     "machineEventStatus": "ok",
                     "machineEventCount": 4,
+                    "webSearch": {
+                        "enabled": True,
+                        "provider": "bing-rss-v1",
+                        "searches": 1,
+                        "eventEvidence": "runtime-lifecycle",
+                        "query": "PRIVATE_RECEIPT_QUERY",
+                        "result": "PRIVATE_RECEIPT_RESULT",
+                    },
                 }
             }
 
@@ -1560,6 +1617,20 @@ class AgentExecutionTests(unittest.TestCase):
                     {
                         "schema": "aicli.machine-event.v1",
                         "sequence": 3,
+                        "kind": "tool.activity",
+                        "status": "completed",
+                        "item_type": "web_search",
+                        "tool_name": "public_web_search",
+                        "search_provider": "bing-rss-v1",
+                        "tool_calls": 2,
+                        "query": "PRIVATE_SEARCH_QUERY",
+                        "result": "PRIVATE_SEARCH_RESULT",
+                    }
+                )
+                callback(
+                    {
+                        "schema": "aicli.machine-event.v1",
+                        "sequence": 4,
                         "kind": "output.completed",
                         "status": "completed",
                         "public_text": "公开阶段结果",
@@ -1568,7 +1639,7 @@ class AgentExecutionTests(unittest.TestCase):
                 callback(
                     {
                         "schema": "aicli.machine-event.v1",
-                        "sequence": 4,
+                        "sequence": 5,
                         "kind": "context.usage.updated",
                         "status": "updated",
                         "current_tokens": 202000,
@@ -1579,7 +1650,7 @@ class AgentExecutionTests(unittest.TestCase):
                 callback(
                     {
                         "schema": "aicli.machine-event.v1",
-                        "sequence": 5,
+                        "sequence": 6,
                         "kind": "context.compaction.completed",
                         "status": "completed",
                         "compaction_count": 1,
@@ -1611,6 +1682,15 @@ class AgentExecutionTests(unittest.TestCase):
 
             self.assertEqual("完成", response.content)
             self.assertEqual("live_safe_events", response.observability_level)
+            self.assertEqual(
+                {
+                    "enabled": True,
+                    "provider": "bing-rss-v1",
+                    "searches": 1,
+                    "event_evidence": "runtime-lifecycle",
+                },
+                response.web_search,
+            )
             kinds = [
                 event["public_event"]["kind"]
                 for event in progress
@@ -1638,6 +1718,10 @@ class AgentExecutionTests(unittest.TestCase):
             self.assertNotIn("PRIVATE_COMMAND", serialized)
             self.assertNotIn("PRIVATE_CONTEXT_TRACE", serialized)
             self.assertNotIn("PRIVATE_COMPACTED_HISTORY", serialized)
+            self.assertNotIn("PRIVATE_SEARCH_QUERY", serialized)
+            self.assertNotIn("PRIVATE_SEARCH_RESULT", serialized)
+            self.assertNotIn("PRIVATE_RECEIPT_QUERY", serialized)
+            self.assertNotIn("PRIVATE_RECEIPT_RESULT", serialized)
             context_event = next(
                 event
                 for event in progress
@@ -1889,6 +1973,85 @@ class AgentExecutionTests(unittest.TestCase):
             "PRIVATE_RAW_REASONING_CANARY",
             json.dumps(event, ensure_ascii=False),
         )
+
+    def test_public_commentary_and_web_search_are_safe_independent_events(self):
+        progress = []
+
+        AiCliProfileRunner._emit_machine_event(
+            progress.append,
+            {
+                "kind": "commentary.delta",
+                "commentary_group": 7,
+                "public_text": "正在检查公开配置。",
+                "reasoning": "PRIVATE_RAW_REASONING_CANARY",
+                "item_id": "PRIVATE_ITEM_ID_CANARY",
+            },
+        )
+        AiCliProfileRunner._emit_machine_event(
+            progress.append,
+            {
+                "kind": "commentary.completed",
+                "commentary_group": 7,
+                "public_text": "公开定稿说明。",
+                "reasoning": "PRIVATE_RAW_REASONING_CANARY",
+                "item_id": "PRIVATE_ITEM_ID_CANARY",
+            },
+        )
+        AiCliProfileRunner._emit_machine_event(
+            progress.append,
+            {
+                "kind": "tool.activity",
+                "status": "completed",
+                "item_type": "web_search",
+                "tool_name": "public_web_search",
+                "search_provider": "bing-rss-v1",
+                "tool_calls": 2,
+                "query": "PRIVATE_SEARCH_QUERY",
+                "result": "PRIVATE_SEARCH_RESULT",
+            },
+        )
+
+        self.assertEqual(3, len(progress))
+        delta, completed, search = progress
+        self.assertEqual(
+            {
+                "commentary_group": 7,
+                "delta": "正在检查公开配置。",
+                "truncated": False,
+            },
+            delta["commentary_delta"],
+        )
+        self.assertEqual(
+            {
+                "commentary_group": 7,
+                "content_replace": "公开定稿说明。",
+                "truncated": False,
+            },
+            completed["commentary_replace"],
+        )
+        self.assertEqual(
+            {"commentary_group": 7},
+            delta["public_event"]["payload"],
+        )
+        self.assertEqual(
+            {"commentary_group": 7},
+            completed["public_event"]["payload"],
+        )
+        self.assertEqual(
+            {
+                "status": "completed",
+                "item_type": "web_search",
+                "tool_name": "public_web_search",
+                "search_provider": "bing-rss-v1",
+                "tool_calls": 2,
+            },
+            search["public_event"]["payload"],
+        )
+        serialized = json.dumps(progress, ensure_ascii=False)
+        self.assertNotIn("PRIVATE_RAW_REASONING_CANARY", serialized)
+        self.assertNotIn("PRIVATE_ITEM_ID_CANARY", serialized)
+        self.assertNotIn("PRIVATE_SEARCH_QUERY", serialized)
+        self.assertNotIn("PRIVATE_SEARCH_RESULT", serialized)
 
     def test_public_agent_output_delta_preserves_stream_boundary_whitespace(self):
         progress = []
@@ -2167,8 +2330,10 @@ class AgentExecutionTests(unittest.TestCase):
             self.assertEqual("done", response.content)
             self.assertIn("--image", command)
             self.assertIn(str(image), command)
-            self.assertIn("--model", command)
-            self.assertEqual("qwen-main-v1", command[command.index("--model") + 1])
+            # AICLI owns the exact Profile model binding and rejects native
+            # --model overrides for protected local profiles.  The runner
+            # verifies the reported model after completion instead.
+            self.assertNotIn("--model", command)
             self.assertEqual("hard", response.limit_enforcement["timeout"])
             self.assertEqual("hard", response.limit_enforcement["maxSteps"])
             self.assertEqual("hard", response.limit_enforcement["maxToolCalls"])
@@ -2732,6 +2897,45 @@ class AgentExecutionTests(unittest.TestCase):
             self.assertEqual("qwen-code", result["execution_receipt"]["runner"])
             self.assertEqual(4, result["execution_receipt"]["tool_calls"])
             self.assertNotIn("reasoning", result)
+
+    def test_agent_mode_projects_only_the_safe_web_search_receipt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            runner = FakeRunner(
+                AgentResponse(
+                    content='{"answer": 56}',
+                    runner="codex-cli",
+                    model="qwen-main-v1",
+                    exit_code=0,
+                    duration_ms=321,
+                    web_search={
+                        "enabled": True,
+                        "provider": "bing-rss-v1",
+                        "searches": 2,
+                        "event_evidence": "runtime-lifecycle",
+                        "query": "PRIVATE_RECEIPT_QUERY",
+                        "result": "PRIVATE_RECEIPT_RESULT",
+                    },
+                )
+            )
+            toolkit = Toolkit(
+                providers={"qwen-main-v1": FakeProvider()},
+                runners={"data_factory": runner},
+            )
+
+            result = toolkit.invoke(agent_request(Path(temp)))
+
+            self.assertEqual(
+                {
+                    "enabled": True,
+                    "provider": "bing-rss-v1",
+                    "searches": 2,
+                    "event_evidence": "runtime-lifecycle",
+                },
+                result["execution_receipt"]["web_search"],
+            )
+            serialized = json.dumps(result, ensure_ascii=False)
+            self.assertNotIn("PRIVATE_RECEIPT_QUERY", serialized)
+            self.assertNotIn("PRIVATE_RECEIPT_RESULT", serialized)
 
     def test_agent_mode_normalizes_usage_and_marks_wall_clock_tps_as_estimated(self):
         with tempfile.TemporaryDirectory() as temp:

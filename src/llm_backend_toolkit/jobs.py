@@ -27,7 +27,11 @@ from .input_integrity import (
 from .input_lifecycle import JobInputLifecycle, JobNotRunnableError  # noqa: F401
 from .observability import append_event, append_event_once, notify_observer
 from .public_progress import (
+    PUBLIC_COMMENTARY_DELTA_MAX_CHARS,
+    PUBLIC_COMMENTARY_MAX_CHARS,
+    PUBLIC_REASONING_SUMMARY_DELTA_MAX_CHARS,
     PUBLIC_REASONING_SUMMARY_MAX_CHARS,
+    bounded_public_draft,
     has_potential_secret_suffix,
     is_safe_public_progress_text,
 )
@@ -1206,10 +1210,23 @@ class JobStore:
         public_preview = ""
         public_preview_truncated = False
         public_preview_blocked = False
+        public_commentary_segments: list[dict[str, Any]] = []
+        public_commentary_by_group: dict[int, dict[str, Any]] = {}
+        public_commentary_blocked: set[int] = set()
+        public_commentary_completed: set[int] = set()
+        durable_commentary_text: dict[int, str] = {}
+        durable_commentary_blocked: set[int] = set()
+        durable_commentary_completed: set[int] = set()
+        public_commentary_truncated = False
+        commentary_segment_limit = 12
+        commentary_text_limit = 4_000
+        commentary_total_limit = PUBLIC_COMMENTARY_MAX_CHARS
         public_reasoning_summaries: list[dict[str, Any]] = []
         public_reasoning_by_key: dict[tuple[int, int], dict[str, Any]] = {}
         public_reasoning_blocked: set[tuple[int, int]] = set()
         public_reasoning_summaries_truncated = False
+        durable_reasoning_text: dict[tuple[int, int], str] = {}
+        durable_reasoning_blocked: set[tuple[int, int]] = set()
         reasoning_summary_entry_limit = 12
         reasoning_summary_text_limit = 4_000
         reasoning_summary_total_limit = PUBLIC_REASONING_SUMMARY_MAX_CHARS
@@ -1242,8 +1259,67 @@ class JobStore:
         allowed_phases = set(summaries)
         record_lock = threading.Lock()
 
+        def anchor_public_entry_to_event(
+            entry: dict[str, Any], appended_event: dict[str, Any]
+        ) -> None:
+            sequence = appended_event.get("sequence")
+            if type(sequence) is not int or sequence <= 0:
+                return
+            first_sequence = entry.get("first_sequence")
+            if type(first_sequence) is not int or first_sequence <= 0:
+                entry["first_sequence"] = sequence
+            entry["last_sequence"] = sequence
+
+        def durable_public_piece(
+            values: dict[Any, str],
+            blocked: set[Any],
+            key: Any,
+            raw_text: Any,
+            *,
+            max_chars: int,
+            replace: bool,
+            upstream_truncated: bool,
+        ) -> tuple[str, bool] | None:
+            """Retain a safe per-node event stream independently of progress.json.
+
+            progress.json remains a small live cache.  This state exists only
+            for split-secret checking and the per-node text bound, allowing
+            every public semantic node to stay recoverable from events.jsonl.
+            """
+
+            if key in blocked:
+                return None
+            bounded, bounded_truncated = bounded_public_draft(
+                raw_text,
+                max_chars=max_chars,
+            )
+            if not bounded:
+                blocked.add(key)
+                values.pop(key, None)
+                return None
+            current = "" if replace else values.get(key, "")
+            available = max(0, max_chars - len(current))
+            piece = bounded[:available]
+            candidate = piece if replace else current + piece
+            if not piece or (
+                not is_safe_public_progress_text(candidate)
+                or has_potential_secret_suffix(candidate)
+            ):
+                if candidate and has_potential_secret_suffix(candidate):
+                    blocked.add(key)
+                    values.pop(key, None)
+                return None
+            values[key] = candidate
+            return (
+                piece,
+                upstream_truncated
+                or bounded_truncated
+                or len(piece) < len(bounded),
+            )
+
         def record_unlocked(event: dict[str, Any]) -> None:
             nonlocal public_preview, public_preview_truncated, public_preview_blocked
+            nonlocal public_commentary_truncated
             nonlocal public_reasoning_summaries_truncated
             nonlocal last_phase, last_write
             phase = str(event.get("phase") or "waiting")
@@ -1281,8 +1357,246 @@ class JobStore:
                 else:
                     public_preview = candidate
                     public_preview_truncated = candidate_truncated
+            commentary_event_kind = ""
+            commentary_event_payload: dict[str, Any] | None = None
+            commentary_event_entry: dict[str, Any] | None = None
+            commentary_replace = event.get("commentary_replace")
+            commentary_delta = event.get("commentary_delta")
+            durable_commentary_kind = ""
+            durable_commentary_payload: dict[str, Any] | None = None
+            if allow_public_preview and isinstance(commentary_replace, dict):
+                durable_group = commentary_replace.get("commentary_group")
+                durable_text = commentary_replace.get("content_replace")
+                if (
+                    type(durable_group) is int
+                    and 1 <= durable_group <= 1_000_000
+                    and isinstance(durable_text, str)
+                    and durable_text
+                    and durable_group not in durable_commentary_completed
+                ):
+                    durable_value = durable_public_piece(
+                        durable_commentary_text,
+                        durable_commentary_blocked,
+                        durable_group,
+                        durable_text,
+                        max_chars=PUBLIC_COMMENTARY_DELTA_MAX_CHARS,
+                        replace=True,
+                        upstream_truncated=(
+                            commentary_replace.get("truncated") is True
+                            or event.get("public_commentary_truncated") is True
+                        ),
+                    )
+                    if durable_value is not None:
+                        durable_piece, durable_truncated = durable_value
+                        durable_commentary_completed.add(durable_group)
+                        durable_commentary_kind = "agent.commentary.completed"
+                        durable_commentary_payload = {
+                            "commentary_group": durable_group,
+                            "content_replace": durable_piece,
+                        }
+                        if durable_truncated:
+                            durable_commentary_payload["truncated"] = True
+            elif allow_public_preview and isinstance(commentary_delta, dict):
+                durable_group = commentary_delta.get("commentary_group")
+                durable_text = commentary_delta.get("delta")
+                if (
+                    type(durable_group) is int
+                    and 1 <= durable_group <= 1_000_000
+                    and isinstance(durable_text, str)
+                    and durable_text
+                    and durable_group not in durable_commentary_completed
+                ):
+                    durable_value = durable_public_piece(
+                        durable_commentary_text,
+                        durable_commentary_blocked,
+                        durable_group,
+                        durable_text,
+                        max_chars=PUBLIC_COMMENTARY_DELTA_MAX_CHARS,
+                        replace=False,
+                        upstream_truncated=(
+                            commentary_delta.get("truncated") is True
+                            or event.get("public_commentary_truncated") is True
+                        ),
+                    )
+                    if durable_value is not None:
+                        durable_piece, durable_truncated = durable_value
+                        durable_commentary_kind = "agent.commentary.delta"
+                        durable_commentary_payload = {
+                            "commentary_group": durable_group,
+                            "delta": durable_piece,
+                        }
+                        if durable_truncated:
+                            durable_commentary_payload["truncated"] = True
+            if allow_public_preview and isinstance(commentary_replace, dict):
+                commentary_group = commentary_replace.get("commentary_group")
+                commentary_content_replace = commentary_replace.get("content_replace")
+                if (
+                    type(commentary_group) is int
+                    and 1 <= commentary_group <= 1_000_000
+                    and isinstance(commentary_content_replace, str)
+                    and commentary_content_replace
+                    and commentary_group not in public_commentary_blocked
+                    and commentary_group not in public_commentary_completed
+                ):
+                    entry = public_commentary_by_group.get(commentary_group)
+                    if entry is None:
+                        if len(public_commentary_segments) >= commentary_segment_limit:
+                            public_commentary_truncated = True
+                        else:
+                            entry = {
+                                "commentary_group": commentary_group,
+                                "text": "",
+                            }
+                            public_commentary_by_group[commentary_group] = entry
+                            public_commentary_segments.append(entry)
+                    if entry is not None:
+                        other_total = sum(
+                            len(str(item["text"]))
+                            for item in public_commentary_segments
+                            if item is not entry
+                        )
+                        available = min(
+                            commentary_text_limit,
+                            commentary_total_limit - other_total,
+                        )
+                        if available <= 0:
+                            public_commentary_truncated = True
+                        else:
+                            content_replace = commentary_content_replace[:available]
+                            replacement_truncated = (
+                                len(content_replace) < len(commentary_content_replace)
+                                or commentary_replace.get("truncated") is True
+                                or event.get("public_commentary_truncated") is True
+                            )
+                            if content_replace and (
+                                not is_safe_public_progress_text(content_replace)
+                                or has_potential_secret_suffix(content_replace)
+                            ):
+                                public_commentary_segments.remove(entry)
+                                public_commentary_by_group.pop(commentary_group, None)
+                                public_commentary_blocked.add(commentary_group)
+                            else:
+                                entry["text"] = content_replace
+                                public_commentary_completed.add(commentary_group)
+                                if replacement_truncated:
+                                    public_commentary_truncated = True
+                                commentary_event_kind = "agent.commentary.completed"
+                                commentary_event_payload = {
+                                    "commentary_group": commentary_group,
+                                    "content_replace": content_replace,
+                                }
+                                commentary_event_entry = entry
+                                if commentary_replace.get("truncated") is True:
+                                    commentary_event_payload["truncated"] = True
+            elif allow_public_preview and isinstance(commentary_delta, dict):
+                commentary_group = commentary_delta.get("commentary_group")
+                delta_text = commentary_delta.get("delta")
+                if (
+                    type(commentary_group) is int
+                    and 1 <= commentary_group <= 1_000_000
+                    and isinstance(delta_text, str)
+                    and delta_text
+                    and commentary_group not in public_commentary_blocked
+                    and commentary_group not in public_commentary_completed
+                ):
+                    entry = public_commentary_by_group.get(commentary_group)
+                    if entry is None:
+                        if len(public_commentary_segments) >= commentary_segment_limit:
+                            public_commentary_truncated = True
+                        else:
+                            entry = {
+                                "commentary_group": commentary_group,
+                                "text": "",
+                            }
+                            public_commentary_by_group[commentary_group] = entry
+                            public_commentary_segments.append(entry)
+                    if entry is not None:
+                        current_text = str(entry["text"])
+                        current_total = sum(
+                            len(str(item["text"]))
+                            for item in public_commentary_segments
+                        )
+                        available = min(
+                            commentary_text_limit - len(current_text),
+                            commentary_total_limit - current_total,
+                        )
+                        if available <= 0:
+                            public_commentary_truncated = True
+                        else:
+                            piece = delta_text[:available]
+                            candidate = current_text + piece
+                            candidate_truncated = (
+                                len(piece) < len(delta_text)
+                                or commentary_delta.get("truncated") is True
+                                or event.get("public_commentary_truncated") is True
+                            )
+                            if candidate and (
+                                not is_safe_public_progress_text(candidate)
+                                or has_potential_secret_suffix(candidate)
+                            ):
+                                # A later delta can reveal a credential-like
+                                # prefix.  Remove and freeze that whole group.
+                                public_commentary_segments.remove(entry)
+                                public_commentary_by_group.pop(commentary_group, None)
+                                public_commentary_blocked.add(commentary_group)
+                            else:
+                                entry["text"] = candidate
+                                if candidate_truncated:
+                                    public_commentary_truncated = True
+                                commentary_event_kind = "agent.commentary.delta"
+                                commentary_event_payload = {
+                                    "commentary_group": commentary_group,
+                                    "delta": piece,
+                                }
+                                commentary_event_entry = entry
+                                if commentary_delta.get("truncated") is True:
+                                    commentary_event_payload["truncated"] = True
+
+            # The live cache may be full while the safe durable event remains
+            # valid.  Use the independently guarded payload for persistence.
+            commentary_event_kind = durable_commentary_kind
+            commentary_event_payload = durable_commentary_payload
+
             reasoning_event_payload: dict[str, Any] | None = None
+            reasoning_event_entry: dict[str, Any] | None = None
             reasoning_delta = event.get("reasoning_summary_delta")
+            durable_reasoning_payload: dict[str, Any] | None = None
+            if allow_public_preview and isinstance(reasoning_delta, dict):
+                durable_group = reasoning_delta.get("summary_group")
+                durable_index = reasoning_delta.get("summary_index")
+                if durable_group is None and durable_index is None:
+                    durable_group, durable_index = 1, 0
+                durable_text = reasoning_delta.get("delta")
+                if (
+                    type(durable_group) is int
+                    and 1 <= durable_group <= 1_000_000
+                    and type(durable_index) is int
+                    and 0 <= durable_index <= 10_000
+                    and isinstance(durable_text, str)
+                    and durable_text
+                ):
+                    durable_key = (durable_group, durable_index)
+                    durable_value = durable_public_piece(
+                        durable_reasoning_text,
+                        durable_reasoning_blocked,
+                        durable_key,
+                        durable_text,
+                        max_chars=PUBLIC_REASONING_SUMMARY_DELTA_MAX_CHARS,
+                        replace=False,
+                        upstream_truncated=(
+                            reasoning_delta.get("truncated") is True
+                            or event.get("public_reasoning_summaries_truncated") is True
+                        ),
+                    )
+                    if durable_value is not None:
+                        durable_piece, durable_truncated = durable_value
+                        durable_reasoning_payload = {
+                            "summary_group": durable_group,
+                            "summary_index": durable_index,
+                            "delta": durable_piece,
+                        }
+                        if durable_truncated:
+                            durable_reasoning_payload["truncated"] = True
             if allow_public_preview and isinstance(reasoning_delta, dict):
                 raw_summary_group = reasoning_delta.get("summary_group")
                 raw_summary_index = reasoning_delta.get("summary_index")
@@ -1361,8 +1675,10 @@ class JobStore:
                                         "summary_index": summary_index,
                                         "delta": piece,
                                     }
+                                    reasoning_event_entry = entry
                                     if reasoning_delta.get("truncated") is True:
                                         reasoning_event_payload["truncated"] = True
+            reasoning_event_payload = durable_reasoning_payload
             if allow_public_preview and not public_preview_blocked:
                 if has_replacement:
                     metrics["estimated_output_tokens"] = _estimate_tokens(replacement)
@@ -1391,13 +1707,28 @@ class JobStore:
                     int(event["context_window_tokens"]),
                 )
 
+            if commentary_event_payload is not None:
+                commentary_event = append_event(
+                    job_dir,
+                    commentary_event_kind,
+                    (
+                        "公开执行说明已完成。"
+                        if commentary_event_kind == "agent.commentary.completed"
+                        else "公开执行说明正在更新。"
+                    ),
+                    payload=commentary_event_payload,
+                )
+                if commentary_event_entry is not None:
+                    anchor_public_entry_to_event(commentary_event_entry, commentary_event)
             if reasoning_event_payload is not None:
-                append_event(
+                reasoning_event = append_event(
                     job_dir,
                     "agent.reasoning.summary.delta",
                     "公开工作摘要正在更新。",
                     payload=reasoning_event_payload,
                 )
+                if reasoning_event_entry is not None:
+                    anchor_public_entry_to_event(reasoning_event_entry, reasoning_event)
 
             public_event = event.get("public_event")
             if isinstance(public_event, dict):
@@ -1411,6 +1742,8 @@ class JobStore:
                     if kind not in {
                         "agent.context.usage.updated",
                         "agent.output.delta",
+                        "agent.commentary.delta",
+                        "agent.commentary.completed",
                         "agent.reasoning.summary.delta",
                     } and not (
                         not allow_public_preview
@@ -1506,6 +1839,14 @@ class JobStore:
                 payload["public_preview"] = public_preview
             if public_preview_truncated:
                 payload["public_preview_truncated"] = True
+            if public_commentary_segments:
+                payload["public_commentary_segments"] = [
+                    dict(item)
+                    for item in public_commentary_segments
+                    if item.get("text")
+                ]
+            if public_commentary_truncated:
+                payload["public_commentary_truncated"] = True
             if public_reasoning_summaries:
                 payload["public_reasoning_summaries"] = [
                     dict(item)
@@ -1819,13 +2160,13 @@ class JobStore:
                 return None
             requested_limit_mode = budget.get("limit_mode")
             if requested_limit_mode is None:
-                # Legacy numeric budget fields implied the old bounded route;
-                # an omitted budget (or only null fields) is completion-driven.
+                # Legacy numeric fields imply bounded execution; otherwise
+                # use the current AICLI-compatible watchdog-only default.
                 has_legacy_cutoff = any(
                     budget.get(name) is not None
                     for name in ("timeout_seconds", "max_steps", "max_tool_calls")
                 )
-                limit_mode = "bounded" if has_legacy_cutoff else "completion_driven"
+                limit_mode = "bounded" if has_legacy_cutoff else "watchdog_only"
             else:
                 limit_mode = str(requested_limit_mode)
             if limit_mode == "completion_driven":

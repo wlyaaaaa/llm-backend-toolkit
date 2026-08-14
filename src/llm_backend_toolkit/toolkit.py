@@ -35,6 +35,28 @@ def _canonical_digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _safe_web_search_receipt(value: Any) -> dict[str, Any]:
+    """Keep only the contract fields usable by a read-only observer."""
+    if not isinstance(value, dict) or type(value.get("enabled")) is not bool:
+        return {}
+    if value["enabled"] is False:
+        return {"enabled": False}
+    searches = value.get("searches")
+    if (
+        value.get("provider") != "bing-rss-v1"
+        or type(searches) is not int
+        or not 0 <= searches <= 10_000
+        or value.get("event_evidence") != "runtime-lifecycle"
+    ):
+        return {}
+    return {
+        "enabled": True,
+        "provider": "bing-rss-v1",
+        "searches": searches,
+        "event_evidence": "runtime-lifecycle",
+    }
+
+
 class Toolkit:
     def __init__(
         self,
@@ -446,17 +468,16 @@ class Toolkit:
         if not isinstance(budget_input, dict):
             return self._blocked("invalid_request", "Agent execution.budget must be an object.")
 
-        # ``completion_driven`` is the product default.  Requests that carry
-        # the pre-completion numeric fields without a mode are retained as a
-        # narrow backwards-compatible bounded form; new callers must opt in to
-        # either legacy mode explicitly.
+        # Current AICLI exposes watchdog-only and explicit-limit contracts.
+        # Keep completion_driven as an explicit legacy request, but never
+        # select an option that the installed harness cannot parse by default.
         requested_limit_mode = budget_input.get("limit_mode")
         if requested_limit_mode is None:
             has_legacy_cutoff = any(
                 budget_input.get(name) is not None
                 for name in ("timeout_seconds", "max_steps", "max_tool_calls")
             )
-            limit_mode = "bounded" if has_legacy_cutoff else "completion_driven"
+            limit_mode = "bounded" if has_legacy_cutoff else "watchdog_only"
         else:
             limit_mode = str(requested_limit_mode)
         if limit_mode not in {"completion_driven", "bounded", "watchdog_only"}:
@@ -654,6 +675,9 @@ class Toolkit:
         output, checks = self._check_output(response.content, (request.get("task") or {}).get("expected_output") or {})
         status = "ok" if all(check["passed"] for check in checks) else "partial"
         usage = self._agent_usage(response)
+        web_search_receipt = _safe_web_search_receipt(
+            getattr(response, "web_search", {})
+        )
         return {
             "status": status,
             "output": output,
@@ -698,6 +722,11 @@ class Toolkit:
                 "policy": policy,
                 "budget": budget,
                 "fallback_used": False,
+                **(
+                    {"web_search": web_search_receipt}
+                    if web_search_receipt
+                    else {}
+                ),
                 **route_receipt,
                 **(
                     {

@@ -41,6 +41,7 @@ internal static partial class Program
             using var mutex = new Mutex(true, MutexName, out bool createdNew);
             if (!createdNew)
             {
+                WindowIdentity.TryActivateExistingManagedWindow(options.Title);
                 return 0;
             }
             Uri url = options.Url ?? StartObserver(options.ToolkitCommand!);
@@ -227,6 +228,7 @@ internal sealed class ObserverForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(1120, 720);
         Size = new Size(1440, 900);
+        WindowState = FormWindowState.Maximized;
         BackColor = Color.White;
         // Do not expose a blank or failed shell while WebView2 is starting.
         // The real window and its taskbar button become visible only after the
@@ -263,6 +265,9 @@ internal sealed class ObserverForm : Form
             Text = _options.Title;
             ShowInTaskbar = true;
             Opacity = 1D;
+            BringToFront();
+            Activate();
+            WindowIdentity.TryActivateWindow(Handle);
         }
         catch (Exception exception)
         {

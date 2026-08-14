@@ -2,7 +2,7 @@
 
 ## 最终产品效果
 
-模型调用观察台是 `llm-backend-toolkit` 的本机只读可观察面。用户只需从桌面或开始菜单打开一次白底纯绿 GUI；此后 AI 通过受管 skill 发起的任务会自动出现并实时更新，不需要手动刷新，也不会由每次调用反复抢焦点。
+模型调用观察台是 `llm-backend-toolkit` 的本机只读可观察面。用户从桌面或开始菜单打开白底纯绿 GUI 后，受管任务会自动出现并实时更新，不需要手动刷新。显式再次启动会尝试最大化并把已有窗口带到前台；Windows 可能按前台策略拒绝该请求。
 
 界面采用封存 Local Remote Demo 的桌面三栏视觉，但移除本观察台不可提供的所有控制面：
 
@@ -18,7 +18,7 @@
 
 公开草稿只消费 AICLI 投影出的安全 `agent_message`：每个 `output.delta` 都作为单个增量进入 progress recorder，并借助 SSE refresh 在 DOM 中追加新后缀；增量本身不再逐条写入耐久时间线。活跃轮次始终优先显示最新 `public_preview`，不会被旧结果快照遮住；`output.completed` 仍作为最终输出和时间线事件保留，并用有界完整公开文本 replacement 对齐同一个回答节点，因此已有 delta 不会重复，没有 delta 时也能直接建立 preview。草稿默认上限为 20,000 字，超过时投影显式 `public_preview_truncated`，界面提示改看最终结果。这些公开消息保持模型原文，不自动翻译，也不是隐藏 chain-of-thought。
 
-“工作思路”只消费原生 CLI 明确公开并经安全投影的 `reasoning.summary.delta`，按 `summary_group + summary_index` 累积为独立节点，不从普通 reasoning 活动、状态文案或隐藏正文推导内容。活跃轮次默认展开，同一节点随 SSE 刷新只追加新增后缀；终态仍保留但默认可折叠。正式累积字段尚不可用时，前端仅兼容带相同索引和明确安全 delta 的 `agent.reasoning.summary.delta` 事件，不把通用 `summary_zh` 冒充内容；没有真实数据就不生成节点。每段、总量和段数均有界，工作思路与实时草稿、最终答复互不混用。
+“工作思路”同时消费原生 CLI 明确公开并经安全投影的 `commentary` 与 `reasoning.summary.delta`，分别按安全 group 累积，不从普通 reasoning 活动、状态文案或隐藏正文推导内容。所有轮次始终默认展开；同一节点随 SSE 刷新只追加新增后缀。`progress.json` 仍是 12 段 / 20,000 字的实时 cache，但耐久公开事件与它解耦；主对话从完整事件流恢复全部安全语义节点。同一 group 若跨越命令、文件、搜索、压缩或结局，会按活动边界切成连续 part，避免把后半段思路错误放到工具之前。没有真实公开内容就不生成节点，工作思路与实时草稿、最终答复互不混用。
 
 Codex `0.145.x` 存在一个已实测的窄生命周期例外：一条或多条较早公开 `agentMessage` 可能已经发送 delta，却不再发送自己的 completed，随后由一条更晚的 completed final 收口。AICLI 只在版本确为 `0.145.x`、所有未完成项都是较早的公开 `agentMessage`、且之后存在非空 completed final 时兼容；推理、工具、文件项未完成，final 缺失，final 之后才出现未完成消息，或未来 Codex 版本都继续明确失败。这样既保留真实实时消息，也不会把任意协议漂移伪装成成功。
 
@@ -56,6 +56,8 @@ Codex `0.145.x` 存在一个已实测的窄生命周期例外：一条或多条�
 
 严禁进入事件投影的内容包括 prompt、隐藏 reasoning/thinking 正文、原始命令/argv、工具输入输出、环境变量、stdout/stderr、OCR/ASR 识别正文、绝对私密路径、PID 和 Broker lease token。
 
+受管 Codex harness 的 `public_web_search` 是可发现、可多次调用的真实动态工具，不是 GUI 模拟能力。当前安全合同只接受 `tool_name=public_web_search`、`search_provider=bing-rss-v1` 的运行期 lifecycle；同一 turn 可产生多个独立 started/completed/failed 调用。观察台只显示调用次数、状态、provider 与 `runtime-lifecycle` 回执，不投影 query、结果正文、错误详情或调用 ID。搜索返回内容仍是不可信公共文本；缺少 exact lifecycle 或 receipt 时只按普通网页活动显示，绝不补造“已搜索成功”。AICLI 默认启用受管搜索，调用方可用 `--no-web-search` 显式关闭；Toolkit/GUI 只是该公开事件的消费者，不绕过 AICLI 权限、SecretRef 或网络边界。
+
 Token/s 指标必须说明依据：
 
 - `eval_duration`：Ollama 最终 `completion_tokens / eval_duration_ns`，精确表示模型评估时段的输出 token/秒，不把提示处理、排队或工具时间计入分母；
@@ -74,6 +76,12 @@ Token 卡片的主值是上游本次运行累计总计，可展开直接查看�
 - 高频 usage 通知只更新卡片，不灌满工作时间线；Codex app-server 实际完成 `contextCompaction` 时才写入“Codex 已自动压缩上下文”节点。
 
 Toolkit 自己的 `context.compaction.completed` 是模型调用前的确定性输入压缩，界面标为“已压缩调用输入”；它与 Codex agent 会话的原生自动压缩是两条独立事实链。
+
+## 2026-08-13 本地模型与完整主对话验收
+
+当前实机 Demo 使用本地 `qwen-main-v1`、AICLI `0.3.5` 与 Codex CLI `0.147.0`，三轮均为真实模型运行而非 UI fixture。三轮共 1,962 条底层事件、19 个公开思路节点；首轮包含 11 个去重命令 lifecycle、3 个 `public_web_search` lifecycle 和 3 个工作区变化。首轮末端因未完成 item 失败关闭，GUI 将已公开正文标为“失败前草稿”；后续成功轮给出带标题、列表、GFM 表格、引用、代码块、粗体与安全 HTTPS 链接的 Markdown 最终答复。
+
+主对话扫描完整耐久事件流并只生成语义节点，因此 160 条 raw event page 不会截断这些思路和活动；原始技术事件仍可通过 API 分页诊断。1440×1000 的隔离无窗口浏览器验收确认：12 个首轮思路全部默认展开，12 个相邻活动块按 sequence 穿插，三次网络搜索分别可见，命令合计 11、工作区变化合计 3，页面无横向溢出。该次搜索工具确实被调用三次，但上游端点返回 `PUBLIC_WEB_SEARCH_UNAVAILABLE`；验收只证明工具发现、调用和 lifecycle 投影，不声称取得有效搜索结果。
 
 ## 2026-07-25 实机页面验收
 
@@ -114,16 +122,16 @@ Toolkit 调用 OCR/ASR 时会把开始/完成阶段写入同一个模型 job。�
 - `/api/stream` 只发送 refresh 信号，详情仍由同源 loopback JSON API 读取；连接会持续发送 heartbeat，直到客户端主动断开，不会在任务仍运行时静默到期。
 - 浏览器断线时降级为有界轮询；SSE 恢复后停止通用轮询。选中的活跃任务仍用本地 1 秒 ticker 更新耗时，并每 5 秒低频复核详情，使静默工具阶段和 `monitor_until_utc` 过期仍能及时反映；终态耗时冻结。
 - GUI 首屏只加载最近 100 条，旧历史按页加载。
-- 单轮详情只加载最近 160 个事件，`/api/runs/{job_id}/events` 以 `before_sequence` 向前分页；前端浏览窗口最多保留 240 个事件，并可明确返回本轮最新记录。旧版连续 `agent.output.delta` 不作为工作行重复渲染。
+- 主对话默认展示本轮完整的公开语义投影：全部安全思路节点、按相邻思路分段的命令/文件/网络活动、压缩与结局。最近 160 条 / 前端 240 条只约束独立的 raw 技术事件分页与旧记录兼容，不约束主对话，也不在 canonical 主视图显示“加载更早”按钮。旧版连续 `agent.output.delta` 不作为工作行重复渲染。
 - 服务缓存未变化的终态摘要；活跃任务继续计算新鲜耗时。
 - 列表和详情分开请求，静态资源无外部依赖，长输出使用滚动容器和安全 `textContent`。
 
 ## Windows 桌面入口
 
-正式入口是项目自带的无控制台 WinForms/WebView2 宿主。它在窗口创建前设置 `AppUserModelID=Wly.LlmBackendToolkit.Observer`，再为同一 HWND 写入 AUMID、`RelaunchIconResource` 与 `WM_SETICON` 大小图标；离屏自测必须回读并证明进程身份、窗口身份、窗口图标和 WebView2 初始化全部成立。宿主只清除自身进程内会覆盖显式参数的 `WEBVIEW2_*` 变量，并使用独立 LocalAppData profile，避免 Windows Search/Widgets 共用 profile 导致 `ERROR_INVALID_STATE (0x8007139F)`。属性、图标或 WebView 初始化任一失败都只写本机有界诊断并关闭失败，不弹错误框，也不把 Edge 图标或占位页冒充成功。
+正式入口是项目自带的无控制台 WinForms/WebView2 宿主。它使用独立 LocalAppData profile，只有导航成功才显示默认最大化窗口；新窗口与重复启动都会尝试前台激活，但 Windows 仍可能拒绝 foreground 切换。宿主继续设置 AUMID、`RelaunchIconResource` 与 `WM_SETICON`，但这些回读只证明 metadata/handle 层生效；Explorer 任务栏最终图标渲染已退出当前 acceptance，不能称为视觉 PASS。WebView 初始化或导航失败只写本机有界诊断并关闭失败，不弹控制台或错误框，也不把占位页冒充成功。
 
-`Start-LlmBackendObserver.ps1` 先确保 loopback 服务存活，再启动原生宿主；它用同用户互斥锁、精确窗口标题和宿主路径去重，不激活已有窗口。`Install-LlmBackendObserverShortcut.ps1` 使用 Windows Known Folder 同时创建当前用户桌面与开始菜单 Programs 快捷方式，不假设 OneDrive 或用户名路径，并让快捷方式直接指向 `LlmBackendObserverHost.exe`，绑定项目白绿 ICO、相同 AppUserModelID 与 RelaunchIconResource。正式运行链不以 `pwsh.exe` 为快捷方式目标；观察服务和 AICLI 子进程均用 `CREATE_NO_WINDOW` / Hidden 语义，失败不产生可见 PowerShell/控制台。安装、升级和 `-Remove` 都会验证宿主目标、完整参数、工作目录、描述、图标与 Shell 身份；只有能证明属于本工具的链接才会修改或删除，旧 PowerShell 入口或只有 `IconLocation` 而缺少 AUMID 的本工具链接会被自动升级。首次全体预检会避免开始时已经存在的同名冲突导致半更新；每个目标在变更或确认 `unchanged` / `absent` 前还会按文件身份和链接契约最终复验。两个独立 Known Folder 不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，已经完成的本工具链接更新或删除可能保留，可在处理冲突后幂等重跑恢复。
+`Start-LlmBackendObserver.ps1` 先确保 loopback 服务存活，再启动原生宿主；它用同用户互斥锁、精确窗口标题和宿主路径去重，并尝试最大化和激活已有窗口。`Install-LlmBackendObserverShortcut.ps1` 使用 Windows Known Folder 同时创建当前用户桌面与开始菜单 Programs 快捷方式，不假设 OneDrive 或用户名路径，并让快捷方式直接指向 `LlmBackendObserverHost.exe`。正式运行链不以 `pwsh.exe` 为快捷方式目标；观察服务和 AICLI 子进程均用 `CREATE_NO_WINDOW` / Hidden 语义，失败不产生可见 PowerShell/控制台。安装、升级和 `-Remove` 都会验证宿主目标、完整参数、工作目录与描述；只有能证明属于本工具的链接才会修改或删除。两个独立 Known Folder 不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，可在处理冲突后幂等重跑恢复。
 
 个人 skill wrapper 在模型 `submit` / `probe` 之前调用启动器，因此可见 job 会在 worker 启动前写入；GUI 失败时不得静默开始不可观察的模型调用。
 
-正式 wrapper 同时把 `LLM_TOOLKIT_AICLI_ENTRY` 固定为受管的当前源码入口；入口不存在时先失败，不搜索或回落到旧安装态。当前 Codex app-server 最低已验证基线是 `codex-cli 0.145.0`，`0.146.0-alpha.3.1` 曾通过兼容验收；未来版本默认尝试，但必要字段、通知、thread/turn、item 生命周期或清理协议漂移必须明确失败。官方与本地 Ollama Codex machine run 使用 Codex 原生 workspace sandbox；第三方 Codex 及其他适用引擎才使用 Windows 外层沙箱。
+正式 wrapper 把 `LLM_TOOLKIT_AICLI_ENTRY` 固定为受管入口；入口不存在时先失败，不搜索或回落到旧安装态。当前普通本地观察链已用 AICLI `0.3.5` / Codex CLI `0.147.0` 完成真实验收；benchmark-only 路由仍以自身 registry 中的精确 source/hash/version 证据为准，不能借用普通链的版本回执。未来版本默认尝试，但必要字段、通知、thread/turn、item 生命周期或清理协议漂移必须明确失败。官方与本地 Ollama Codex machine run 使用 Codex 原生 workspace sandbox；第三方 Codex 及其他适用引擎才使用 Windows 外层沙箱。

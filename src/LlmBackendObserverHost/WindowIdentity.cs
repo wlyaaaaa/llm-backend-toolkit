@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace LlmBackendObserverHost;
 
@@ -9,6 +11,7 @@ internal static class WindowIdentity
     private const int IconSmall = 0;
     private const int IconBig = 1;
     private const uint GpsReadWrite = 0x00000002;
+    private const int SwShowMaximized = 3;
 
     private static readonly Guid AppUserModelFormatId =
         new("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
@@ -43,6 +46,95 @@ internal static class WindowIdentity
         IntPtr wordParameter,
         IntPtr longParameter
     );
+
+    private delegate bool EnumWindowsCallback(IntPtr windowHandle, IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumWindows(
+        EnumWindowsCallback callback,
+        IntPtr parameter
+    );
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(
+        IntPtr windowHandle,
+        StringBuilder text,
+        int maximumLength
+    );
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(
+        IntPtr windowHandle,
+        out uint processId
+    );
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindowAsync(IntPtr windowHandle, int command);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr windowHandle);
+
+    internal static bool TryActivateExistingManagedWindow(string title)
+    {
+        string managedRoot = Path.GetFullPath(
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "LlmBackendToolkit",
+                "ObserverHost"
+            )
+        ).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        IntPtr match = IntPtr.Zero;
+        EnumWindows((windowHandle, _) =>
+        {
+            if (!IsWindowVisible(windowHandle))
+            {
+                return true;
+            }
+            var windowTitle = new StringBuilder(256);
+            if (GetWindowText(windowHandle, windowTitle, windowTitle.Capacity) <= 0 ||
+                !String.Equals(windowTitle.ToString(), title, StringComparison.Ordinal))
+            {
+                return true;
+            }
+            GetWindowThreadProcessId(windowHandle, out uint processId);
+            try
+            {
+                using Process process = Process.GetProcessById(checked((int)processId));
+                string processPath = process.MainModule?.FileName ?? "";
+                if (
+                    processPath.StartsWith(managedRoot, StringComparison.OrdinalIgnoreCase) &&
+                    String.Equals(
+                        Path.GetFileName(processPath),
+                        "LlmBackendObserverHost.exe",
+                        StringComparison.OrdinalIgnoreCase
+                    )
+                )
+                {
+                    match = windowHandle;
+                    return false;
+                }
+            }
+            catch
+            {
+                // A candidate process may exit while top-level windows are enumerated.
+            }
+            return true;
+        }, IntPtr.Zero);
+        return match != IntPtr.Zero && TryActivateWindow(match);
+    }
+
+    internal static bool TryActivateWindow(IntPtr windowHandle)
+    {
+        _ = ShowWindowAsync(windowHandle, SwShowMaximized);
+        return SetForegroundWindow(windowHandle);
+    }
 
     internal static void ApplyProcessIdentity(string appUserModelId)
     {

@@ -223,6 +223,34 @@ class LocalAsyncWorkerContractTests(unittest.TestCase):
                 state["controlled_cancel"]["executor_kind"],
             )
 
+    def test_omitted_worker_budget_defaults_to_watchdog_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "staging"
+            workspace.mkdir()
+            envelope = _envelope(workspace)
+            envelope["request"]["execution"]["budget"] = {}
+            worker = self._worker(
+                root,
+                _CancelBridge(
+                    process_tree_confirmed=True,
+                    gpu_lease_released=True,
+                ),
+            )
+
+            handle = worker.start(envelope)
+
+        self.assertEqual(
+            {
+                "timeout_seconds": 900,
+                "idle_timeout_seconds": None,
+                "limit_mode": "watchdog_only",
+                "max_steps": None,
+                "max_tool_calls": None,
+            },
+            handle["binding_receipt"]["requested"]["budget"],
+        )
+
     def test_start_fails_closed_when_required_binding_is_missing(self):
         required_paths = (
             ("bindings", "artifact_digest"),
@@ -373,7 +401,7 @@ class LocalAsyncWorkerContractTests(unittest.TestCase):
             budget["properties"]["limit_mode"]["enum"],
         )
         self.assertEqual(
-            "completion_driven",
+            "watchdog_only",
             budget["properties"]["limit_mode"]["default"],
         )
         self.assertIn("bindings", worker_schema["required"])

@@ -40,11 +40,11 @@ callback。它必须返回 `process_tree.confirmed_absent` 与
   model/profile/AICLI/上下文 digest；其他 backend、runner、默认选择或 fallback 全部拒绝。
 
 两类都使用隔离的 `workspace-write` 根作为唯一 read/write root。legacy 路线预算默认是
-`limit_mode=completion_driven`、`idle_timeout_seconds=3600`，
-`timeout_seconds`、`max_steps`、`max_tool_calls` 均为 null；idle lease 可设为 `0` 明确
-禁用，或设为 60 秒至 7 天。AICLI 负责在活动到达时续期 idle lease，job 不按总时长自动
-stale。`bounded` 与 `watchdog_only` 仅在调用方显式选择时保留
-为向后兼容模式；watchdog-only 必须省略 `max_steps` 和 `max_tool_calls`。benchmark-only
+`limit_mode=watchdog_only`、`timeout_seconds=900`，不设置 step/tool-call 上限；可由调用方
+显式调整 wall-clock watchdog。`completion_driven` 只保留为旧合同输入，当前 AICLI 未声明
+可续期 idle lease 时会在模型启动前失败关闭，绝不静默降级。`bounded` 仍需调用方显式
+选择并声明硬上限；watchdog-only 必须省略 `idle_timeout_seconds`、`max_steps` 和
+`max_tool_calls`。benchmark-only
 路线进一步固定为 7200 秒 watchdog-only，no fallback。禁止向本地 worker 继承最高权限
 或再次委派。
 
@@ -53,8 +53,8 @@ stale。`bounded` 与 `watchdog_only` 仅在调用方显式选择时保留
 `start` 会先校验并持久化 requested binding：backend alias/model/digest、quantization、
 tokenizer/chat-template、Codex harness、AICLI entry/version/profile/event protocol、
 serving engine、Toolkit source、exclusive LocalGpuBroker lease、sandbox、task/workspace
-digest、deterministic verifier、reasoning 与 completion-driven budget。缺少任一项即失败
-关闭；requested/observed receipt 必须保持同一 `limit_mode` 与 idle lease 语义。
+digest、deterministic verifier、reasoning 与 effective budget。缺少任一项即失败关闭；
+requested/observed receipt 必须保持同一 `limit_mode` 与对应 watchdog/硬上限语义。
 
 初始 receipt 固定为 `configured_unverified`。即使 registry 配置为 262,144 context 与
 32,768 reserved output，仍只有实际 AICLI machine-event runtime proof 同时报告这两个值

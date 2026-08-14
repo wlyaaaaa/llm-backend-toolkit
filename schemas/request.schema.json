@@ -187,15 +187,14 @@
               "type": ["integer", "null"],
               "minimum": 30,
               "maximum": 86400,
-              "description": "Total wall-clock timeout. It is null for completion_driven jobs."
+              "description": "Total wall-clock timeout. Omitted watchdog-only requests are materialized as 900 seconds; legacy completion_driven requests require null."
             },
             "idle_timeout_seconds": {
               "anyOf": [
                 {"const": 0},
                 {"type": "integer", "minimum": 60, "maximum": 604800}
               ],
-              "default": 3600,
-              "description": "Renewable inactivity lease used by completion_driven jobs; 0 explicitly disables the lease, otherwise the value is 60 seconds to 7 days."
+              "description": "Legacy renewable inactivity lease used only by explicit completion_driven jobs; 0 disables the lease. Current AICLI routes reject this legacy mode before launch."
             },
             "max_steps": {
               "type": ["integer", "null"],
@@ -209,8 +208,8 @@
             },
             "limit_mode": {
               "enum": ["completion_driven", "bounded", "watchdog_only"],
-              "default": "completion_driven",
-              "description": "completion_driven is the default and has no total wall, step, or tool-call cutoff; bounded and watchdog_only are explicit backwards-compatible modes."
+              "default": "watchdog_only",
+              "description": "watchdog_only is the current AICLI-compatible default and uses timeout_seconds without step or tool-call cutoffs; bounded is explicit, while completion_driven is retained only for compatible legacy harnesses."
             }
           },
           "additionalProperties": false,

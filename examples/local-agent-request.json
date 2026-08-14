@@ -32,8 +32,8 @@
     "policy": "workspace-write",
     "cache_key": "raw-sha256:<replace-with-real-input-hash>",
     "budget": {
-      "limit_mode": "completion_driven",
-      "idle_timeout_seconds": 3600
+      "limit_mode": "watchdog_only",
+      "timeout_seconds": 900
     }
   }
 }

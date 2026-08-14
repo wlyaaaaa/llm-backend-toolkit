@@ -4,7 +4,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from llm_backend_toolkit.agent_runners import AgentResponse, AiCliProfileRunner
+from llm_backend_toolkit.agent_runners import (
+    AgentResponse,
+    AgentRunnerError,
+    AiCliProfileRunner,
+)
 from llm_backend_toolkit.providers import ProviderResponse
 from llm_backend_toolkit.toolkit import Toolkit
 
@@ -23,6 +27,22 @@ class _Runner:
 
     def invoke(self, prompt, execution):
         self.calls.append(execution)
+        mode = execution["budget"]["limit_mode"]
+        limit_enforcement = (
+            {
+                "timeout": "not-configured",
+                "idleTimeout": "renewable",
+                "maxSteps": "not-configured",
+                "maxToolCalls": "not-configured",
+            }
+            if mode == "completion_driven"
+            else {
+                "timeout": "hard",
+                "idleTimeout": "not-configured",
+                "maxSteps": "not-configured",
+                "maxToolCalls": "not-configured",
+            }
+        )
         return AgentResponse(
             content='{"answer": 56}',
             runner="codex-cli",
@@ -32,12 +52,7 @@ class _Runner:
             tool_calls=3,
             session_id="session-1",
             stop_reason="completed",
-            limit_enforcement={
-                "timeout": "not-configured",
-                "idleTimeout": "renewable",
-                "maxSteps": "not-configured",
-                "maxToolCalls": "not-configured",
-            },
+            limit_enforcement=limit_enforcement,
         )
 
 
@@ -63,7 +78,7 @@ def _request(workspace: Path) -> dict:
 
 
 class CompletionDrivenBudgetTests(unittest.TestCase):
-    def test_toolkit_defaults_to_completion_driven_without_numeric_cutoffs(self):
+    def test_explicit_completion_driven_keeps_legacy_contract(self):
         with tempfile.TemporaryDirectory() as temp:
             runner = _Runner()
             toolkit = Toolkit(
@@ -89,7 +104,7 @@ class CompletionDrivenBudgetTests(unittest.TestCase):
             result["execution_receipt"]["budget"]["limit_mode"],
         )
 
-    def test_omitted_budget_uses_the_same_completion_driven_default(self):
+    def test_omitted_budget_uses_aicli_compatible_watchdog_default(self):
         with tempfile.TemporaryDirectory() as temp:
             request = _request(Path(temp))
             del request["execution"]["budget"]
@@ -102,8 +117,8 @@ class CompletionDrivenBudgetTests(unittest.TestCase):
             result = toolkit.invoke(request)
 
         self.assertEqual("ok", result["status"])
-        self.assertEqual("completion_driven", runner.calls[0]["budget"]["limit_mode"])
-        self.assertIsNone(runner.calls[0]["budget"]["timeout_seconds"])
+        self.assertEqual("watchdog_only", runner.calls[0]["budget"]["limit_mode"])
+        self.assertEqual(900, runner.calls[0]["budget"]["timeout_seconds"])
         self.assertIsNone(runner.calls[0]["budget"]["max_steps"])
         self.assertIsNone(runner.calls[0]["budget"]["max_tool_calls"])
 
@@ -139,7 +154,7 @@ class CompletionDrivenBudgetTests(unittest.TestCase):
         self.assertEqual("blocked", result["status"])
         self.assertEqual("invalid_request", result["error"]["category"])
 
-    def test_aicli_runner_uses_a_renewable_idle_lease_without_wall_or_step_caps(self):
+    def test_aicli_runner_rejects_legacy_completion_driven_before_launch(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             entry = root / "aicli.ps1"
@@ -224,6 +239,105 @@ class CompletionDrivenBudgetTests(unittest.TestCase):
                 "llm_backend_toolkit.agent_runners._bounded_process",
                 side_effect=bounded,
             ):
+                with self.assertRaises(AgentRunnerError) as caught:
+                    AiCliProfileRunner(
+                        name="codex-cli",
+                        engine="codex",
+                        default_profile="codex-ollama-main",
+                        entry=str(entry),
+                    ).invoke("task", execution)
+
+        self.assertEqual("agent_runner_incompatible", caught.exception.error.category)
+        self.assertEqual([], calls)
+        self.assertEqual([], process_calls)
+
+    def test_aicli_runner_materializes_default_watchdog_wire_contract(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            entry = root / "aicli.ps1"
+            entry.write_text("# test stub\n", encoding="utf-8")
+            child_events = "\n".join(
+                [
+                    json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {"type": "agent_message", "text": '{"answer": 56}'},
+                        }
+                    ),
+                ]
+            )
+            run_envelope = {
+                "run": {
+                    "engine": "codex",
+                    "profileId": "codex-ollama-main",
+                    "model": "qwen-main-v1",
+                    "exitCode": 0,
+                    "stdout": child_events,
+                    "stderr": "",
+                    "durationMs": 120,
+                    "timedOut": False,
+                    "budgetMode": "watchdog-only",
+                    "limitEnforcement": {
+                        "timeout": "hard",
+                        "idleTimeout": "not-configured",
+                        "maxSteps": "not-configured",
+                        "maxToolCalls": "not-configured",
+                    },
+                    "limitUsage": {
+                        "steps": 4,
+                        "toolCalls": 0,
+                        "eventsSeen": 5,
+                        "protocol": "codex-app-server",
+                        "cleanupConfirmed": True,
+                    },
+                    "machineEventProjection": "aicli.machine-event.v1",
+                    "machineEventStatus": "ok",
+                    "machineEventCount": 0,
+                }
+            }
+            calls = []
+            process_calls = []
+
+            def bounded(command, **kwargs):
+                calls.append(command)
+                process_calls.append(kwargs)
+                if command[-2:] == ["version", "--json"]:
+                    return (
+                        0,
+                        json.dumps(
+                            {
+                                "capabilities": {
+                                    "machineEventProjection": "aicli.machine-event.v1"
+                                }
+                            }
+                        ),
+                        "",
+                        1,
+                    )
+                return 0, json.dumps(run_envelope), "", 120
+
+            execution = {
+                "workspace": str(root),
+                "model": "qwen-main-v1",
+                "profile": "codex-ollama-main",
+                "policy": "workspace-write",
+                "native_images": [],
+                "budget": {
+                    "timeout_seconds": 900,
+                    "idle_timeout_seconds": None,
+                    "limit_mode": "watchdog_only",
+                    "max_steps": None,
+                    "max_tool_calls": None,
+                },
+            }
+            with patch(
+                "llm_backend_toolkit.agent_runners.shutil.which",
+                return_value="pwsh",
+            ), patch(
+                "llm_backend_toolkit.agent_runners._bounded_process",
+                side_effect=bounded,
+            ):
                 response = AiCliProfileRunner(
                     name="codex-cli",
                     engine="codex",
@@ -231,20 +345,25 @@ class CompletionDrivenBudgetTests(unittest.TestCase):
                     entry=str(entry),
                 ).invoke("task", execution)
 
-        run_command = calls[-1]
-        self.assertNotIn("--watchdog-only", run_command)
-        self.assertNotIn("--timeout-seconds", run_command)
-        self.assertIn("--idle-timeout-seconds", run_command)
-        self.assertEqual("3600", run_command[run_command.index("--idle-timeout-seconds") + 1])
+        self.assertEqual(2, len(calls))
+        run_command = calls[1]
+        self.assertIn("--watchdog-only", run_command)
+        timeout_index = run_command.index("--timeout-seconds")
+        self.assertEqual("900", run_command[timeout_index + 1])
+        self.assertNotIn("--idle-timeout-seconds", run_command)
         self.assertNotIn("--max-steps", run_command)
         self.assertNotIn("--max-tool-calls", run_command)
-        self.assertIsNone(process_calls[-1]["timeout_seconds"])
-        self.assertEqual("not-configured", response.limit_enforcement["timeout"])
-        self.assertEqual("renewable", response.limit_enforcement["idleTimeout"])
-        self.assertEqual("not-configured", response.limit_enforcement["maxSteps"])
-        self.assertEqual("not-configured", response.limit_enforcement["maxToolCalls"])
+        self.assertEqual(915, process_calls[1]["timeout_seconds"])
+        self.assertEqual("watchdog-only", response.budget_mode)
+        self.assertEqual("hard", response.limit_enforcement["timeout"])
+        self.assertEqual(
+            "not-configured", response.limit_enforcement["maxSteps"]
+        )
+        self.assertEqual(
+            "not-configured", response.limit_enforcement["maxToolCalls"]
+        )
 
-    def test_aicli_runner_forwards_idle_zero_without_hard_caps(self):
+    def test_aicli_runner_rejects_legacy_completion_driven_idle_zero(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             entry = root / "aicli.ps1"
@@ -310,21 +429,16 @@ class CompletionDrivenBudgetTests(unittest.TestCase):
             ), patch(
                 "llm_backend_toolkit.agent_runners._bounded_process", side_effect=bounded
             ):
-                response = AiCliProfileRunner(
-                    name="codex-cli",
-                    engine="codex",
-                    default_profile="codex-ollama-main",
-                    entry=str(entry),
-                ).invoke("task", execution)
+                with self.assertRaises(AgentRunnerError) as caught:
+                    AiCliProfileRunner(
+                        name="codex-cli",
+                        engine="codex",
+                        default_profile="codex-ollama-main",
+                        entry=str(entry),
+                    ).invoke("task", execution)
 
-        run_command, process_kwargs = calls[-1]
-        self.assertIn("--idle-timeout-seconds", run_command)
-        self.assertEqual("0", run_command[run_command.index("--idle-timeout-seconds") + 1])
-        self.assertNotIn("--timeout-seconds", run_command)
-        self.assertNotIn("--max-steps", run_command)
-        self.assertNotIn("--max-tool-calls", run_command)
-        self.assertIsNone(process_kwargs["timeout_seconds"])
-        self.assertEqual("disabled", response.limit_enforcement["idleTimeout"])
+        self.assertEqual("agent_runner_incompatible", caught.exception.error.category)
+        self.assertEqual([], calls)
 
 
 if __name__ == "__main__":

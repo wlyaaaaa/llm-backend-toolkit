@@ -159,6 +159,12 @@ namespace LlmBackendToolkit
             out uint processId
         );
 
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindowAsync(IntPtr windowHandle, int command);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr windowHandle);
+
         public static int[] FindProcessIdsByExactTitle(string expectedTitle)
         {
             var processIds = new List<int>();
@@ -188,6 +194,35 @@ namespace LlmBackendToolkit
                 IntPtr.Zero
             );
             return processIds.ToArray();
+        }
+
+        public static bool ActivateProcessWindow(int expectedProcessId)
+        {
+            IntPtr match = IntPtr.Zero;
+            EnumWindows(
+                delegate(IntPtr windowHandle, IntPtr parameter)
+                {
+                    if (!IsWindowVisible(windowHandle))
+                    {
+                        return true;
+                    }
+                    uint processId;
+                    GetWindowThreadProcessId(windowHandle, out processId);
+                    if (processId == (uint) expectedProcessId)
+                    {
+                        match = windowHandle;
+                        return false;
+                    }
+                    return true;
+                },
+                IntPtr.Zero
+            );
+            if (match == IntPtr.Zero)
+            {
+                return false;
+            }
+            ShowWindowAsync(match, 3);
+            return SetForegroundWindow(match);
         }
     }
 }
@@ -306,6 +341,9 @@ try {
 
     $existing = Find-ObserverWindow -ExpectedTitle $WindowTitle -ExpectedHostPath $resolvedHost
     if ($null -ne $existing) {
+        $null = [LlmBackendToolkit.ObserverHostWindowNativeMethods]::ActivateProcessWindow(
+            $existing.process.Id
+        )
         Write-ObserverResult ([pscustomobject] @{
             status = 'already_running'
             url = [string] $contract.url

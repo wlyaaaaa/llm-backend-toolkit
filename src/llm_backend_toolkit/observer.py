@@ -21,8 +21,14 @@ from pathlib import Path
 from typing import Any
 
 from .jobs import OBSERVER_LOCAL_SCHEMA, default_state_root
-from .observability import file_lock, read_events, utc_now
+from .observability import (
+    file_lock,
+    read_conversation_process,
+    read_events,
+    utc_now,
+)
 from .public_progress import (
+    PUBLIC_COMMENTARY_MAX_CHARS,
     PUBLIC_REASONING_SUMMARY_MAX_CHARS,
     bounded_public_draft,
     has_potential_secret_suffix,
@@ -44,9 +50,32 @@ OBSERVER_MAX_RESULT_BYTES = 2 * 1024 * 1024
 OBSERVER_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 OBSERVER_MAX_LOCAL_METADATA_BYTES = 4 * 1024
 OBSERVER_EVENT_PAGE_SIZE = 160
+_CANONICAL_PROGRESS_EVENT_KINDS = frozenset(
+    {
+        "agent.commentary.delta",
+        "agent.commentary.completed",
+        "agent.reasoning.summary.delta",
+    }
+)
 _TERMINAL_JOB_STATUSES = frozenset(
     {"completed", "failed", "cancelled", "stale"}
 )
+
+
+def _canonical_progress_event_kinds(progress: dict[str, Any]) -> frozenset[str]:
+    """Return event types already represented by compact progress segments."""
+    kinds: set[str] = set()
+    if (
+        isinstance(progress.get("public_commentary_segments"), list)
+        or progress.get("public_commentary_truncated") is True
+    ):
+        kinds.update({"agent.commentary.delta", "agent.commentary.completed"})
+    if (
+        isinstance(progress.get("public_reasoning_summaries"), list)
+        or progress.get("public_reasoning_summaries_truncated") is True
+    ):
+        kinds.add("agent.reasoning.summary.delta")
+    return frozenset(kinds & _CANONICAL_PROGRESS_EVENT_KINDS)
 _DISPLAY_FIELDS = frozenset(
     {
         "task_label",
@@ -507,6 +536,24 @@ def _project_execution_receipt(value: Any) -> dict[str, Any]:
         )
         if usage:
             projected["limit_usage"] = usage
+        web_search = value.get("web_search")
+        if isinstance(web_search, dict) and type(web_search.get("enabled")) is bool:
+            if web_search["enabled"] is False:
+                projected["web_search"] = {"enabled": False}
+            else:
+                searches = web_search.get("searches")
+                if (
+                    web_search.get("provider") == "bing-rss-v1"
+                    and type(searches) is int
+                    and 0 <= searches <= 10_000
+                    and web_search.get("event_evidence") == "runtime-lifecycle"
+                ):
+                    projected["web_search"] = {
+                        "enabled": True,
+                        "provider": "bing-rss-v1",
+                        "searches": searches,
+                        "event_evidence": "runtime-lifecycle",
+                    }
         mismatches = value.get("route_evidence_mismatches")
         if isinstance(mismatches, (list, tuple)):
             safe_mismatches = [
@@ -678,6 +725,22 @@ def _project_result(result: dict[str, Any]) -> dict[str, Any]:
     return projected
 
 
+def _project_public_event_range(raw: dict[str, Any]) -> dict[str, int]:
+    """Project only a complete ordered durable-event range for a public node."""
+    first_sequence = raw.get("first_sequence")
+    last_sequence = raw.get("last_sequence")
+    if (
+        type(first_sequence) is int
+        and type(last_sequence) is int
+        and 1 <= first_sequence <= last_sequence
+    ):
+        return {
+            "first_sequence": first_sequence,
+            "last_sequence": last_sequence,
+        }
+    return {}
+
+
 def _project_progress(progress: dict[str, Any]) -> dict[str, Any]:
     projected = _project_flat(
         progress,
@@ -724,6 +787,39 @@ def _project_progress(progress: dict[str, Any]) -> dict[str, Any]:
         projected["public_preview"] = preview[:20_000]
     if progress.get("public_preview_truncated") is True:
         projected["public_preview_truncated"] = True
+    commentary_segments = progress.get("public_commentary_segments")
+    if isinstance(commentary_segments, (list, tuple)):
+        safe_commentary_segments: list[dict[str, Any]] = []
+        remaining_chars = PUBLIC_COMMENTARY_MAX_CHARS
+        for raw in commentary_segments[:12]:
+            if not isinstance(raw, dict) or remaining_chars <= 0:
+                continue
+            commentary_group = raw.get("commentary_group")
+            raw_text = raw.get("text")
+            if (
+                type(commentary_group) is not int
+                or not 1 <= commentary_group <= 1_000_000
+            ):
+                continue
+            text, truncated = bounded_public_draft(
+                raw_text,
+                max_chars=min(4_000, remaining_chars),
+            )
+            if not text or has_potential_secret_suffix(text):
+                continue
+            entry = {
+                "commentary_group": commentary_group,
+                "text": text,
+            }
+            entry.update(_project_public_event_range(raw))
+            safe_commentary_segments.append(entry)
+            remaining_chars -= len(text)
+            if truncated:
+                break
+        if safe_commentary_segments:
+            projected["public_commentary_segments"] = safe_commentary_segments
+    if progress.get("public_commentary_truncated") is True:
+        projected["public_commentary_truncated"] = True
     summaries = progress.get("public_reasoning_summaries")
     if isinstance(summaries, (list, tuple)):
         safe_summaries: list[dict[str, Any]] = []
@@ -747,13 +843,13 @@ def _project_progress(progress: dict[str, Any]) -> dict[str, Any]:
             )
             if not text or has_potential_secret_suffix(text):
                 continue
-            safe_summaries.append(
-                {
-                    "summary_group": summary_group,
-                    "summary_index": summary_index,
-                    "text": text,
-                }
-            )
+            entry = {
+                "summary_group": summary_group,
+                "summary_index": summary_index,
+                "text": text,
+            }
+            entry.update(_project_public_event_range(raw))
+            safe_summaries.append(entry)
             remaining_chars -= len(text)
             if truncated:
                 break
@@ -1358,9 +1454,30 @@ class ObserverStore:
             result = _project_result(result)
         else:
             result = {}
+        projected_progress = _project_progress(progress)
+        thought_sequences: list[int] = []
+        for field in (
+            "public_commentary_segments",
+            "public_reasoning_summaries",
+        ):
+            for item in projected_progress.get(field) or ():
+                if not isinstance(item, dict):
+                    continue
+                sequence = item.get("first_sequence")
+                if type(sequence) is int and sequence > 0:
+                    thought_sequences.append(sequence)
+        conversation_process = read_conversation_process(
+            directory,
+            thought_sequences=thought_sequences,
+        )
         all_recent_events = read_events(directory)
+        conversation_events = read_events(
+            directory,
+            limit=OBSERVER_EVENT_PAGE_SIZE,
+            exclude_kinds=_canonical_progress_event_kinds(progress),
+        )
         events = _with_local_workspace_paths(
-            all_recent_events[-OBSERVER_EVENT_PAGE_SIZE:],
+            conversation_events,
             _local_workspace_root(directory),
         )
         event_page = self._event_page_metadata(events)
@@ -1386,7 +1503,8 @@ class ObserverStore:
                 "turn": _conversation_turn(state),
                 "max_turns": _conversation_max_turns(state),
             },
-            "progress": _project_progress(progress),
+            "progress": projected_progress,
+            "conversation_process": conversation_process,
             "performance": _performance(result, progress, elapsed),
             "context": context,
             "events": events,

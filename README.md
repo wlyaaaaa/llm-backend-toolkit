@@ -91,15 +91,15 @@ python -m venv .venv
 `0.9.0` 提供正式的本机只读 GUI。它沿用封存 Local Remote 的白底纯绿桌面视觉，在一个常驻窗口中自动展示：
 
 - 多个模型调用和多轮 continuation，以“对话列表 / 连续对话 / 对话信息”三栏呈现；不包含项目、文件、设置、输入、停止或审批控制；
-- 中文聚合工作记录、AICLI 命令/文件活动、OCR/ASR 阶段与公开输出；没有真实公开 prompt 时不渲染用户气泡，重复的开始/结束及无安全正文的成功活动只显示语义计数，进行中、失败或有安全摘要的活动才显示明细。单轮先读取最近 160 个原始事件，可在最多 240 个事件的有界窗口中向前翻页并返回最新，旧版逐片段事件会合并为摘要；
-- AICLI 安全公开消息按增量通过 SSE 无刷新追加到草稿；增量不再逐条灌入耐久时间线，`output.completed` 用有界完整公开文本对齐草稿且不会重复追加。草稿最多保留 20,000 字，达到上限会明确提示并引导查看最终结果；原生 CLI 明确公开的安全 `reasoning.summary.delta` 另行累积为“工作思路”，运行中展开并原位追加，终态保留，缺少真实摘要时不生成节点；
+- 中文聚合工作记录、AICLI 命令/文件/网络活动、OCR/ASR 阶段与公开输出；没有真实公开 prompt 时不渲染用户气泡。主对话扫描本轮全部耐久事件，把完整公开思路、聚合活动、压缩和结局按真实 sequence 交错呈现，不受最近 160 条原始事件尾窗限制；原始技术事件仍保留独立分页 API，但不再用分页按钮暗示主对话缺失；
+- AICLI 安全公开消息按增量通过 SSE 无刷新追加到草稿；`output.completed` 用有界完整公开文本对齐草稿且不会重复追加。草稿最多保留 20,000 字，达到上限会明确提示；原生 CLI 明确公开的 `commentary` 与 `reasoning.summary.delta` 分别按安全 group 累积为“工作思路”，始终默认展开、原位追加，缺少真实公开内容时不生成节点；
 - 安全的 context、delegation、source、execution、delivery、cache identity、media route 回执与确定性检查保留在每轮回答后的折叠卡中；普通结构化 JSON 结果按有界文本显示，只有后端明确标记的 artifact preview 才显示摘要，不会因字段名碰巧为 `preview` 而丢失其他结果；
 - 计划或回执中的模型名称、执行方式、推理模式或 reasoning effort；缺少供应商运行时身份回读时不会标成“实际模型”；
 - Token、耗时和 Token/s；Token 卡可展开显示输入、输出、推理输出和非零缓存（缓存是输入子集，不重复计入总数）。AICLI/Codex 的累计统计来自 `tokenUsage.total`，不会把 `TokenUsage.last.outputTokens` 误标为整场累计；缓存为零或缺失时不显示。执行中耗时每秒更新，静默阶段仍会低频复核服务端状态，终态或过期后冻结；Ollama 完成后以 `completion_tokens / eval_duration_ns` 显示模型评估时段的精确输出速度，AICLI agent 的安全真实输出 token 只除以从启动到完成的整段执行墙钟并明确标为估算；
 - Codex agent 同一条运行时通知实际同时上报当前上下文占用与上限后，显示例如“已用 202k / 共 258k”并实时更新；在完整实测到达前显示“等待 Codex 运行时实测”，不会显示 registry 配置值或结果回执替代品；自动压缩完成后同步回落并写入时间线；
 - 最终结果、确定性校验和 Codex 是否已取回结果。
 
-2026-07-25 的最终真实页面验收中，同一个未刷新的窗口自动接收新 job，时间线从 8 个节点增长到 63 个节点，分段显示中文公开进度、工具失败与恢复、文件编辑、完整路径和 diff；最终卡片显示 9,399 / 258,400 的 Codex 运行时实测上下文与约 4.1 输出 token/秒的整段墙钟估算。完整证据见 [模型调用观察台设计](docs/model-observer.md#2026-07-25-实机页面验收)。
+2026-08-13 的最终真实页面验收使用本地 `qwen-main-v1`、AICLI `0.3.5` 与 Codex CLI `0.147.0`：三轮真实运行共投影 19 个公开思路节点，首轮主对话完整交错显示 11 次命令、3 次 `public_web_search` 生命周期与 3 个工作区变化，失败草稿保留但不冒充最终答复；后续成功轮给出包含标题、列表、表格、引用、代码块和安全 HTTPS 链接的 Markdown 最终答复。搜索工具的三次调用是真实事件，但该次上游搜索端点返回不可用，因此不伪称取得了搜索结果。1440×1000 无窗口视觉复核无横向溢出，工作思路全部默认展开。
 
 启动本机服务：
 
@@ -114,11 +114,13 @@ pwsh -NoProfile -File .\scripts\Start-LlmBackendObserver.ps1
 pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 ```
 
-正式启动器使用项目自带的无控制台 WinForms/WebView2 宿主，而不是 Edge app-mode。宿主在创建窗口前设置独立 AppUserModelID，再为窗口写入同一 AUMID、RelaunchIconResource 与大小图标；离屏自测必须同时回读进程身份、窗口身份、窗口图标并成功初始化 WebView2，不能再把 favicon、`IconLocation` 或属性写入本身冒充任务栏图标已生效。宿主显式清除仅限当前进程的 WebView2 环境覆盖并使用独立 profile，避免 Windows Search/Widgets 的共享 profile 造成 `ERROR_INVALID_STATE` 页面加载失败。
+正式启动器使用项目自带的无控制台 WinForms/WebView2 宿主，而不是 Edge app-mode。宿主使用独立 profile，并在页面导航成功后才显示默认最大化窗口；重复启动会激活已有观察台。窗口和快捷方式仍写入项目图标与 Shell 身份属性，但 Explorer 任务栏最终渲染未纳入本轮验收，不能把属性回读冒充任务栏图标视觉成功。宿主显式清除仅限当前进程的 WebView2 环境覆盖，避免 Windows Search/Widgets 的共享 profile 造成 `ERROR_INVALID_STATE` 页面加载失败。
 
-启动器只创建一个 loopback 服务和一个原生观察台窗口。快捷方式直接指向 `LlmBackendObserverHost.exe`，后台服务和 AICLI/PowerShell 子进程均用 `CREATE_NO_WINDOW` / Hidden 语义，失败只写本机诊断文件，不弹控制台或错误框。窗口打开后通过 SSE 自动接收后续调用，不需要手动刷新；重复调用不会抢焦点。安装器会同时创建当前用户桌面和开始菜单中的“模型调用观察台”快捷方式，并使用项目自带的白绿图标；它只升级或删除能由启动目标、完整参数、工作目录和描述共同证明属于本工具的链接，同名第三方文件会冲突失败而不会被覆盖。首次全体预检会拦截开始时已经存在的冲突；每个目标在最终变更或状态确认前还会复验。桌面和开始菜单是两个独立 Known Folder，不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，已经完成的本工具链接操作可能保留，可在处理冲突后幂等重跑。需要移除这两个精确入口时使用 `-Remove`。`Show-LlmBackendDashboard.ps1` 继续作为 PowerShell 降级视图。
+启动器只创建一个 loopback 服务和一个原生观察台窗口。快捷方式直接指向 `LlmBackendObserverHost.exe`，后台服务和 AICLI/PowerShell 子进程均用 `CREATE_NO_WINDOW` / Hidden 语义，失败只写本机诊断文件，不弹控制台或错误框。窗口打开后通过 SSE 自动接收后续调用，不需要手动刷新；重复调用会把已有观察台带到前台。安装器会同时创建当前用户桌面和开始菜单中的“模型调用观察台”快捷方式；它只升级或删除能由启动目标、完整参数、工作目录和描述共同证明属于本工具的链接，同名第三方文件会冲突失败而不会被覆盖。首次全体预检会拦截开始时已经存在的冲突；每个目标在最终变更或状态确认前还会复验。桌面和开始菜单是两个独立 Known Folder，不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，已经完成的本工具链接操作可能保留，可在处理冲突后幂等重跑。需要移除这两个精确入口时使用 `-Remove`。`Show-LlmBackendDashboard.ps1` 继续作为 PowerShell 降级视图。
 
-观察台显示的是经过净化的可验证工作过程，不是隐藏 chain-of-thought。prompt、隐藏 thinking/reasoning 正文、原始命令和参数、工具输入输出、环境变量、OCR/ASR 正文及绝对私密路径都不会进入公开事件日志。正式 skill 只使用上述 AICLI 源码入口，不会因旧安装态缺少事件能力而静默降级。其 Codex app-server 合同以当前实装的 `codex-cli 0.145.0` 为已验证基线；`0.145.x` 较早公开 `agentMessage` 缺少 completed 的兼容只在后续存在非空 completed final 且没有其他未完成项时成立。未来更新默认尝试，但必要字段、通知、生命周期或清理协议漂移会返回明确错误。
+观察台显示的是经过净化的可验证工作过程，不是隐藏 chain-of-thought。prompt、隐藏 thinking/reasoning 正文、原始命令和参数、工具输入输出、环境变量、OCR/ASR 正文及绝对私密路径都不会进入公开事件日志。正式 skill 只使用受管 AICLI 入口，不会因旧安装态缺少事件能力而静默降级。当前实装验收基线是 AICLI `0.3.5` 与 `codex-cli 0.147.0`；未来更新默认尝试，但必要字段、通知、生命周期或清理协议漂移会返回明确错误。
+
+受管 Codex harness 默认可发现并可多次调用 `public_web_search`；AICLI 提供搜索能力和显式 `--no-web-search` 关闭合同，Toolkit/GUI 只消费其安全 lifecycle。观察台仅在 `tool_name=public_web_search`、`search_provider=bing-rss-v1` 与运行期回执闭合时显示真实调用次数，不公开 query 或结果正文，也不会把“调用结束”伪称为“取得有效结果”。
 
 “Token”卡片是上游本次运行累计输入、输出、推理输出与缓存 usage，兼容 provider 与 AICLI 的字段命名；AICLI/Codex 的累计值来自 `tokenUsage.total`，缓存为零或缺失时不显示，缓存作为输入子集也不会重复计入总数。“当前上下文”是另一项指标，只接受 Codex app-server 在同一条 `thread/tokenUsage/updated` 运行时通知中同时提供的 `last.totalTokens` 与 `modelContextWindow`。首个完整实测尚未到达时固定显示“等待 Codex 运行时实测”；如果运行结束仍缺少完整配对，或字段、通知、生命周期不兼容，AICLI 会返回明确协议错误，不会用 prompt token、累计输入、Toolkit 压缩估算、backend registry 上限或最终结果回执补成估算值。时间线中的“已压缩调用输入”是 Toolkit 发起模型调用前的确定性输入整理；“Codex 已自动压缩上下文”才是原生 agent 会话实际完成的 context compaction，后者只展示上游真实提供的压缩次数与上下文占用，不补造压缩前数据。
 
@@ -135,11 +137,11 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 - `execution.mode=agent`
 - `execution.runner=data_factory`（可省略；从 backend registry 锁定精确 Profile/模型）
 - `execution.policy=danger-full-access|workspace-write|read-only`（省略时默认 `danger-full-access`）
-- `execution.budget`（当前 `data_factory`/Codex 默认 `limit_mode=completion_driven`，仅配置可由活动续期的 `idle_timeout_seconds`，默认 3600 秒；可设为 `0` 明确禁用 idle lease，或 60 秒至 7 天。没有总 wall、step 或 tool-call 上限。AICLI 必须在回执中证明 `budgetMode=completion-driven`、`timeout/maxSteps/maxToolCalls=not-configured`，并在 idle lease 启用时报告 `idleTimeout=renewable`、禁用时报告 `idleTimeout=disabled`。`bounded` 与 `watchdog_only` 仅为显式向后兼容模式；显式 bounded 才启用硬上限。completion-driven 仍通过版本化公开 JSON 事件投影记录安全进度：`distinct-non-output-thread-item-v2` 的 step 是不同的推理、计划、工具、压缩等非输出 ThreadItem，公开进度/最终消息只增加事件计数、不挤占行动预算；tool-call 包括命令、文件、MCP 与 web 等工具项；意外 collab 会被计数并失败关闭。）
+- `execution.budget`（当前 AICLI `0.3.5` 兼容默认是 `limit_mode=watchdog_only`、`timeout_seconds=900`，不设置 step 或 tool-call 上限；调用方可显式调整 wall-clock watchdog。`bounded` 只有显式选择时才配置 step/tool-call 硬上限。旧 `completion_driven` 输入只为兼容保留；当前 AICLI 未声明可续期 idle lease，因而会在模型启动前明确失败，绝不静默改成 watchdog。）
 
 默认 `danger-full-access` 是执行权限默认值，不是扩大任务授权：它允许 Codex 在当前用户权限范围访问工作区外路径，因此只用于可信项目和可信任务。显式 `workspace-write` 应指向隔离 worktree 或暂存任务目录；`read-only` 用于只读分析。工作模型的 operational admission 必须在全新隔离目录、声明的实际权限下证明真实写入和确定性结果；若要宣称窄权限边界有效，还必须另做显式 `workspace-write` 验收，并分别记录测试所用权限。可变工作区默认不复用已完成 job；只有调用者提供绑定输入内容 hash 的 `execution.cache_key` 才允许 cache hit。
 
-显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或 chain-of-thought。completion-driven 任务只有在回执同时证明可续期 idle lease（或显式禁用）且没有总 wall/step/tool-call 硬上限时才会被接受；显式 bounded/watchdog-only 任务才验证其相应硬上限。未知事件、无法确认完整进程树清理或 idle lease 到期均返回失败关闭，越限返回 `blocked` 与 `limit_hit`，不会把未执行的约束写成成功。
+显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或隐藏 chain-of-thought。watchdog-only/bounded 任务只接受实际回执证明的相应约束；未知事件、无法确认完整进程树清理或越限都会失败关闭，不会把未执行的约束写成成功。
 
 当前 `local-default` 解析到 `codex-ollama-main + qwen-main-v1`，已经过本机版本绑定验收。省略 backend 永远只走这个免费本地默认；`local-crosscheck-27b` 仍是非默认、`crosscheck_only`、no fallback 的显式路线，并保留 direct adapter。它的唯一 Agent/CACB 入口是 benchmark-only `codex-cli → codex-ollama-review / qwen-review-v1 / max`，必须由运行时重新解析为 exact non-cloud `routing_role=benchmark_only` 临时 backend；不能经 `data_factory`、其他 runner 或默认/fallback 选择。任何付费 API 都必须显式选择 exact backend 并同时允许云端传输。`cloud-qwen-flash` 与 `cloud-deepseek-v4-flash` 都是显式 direct-only backend，不会自动 fallback。DeepSeek 路由没有 Pro alias/backend，也不会读取 AICLI/OpenClaw credential。`qwen3.7-plus` 已于 2026-07-29 从别名、内置 backend 和专用 provider 退役，只保留历史评测证据。2026-07-28 的 Codex 云端 Agent 复测暴露 `workspace-write` 沙箱故障：模型可以返回文本，但无法写入验收 workspace，因此 4/30 记录作废且 Qwen Flash Agent route 继续禁用。将来只有连接合同经无付费本地测试和有界真实验收重新通过后才可恢复；历史报告不会自动继承到新指纹。
 `status` 会在不发模型生成请求的情况下返回当前 backend、模型指纹、agent 默认路由、证据状态和支持的 runner；实际任务回执同时记录精确 Profile、模型与是否采用默认。
@@ -163,7 +165,7 @@ python scripts/run_general_agent_benchmark.py --list
 python scripts/run_general_agent_benchmark.py --aicli-entry C:\path\to\aicli.ps1
 ```
 
-默认依次串行运行 Codex CLI、Claude Code、Qwen Code 与 OpenCode，并使用 `local-default`。真实运行必须通过 `--aicli-entry` 或 `LLM_TOOLKIT_AICLI_ENTRY` 固定一个现存的 `aicli.ps1`；缺失时在创建输出目录和调用模型前失败关闭，不再生成看似 4/30 的空跑结果。`--backend` 可选择注册表中的其他精确后端；当前 agent 请求默认采用 completion-driven（idle lease 3600 秒），`--max-steps` / `--max-tool-calls` 仅在显式选择兼容的 bounded 模式时生效并写入新格式 summary。扩大步数不会改变题目、workspace 或隐藏 verifier。若按模型价格比较，应同时保留同步数结果，并说明上下文累积使总 Token 成本通常不是步数的线性倍数。结果只对记录的 suite fingerprint、模型身份、CLI 版本、沙箱合同和 Toolkit 提交有效；它比较的是“模型 + harness”的代理表现，不生成永久通用智商分。（早期验收报告中的 24 步/80 工具调用是旧合同历史事实，不是当前默认。）
+默认依次串行运行 Codex CLI、Claude Code、Qwen Code 与 OpenCode，并使用 `local-default`。真实运行必须通过 `--aicli-entry` 或 `LLM_TOOLKIT_AICLI_ENTRY` 固定一个现存的 `aicli.ps1`；缺失时在创建输出目录和调用模型前失败关闭，不再生成看似 4/30 的空跑结果。`--backend` 可选择注册表中的其他精确后端；当前 agent 请求默认采用 900 秒 watchdog-only，`--max-steps` / `--max-tool-calls` 仅在显式选择 bounded 模式时生效并写入 summary。扩大步数不会改变题目、workspace 或隐藏 verifier。若按模型价格比较，应同时保留同步数结果，并说明上下文累积使总 Token 成本通常不是步数的线性倍数。结果只对记录的 suite fingerprint、模型身份、CLI 版本、沙箱合同和 Toolkit 提交有效；它比较的是“模型 + harness”的代理表现，不生成永久通用智商分。（早期验收报告中的 completion-driven 与 24 步/80 工具调用是历史合同，不是当前默认。）
 
 2026-07-22 的完整横向实测、耗时、能力边界和默认建议见 [四 harness 通用代理验收报告](docs/general-agent-benchmark-v1.md)。2026-07-25 又用当前 AICLI 源码入口、`codex-app-server` 与 `distinct-non-output-thread-item-v2` 完整复测 Codex 三题，最终 30/30、协议 3/3；数据工厂专项同链路复测 21/21。2026-07-29（UTC+8）因 CLI 更新兼容与错误空跑做了仅本地四 runner 调查：Codex 单次 28/30 且协议 3/3，Qwen Code 产物 30/30 但达到上游会话轮次，两个 4/30 设施根因均已定位；详见 [本地 Qwen 四智能体复核与更新兼容调查](docs/local-qwen-four-agent-investigation-2026-07-29.md)。当前版本的建议仍是 `data_factory` 固定使用 Codex CLI；日常调用不重复跑四 harness。
 
