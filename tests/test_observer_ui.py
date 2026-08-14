@@ -43,11 +43,11 @@ class ObserverUiTests(unittest.TestCase):
         parser = _DocumentParser()
         parser.feed(self.html)
         self.assertEqual(
-            ["/assets/styles.css?v=20260813-conversations-14"],
+            ["/assets/styles.css?v=20260814-conversations-15"],
             parser.stylesheets,
         )
         self.assertEqual(
-            ["/assets/app.js?v=20260813-conversations-14"],
+            ["/assets/app.js?v=20260814-conversations-15"],
             parser.scripts,
         )
         self.assertIn('href="/assets/favicon.svg"', self.html)
@@ -121,6 +121,47 @@ class ObserverUiTests(unittest.TestCase):
             "elements.title.textContent = taskLabel(first(turns[0], listItem));",
             self.js,
         )
+
+    def test_new_managed_conversation_auto_follows_without_stealing_history(self) -> None:
+        self.assertIn("followLatestConversation: true", self.js)
+        self.assertIn(
+            "followLatest: rootId === newestConversationRoot(state.conversations)",
+            self.js,
+        )
+        self.assertIn("followLatest: state.followLatestConversation", self.js)
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is unavailable")
+
+        def function_source(name: str) -> str:
+            start = self.js.index(f"function {name}(")
+            end = self.js.find("\nfunction ", start + 1)
+            return self.js[start:] if end < 0 else self.js[start:end]
+
+        harness = "\n".join(
+            function_source(name)
+            for name in ("newestConversationRoot", "shouldSelectNewestConversation")
+        ) + r'''
+const newest = newestConversationRoot([{ root_job_id: "new" }, { root_job_id: "old" }]);
+if (newest !== "new") throw new Error(`unexpected newest root: ${newest}`);
+if (!shouldSelectNewestConversation({
+  selectedRootId: "old", newestRootId: newest, followLatest: true, append: false,
+})) throw new Error("latest-follow mode must select a newly arrived managed conversation");
+if (shouldSelectNewestConversation({
+  selectedRootId: "old", newestRootId: newest, followLatest: false, append: false,
+})) throw new Error("manual history selection must not be stolen");
+if (shouldSelectNewestConversation({
+  selectedRootId: "old", newestRootId: newest, followLatest: true, append: true,
+})) throw new Error("loading an older page must not change the selected conversation");
+'''
+        completed = subprocess.run(
+            [node, "-e", harness],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
 
     def test_feed_preserves_observation_semantics(self) -> None:
         render_turn = self.js.split("function renderTurn", 1)[1].split(

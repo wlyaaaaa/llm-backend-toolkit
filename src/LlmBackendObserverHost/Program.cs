@@ -162,17 +162,7 @@ internal static partial class Program
 
     private static Uri StartObserver(string toolkitCommand)
     {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = toolkitCommand,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-            WindowStyle = ProcessWindowStyle.Hidden,
-        };
-        startInfo.ArgumentList.Add("observer");
-        startInfo.ArgumentList.Add("--no-open");
+        ProcessStartInfo startInfo = CreateObserverStartInfo(toolkitCommand);
         using Process process = Process.Start(startInfo)
             ?? throw new InvalidOperationException("Observer command did not start.");
         Task<string> outputTask = process.StandardOutput.ReadToEndAsync();
@@ -205,6 +195,47 @@ internal static partial class Program
             // A valid observer contract is a single JSON document.
         }
         throw new InvalidOperationException("Observer command returned no valid contract.");
+    }
+
+    private static ProcessStartInfo CreateObserverStartInfo(string toolkitCommand)
+    {
+        string executable = toolkitCommand;
+        bool launchModuleWithPythonw = false;
+        if (String.Equals(
+            Path.GetFileName(toolkitCommand),
+            "llm-backend-toolkit.exe",
+            StringComparison.OrdinalIgnoreCase
+        ))
+        {
+            string? toolkitDirectory = Path.GetDirectoryName(toolkitCommand);
+            if (!String.IsNullOrWhiteSpace(toolkitDirectory))
+            {
+                string pythonw = Path.Combine(toolkitDirectory, "pythonw.exe");
+                if (File.Exists(pythonw))
+                {
+                    executable = pythonw;
+                    launchModuleWithPythonw = true;
+                }
+            }
+        }
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = executable,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
+        };
+        if (launchModuleWithPythonw)
+        {
+            startInfo.ArgumentList.Add("-m");
+            startInfo.ArgumentList.Add("llm_backend_toolkit");
+        }
+        startInfo.ArgumentList.Add("observer");
+        startInfo.ArgumentList.Add("--no-open");
+        return startInfo;
     }
 }
 

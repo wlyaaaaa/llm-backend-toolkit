@@ -11,6 +11,7 @@ const state = {
   total: 0,
   nextOffset: null,
   selectedRootId: null,
+  followLatestConversation: true,
   selectedDetail: null,
   eventPages: new Map(),
   eventSource: null,
@@ -219,7 +220,9 @@ function renderList() {
       createElement("span", "item-turns", `${Number(conversation.turn_count || 1)} 轮 · ${formatDate(conversation.updated_utc, "short")}`),
     );
     button.append(top, summary, meta);
-    button.addEventListener("click", () => selectConversation(rootId));
+    button.addEventListener("click", () => selectConversation(rootId, {
+      followLatest: rootId === newestConversationRoot(state.conversations),
+    }));
     fragment.append(button);
   }
   elements.list.replaceChildren(fragment);
@@ -237,6 +240,17 @@ function mergeConversations(existing, incoming) {
   );
 }
 
+function newestConversationRoot(conversations) {
+  const rootId = String(conversations?.[0]?.root_job_id || "");
+  return rootId || null;
+}
+
+function shouldSelectNewestConversation({ selectedRootId, newestRootId, followLatest, append }) {
+  if (append || !newestRootId) return false;
+  if (!selectedRootId) return true;
+  return Boolean(followLatest && selectedRootId !== newestRootId);
+}
+
 async function loadConversations({ append = false, quiet = false } = {}) {
   if (!quiet) elements.refresh.classList.add("is-loading");
   try {
@@ -250,8 +264,17 @@ async function loadConversations({ append = false, quiet = false } = {}) {
     setConnection("live", "已同步");
     elements.lastUpdated.textContent = `${formatDate(payload.observed_utc || new Date())} 更新`;
 
-    if (!state.selectedRootId && state.conversations.length) {
-      await selectConversation(String(state.conversations[0].root_job_id), { preserveScroll: false });
+    const newestRootId = newestConversationRoot(state.conversations);
+    if (shouldSelectNewestConversation({
+      selectedRootId: state.selectedRootId,
+      newestRootId,
+      followLatest: state.followLatestConversation,
+      append,
+    })) {
+      await selectConversation(newestRootId, {
+        preserveScroll: false,
+        followLatest: true,
+      });
     } else if (state.selectedRootId && !append) {
       await loadConversation(state.selectedRootId, { quiet: true, preserveScroll: true });
     }
@@ -1625,7 +1648,10 @@ async function loadConversation(rootId, { quiet = false, preserveScroll = true }
   }
 }
 
-async function selectConversation(rootId, { preserveScroll = false } = {}) {
+async function selectConversation(rootId, { preserveScroll = false, followLatest = null } = {}) {
+  if (typeof followLatest === "boolean") {
+    state.followLatestConversation = followLatest;
+  }
   state.selectedRootId = rootId;
   state.selectedDetail = null;
   state.eventPages.clear();
