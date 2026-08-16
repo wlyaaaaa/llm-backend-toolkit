@@ -312,12 +312,24 @@ class BackendRegistry:
     def evaluate_route_evidence(route: dict[str, Any], provider_status: dict[str, Any] | None) -> dict[str, Any]:
         evidence = dict(route.get("evidence") or {})
         basis = str(evidence.get("basis") or route.get("basis") or "unverified")
+        acceptance_state = str(evidence.get("capability_acceptance_state") or "").strip()
         declared_live = bool(evidence.get("live_verified", route.get("live_verified", False)))
         expected = {
             key: str(evidence.get(key) or "")
             for key in ("model_digest", "parent_model")
             if str(evidence.get(key) or "")
         }
+        # A route explicitly awaiting reacceptance is never allowed to inherit
+        # an old live receipt, even if a stale registry accidentally leaves
+        # live_verified=true or old digest fields behind.
+        if acceptance_state == "pending_reacceptance":
+            return {
+                "basis": basis,
+                "live_verified": False,
+                "evidence_state": "unverified",
+                "evidence_mismatches": [],
+                "capability_acceptance_state": acceptance_state,
+            }
         if not declared_live:
             return {
                 "basis": basis,

@@ -489,6 +489,7 @@ def _project_execution_receipt(value: Any) -> dict[str, Any]:
                 "reasoning_effort",
                 "route_basis",
                 "route_evidence_state",
+                "route_capability_acceptance_state",
             }
         ),
         number_fields=frozenset(

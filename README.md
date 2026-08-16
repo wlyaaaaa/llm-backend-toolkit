@@ -101,7 +101,7 @@ cache。Codex 的默认入口仍建议使用非阻塞的 `submit`。
 - Codex agent 同一条运行时通知实际同时上报当前上下文占用与上限后，显示例如“已用 202k / 共 258k”并实时更新；在完整实测到达前显示“等待 Codex 运行时实测”，不会显示 registry 配置值或结果回执替代品；自动压缩完成后同步回落并写入时间线；
 - 最终结果、确定性校验和 Codex 是否已取回结果。
 
-2026-08-13 的最终真实页面验收使用本地 `qwen-main-v1`、AICLI `0.3.5` 与 Codex CLI `0.147.0`：三轮真实运行共投影 19 个公开思路节点，首轮主对话完整交错显示 11 次命令、3 次 `public_web_search` 生命周期与 3 个工作区变化，失败草稿保留但不冒充最终答复；后续成功轮给出包含标题、列表、表格、引用、代码块和安全 HTTPS 链接的 Markdown 最终答复。搜索工具的三次调用是真实事件，但该次上游搜索端点返回不可用，因此不伪称取得了搜索结果。1440×1000 无窗口视觉复核无横向溢出，工作思路全部默认展开。
+2026-08-13 的历史页面验收使用本地 `qwen-main-v1`、AICLI `0.3.5` 与 Codex CLI `0.147.0`：三轮真实运行共投影 19 个公开思路节点，首轮主对话完整交错显示 11 次命令、3 次 `public_web_search` 生命周期与 3 个工作区变化，失败草稿保留但不冒充最终答复；后续成功轮给出包含标题、列表、表格、引用、代码块和安全 HTTPS 链接的 Markdown 最终答复。搜索工具的三次调用是真实事件，但该次上游搜索端点返回不可用，因此不伪称取得了搜索结果。1440×1000 无窗口视觉复核无横向溢出，工作思路全部默认展开。该回执不证明当前 Qwen3.8 27B 之外的 legacy route 能力。
 
 启动本机服务：
 
@@ -143,7 +143,7 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 
 默认 `danger-full-access` 是执行权限默认值，不是扩大任务授权：它允许 Codex 在当前用户权限范围访问工作区外路径，因此只用于可信项目和可信任务。显式 `workspace-write` 应指向隔离 worktree 或暂存任务目录；`read-only` 用于只读分析。工作模型的 operational admission 必须在全新隔离目录、声明的实际权限下证明真实写入和确定性结果；若要宣称窄权限边界有效，还必须另做显式 `workspace-write` 验收，并分别记录测试所用权限。可变工作区默认不复用已完成 job；只有调用者提供绑定输入内容 hash 的 `execution.cache_key` 才允许 cache hit。
 
-显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或隐藏 chain-of-thought。watchdog-only/bounded 任务只接受实际回执证明的相应约束；未知事件、无法确认完整进程树清理或越限都会失败关闭，不会把未执行的约束写成成功。
+显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness；其中三个 legacy route 当前为 `unverified` / `pending_reacceptance`，在新精确模型回执前会失败关闭，不能继承旧 Qwen3.6 35B 验收。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或隐藏 chain-of-thought。watchdog-only/bounded 任务只接受实际回执证明的相应约束；未知事件、无法确认完整进程树清理或越限都会失败关闭，不会把未执行的约束写成成功。
 
 当前 `local-default` 的 `data_factory` 与 `codex-cli` 都解析到 `codex-ollama-qwen3-8-27b + aicli-qwen3.8-27b-256k:2026-08-14`，并绑定当前 AICLI Profile fingerprint 与 2026-08-15 的历史 exact-model Agent receipt；本轮未重跑模型。省略 backend 永远只走这个免费本地默认；`local-crosscheck-27b` 仍是非默认、`crosscheck_only`、no fallback 的显式路线，且不经 `data_factory`、默认或 fallback 选择。独立的 `benchmark_only` 临时 route 仍须由运行时以单独的精确 registry 创建，不能借用默认或交叉验证身份。其他显式 harness route 保持各自 registry 绑定，不能借用这份 Qwen3.8 Codex 验收。任何付费 API 都必须显式选择 exact backend 并同时允许云端传输。`cloud-qwen-flash` 与 `cloud-deepseek-v4-flash` 都是显式 direct-only backend，不会自动 fallback。DeepSeek 路由没有 Pro alias/backend，也不会读取 AICLI/OpenClaw credential。`qwen3.7-plus` 已于 2026-07-29 从别名、内置 backend 和专用 provider 退役，只保留历史评测证据。2026-07-28 的 Codex 云端 Agent 复测暴露 `workspace-write` 沙箱故障：模型可以返回文本，但无法写入验收 workspace，因此 4/30 记录作废且 Qwen Flash Agent route 继续禁用。将来只有连接合同经无付费本地测试和有界真实验收重新通过后才可恢复；历史报告不会自动继承到新指纹。
 `status` 会在不发模型生成请求的情况下返回当前 backend、模型指纹、agent 默认路由、证据状态和支持的 runner；实际任务回执同时记录精确 Profile、模型与是否采用默认。
@@ -154,7 +154,7 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 
 云端示例见 [examples/cloud-direct-request.json](examples/cloud-direct-request.json)。普通单次摘要、抽取和结构化生成继续使用 `execution.mode=direct`，避免为不需要文件/命令循环的任务增加 Agent 调用成本。
 
-本机 35B 的 PersonalOS 风格小型清洗专项、选择理由和严格适用范围见 [数据工厂智能体验收报告](docs/agent-data-factory.md)。该报告不代表通用智能排名。
+本机 35B 的 PersonalOS 风格小型清洗专项、选择理由和严格适用范围见 [数据工厂智能体验收报告](docs/agent-data-factory.md)；它是历史基线，不是当前默认模型或 legacy route 的新验收。该报告不代表通用智能排名。
 
 Spark 与本地 Qwen 的合成数据清洗、跨文件工程、非代码路由和现实因果对照见 [高速中档智能体验收报告](docs/fast-middle-agent.md)。结论是互补分层，不是替代本地默认。
 

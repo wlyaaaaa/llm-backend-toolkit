@@ -128,20 +128,50 @@
         "claude-code": {
           "runner": "claude-code",
           "profile": "claude-ollama-main",
-          "model": "qwen-main-v1",
-          "evidence": {"basis": "version_bound_local_bakeoff", "live_verified": true, "model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a", "parent_model": "qwen3.6:35b"}
+          "model": "aicli-qwen3.8-27b-256k:2026-08-14",
+          "evidence": {
+            "basis": "legacy_route_pending_reacceptance_after_default_model_switch",
+            "live_verified": false,
+            "evidence_state": "unverified",
+            "capability_acceptance_state": "pending_reacceptance",
+            "identity_scope": "current-model-unverified",
+            "historical_evidence_basis": "version_bound_local_bakeoff",
+            "historical_model": "qwen-main-v1",
+            "historical_model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a",
+            "historical_parent_model": "qwen3.6:35b"
+          }
         },
         "qwen-code": {
           "runner": "qwen-code",
           "profile": "qwen-code-ollama-main",
-          "model": "qwen-main-v1",
-          "evidence": {"basis": "version_bound_local_bakeoff", "live_verified": true, "model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a", "parent_model": "qwen3.6:35b"}
+          "model": "aicli-qwen3.8-27b-256k:2026-08-14",
+          "evidence": {
+            "basis": "legacy_route_pending_reacceptance_after_default_model_switch",
+            "live_verified": false,
+            "evidence_state": "unverified",
+            "capability_acceptance_state": "pending_reacceptance",
+            "identity_scope": "current-model-unverified",
+            "historical_evidence_basis": "version_bound_local_bakeoff",
+            "historical_model": "qwen-main-v1",
+            "historical_model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a",
+            "historical_parent_model": "qwen3.6:35b"
+          }
         },
         "opencode": {
           "runner": "opencode",
           "profile": "opencode-ollama-main",
-          "model": "qwen-main-v1",
-          "evidence": {"basis": "version_bound_local_bakeoff", "live_verified": true, "model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a", "parent_model": "qwen3.6:35b"}
+          "model": "aicli-qwen3.8-27b-256k:2026-08-14",
+          "evidence": {
+            "basis": "legacy_route_pending_reacceptance_after_default_model_switch",
+            "live_verified": false,
+            "evidence_state": "unverified",
+            "capability_acceptance_state": "pending_reacceptance",
+            "identity_scope": "current-model-unverified",
+            "historical_evidence_basis": "version_bound_local_bakeoff",
+            "historical_model": "qwen-main-v1",
+            "historical_model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a",
+            "historical_parent_model": "qwen3.6:35b"
+          }
         }
       }
     },

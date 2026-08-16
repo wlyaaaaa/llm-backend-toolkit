@@ -117,6 +117,85 @@ class BackendRegistryTests(unittest.TestCase):
             self.assertEqual(262144, evidence["context_window_tokens"])
             self.assertTrue(evidence["cleanup_confirmed"])
 
+    def test_legacy_agent_routes_are_qwen38_unverified_pending_reacceptance(self):
+        registry = BackendRegistry.load()
+        default = registry.resolve(None)
+        self.assertEqual(
+            "aicli-qwen3.8-27b-256k:2026-08-14", default.config["model"]
+        )
+
+        for route_name in ("claude-code", "qwen-code", "opencode"):
+            with self.subTest(route_name=route_name):
+                route = default.config["agent_routes"][route_name]
+                evidence = route["evidence"]
+                self.assertEqual(default.config["model"], route["model"])
+                self.assertFalse(evidence["live_verified"])
+                self.assertEqual("unverified", evidence["evidence_state"])
+                self.assertEqual(
+                    "pending_reacceptance",
+                    evidence["capability_acceptance_state"],
+                )
+                self.assertEqual("current-model-unverified", evidence["identity_scope"])
+                self.assertEqual("qwen-main-v1", evidence["historical_model"])
+                self.assertEqual("qwen3.6:35b", evidence["historical_parent_model"])
+                self.assertNotIn("model_digest", evidence)
+                self.assertNotIn("parent_model", evidence)
+
+    def test_pending_reacceptance_cannot_inherit_old_live_receipt(self):
+        route = {
+            "model": "aicli-qwen3.8-27b-256k:2026-08-14",
+            "evidence": {
+                "basis": "legacy_route_pending_reacceptance_after_default_model_switch",
+                "live_verified": True,
+                "capability_acceptance_state": "pending_reacceptance",
+                "model_digest": "old-digest",
+                "parent_model": "qwen3.6:35b",
+            },
+        }
+        result = BackendRegistry.evaluate_route_evidence(
+            route,
+            {
+                "model": {
+                    "digest": "old-digest",
+                    "parent_model": "qwen3.6:35b",
+                }
+            },
+        )
+        self.assertFalse(result["live_verified"])
+        self.assertEqual("unverified", result["evidence_state"])
+        self.assertEqual("pending_reacceptance", result["capability_acceptance_state"])
+
+    def test_pending_legacy_agent_route_blocks_without_invocation_or_fallback(self):
+        registry = BackendRegistry.load()
+        provider = ReplacementProvider()
+        runner = ReplacementRunner()
+        toolkit = Toolkit(
+            registry=registry,
+            providers={"local-default": provider},
+            runners={"claude-code": runner},
+        )
+
+        with tempfile.TemporaryDirectory() as workspace:
+            result = toolkit.invoke(
+                {
+                    "backend": "local-default",
+                    "task": {"goal": "legacy route must await acceptance"},
+                    "execution": {
+                        "mode": "agent",
+                        "runner": "claude-code",
+                        "workspace": workspace,
+                        "policy": "read-only",
+                    },
+                }
+            )
+
+        self.assertEqual("blocked", result["status"])
+        self.assertEqual(
+            "route_evidence_pending_reacceptance", result["error"]["category"]
+        )
+        self.assertEqual(0, len(provider.calls))
+        self.assertEqual(0, len(runner.calls))
+
     def test_local_crosscheck_27b_survives_default_switch_and_exposes_only_exact_codex_route(self):
         registry = BackendRegistry.load()
 

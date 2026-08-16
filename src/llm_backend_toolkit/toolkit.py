@@ -438,23 +438,28 @@ class Toolkit:
             )
         benchmark_route = resolved.config.get("routing_role") == "benchmark_only"
         evidence, provider_status_before = self._route_evidence(route, provider)
-        if evidence["evidence_state"] == "stale" or (
-            benchmark_route
-            and (
-                evidence.get("evidence_state") != "current"
-                or evidence.get("live_verified") is not True
-            )
-        ):
-            category = (
-                "route_evidence_stale"
-                if evidence["evidence_state"] == "stale"
-                else "route_evidence_unverified"
-            )
+        pending_reacceptance = (
+            evidence.get("capability_acceptance_state") == "pending_reacceptance"
+        )
+        evidence_stale = evidence["evidence_state"] == "stale"
+        benchmark_evidence_missing = benchmark_route and (
+            evidence.get("evidence_state") != "current"
+            or evidence.get("live_verified") is not True
+        )
+        if evidence_stale or pending_reacceptance or benchmark_evidence_missing:
+            if evidence_stale:
+                category = "route_evidence_stale"
+            elif pending_reacceptance:
+                category = "route_evidence_pending_reacceptance"
+            else:
+                category = "route_evidence_unverified"
             result = self._blocked(
                 category,
                 (
                     "The selected backend no longer matches its accepted model evidence."
                     if category == "route_evidence_stale"
+                    else "The selected agent route is awaiting a fresh model acceptance receipt."
+                    if category == "route_evidence_pending_reacceptance"
                     else "The benchmark backend did not provide current model evidence."
                 ),
                 options=("probe-backend", "update-backend-registry", "handle-in-codex"),
@@ -775,6 +780,10 @@ class Toolkit:
                         "model_digest": declared_evidence.get("model_digest"),
                         "parent_model": declared_evidence.get("parent_model"),
                     }
+                    if "capability_acceptance_state" in evidence:
+                        route_status[route_id]["capability_acceptance_state"] = evidence[
+                            "capability_acceptance_state"
+                        ]
                 provider_status["agent_routes"] = route_status
                 provider_status["agent_supported_runners"] = sorted(routes)
             default_route = routes.get("data_factory")
@@ -948,7 +957,7 @@ class Toolkit:
     def _route_receipt(
         route: dict[str, Any], evidence: dict[str, Any], *, requested_runner: str
     ) -> dict[str, Any]:
-        return {
+        receipt = {
             "resolved_runner": route["runner"],
             "profile": route["profile"],
             "reasoning_effort": route.get("reasoning_effort"),
@@ -958,6 +967,11 @@ class Toolkit:
             "route_evidence_mismatches": evidence["evidence_mismatches"],
             "default_applied": not bool(requested_runner),
         }
+        if "capability_acceptance_state" in evidence:
+            receipt["route_capability_acceptance_state"] = evidence[
+                "capability_acceptance_state"
+            ]
+        return receipt
 
     @staticmethod
     def _backend_receipt(resolved: ResolvedBackend) -> dict[str, Any]:

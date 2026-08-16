@@ -1283,6 +1283,7 @@ function receiptData(turn) {
     fallback_used: "使用回退",
     route_live_verified: "路由实时验证",
     route_evidence_state: "路由证据",
+    route_capability_acceptance_state: "路由能力验收状态",
   };
   for (const key of Object.keys(labels)) {
     const value = receipt.execution[key];

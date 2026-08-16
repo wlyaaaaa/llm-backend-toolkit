@@ -3,13 +3,15 @@
 状态：**PASS**
 
 验收日期：2026-07-22（UTC）
-默认路由：`data_factory` → `codex-cli` → aicli `codex-ollama-main` → LocalGpuBroker `127.0.0.1:32100` → `qwen-main-v1`（Qwen3.6 35B）
+默认路由：本文件记录的历史基线为 `data_factory` → `codex-cli` → aicli `codex-ollama-main` → LocalGpuBroker `127.0.0.1:32100` → `qwen-main-v1`（Qwen3.6 35B）。它不是当前默认路由。
 
 适用范围：仅覆盖本报告中的 9 行合成 JSONL、任务合同、verifier、模型身份和 CLI/沙箱版本；不等于 PersonalOS 完整数据工厂验收，也不外推到其他场景。
 
 通用代码修复、证据推理和约束规划的后续四 harness 实测见 [通用代理验收报告](general-agent-benchmark-v1.md)。它补充本专项，不追溯改写本报告的历史版本锚点。
 
 版本锚点：`qwen-main-v1:latest` digest `46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a`，父模型 `qwen3.6:35b`，`Q4_K_M`，262144 context；Toolkit `628e25c`，aicli `9674a94`。模型 alias/digest、CLI 版本、沙箱合同或任务提交发生实质变化后，本报告只能作为历史基线。
+
+当前 Toolkit 的 `local-default` 已切换为 Qwen3.8 27B；本报告中的旧模型验收不迁移到 `claude-code`、`qwen-code` 或 `opencode` 三条 legacy route。三条 route 目前统一标为 `unverified` / `pending_reacceptance`，在取得新的精确模型回执前不得把本报告当作它们的当前能力验收，也不会自动回退或重跑验收。
 
 当前正式 skill 不依赖旧安装态：它把 `LLM_TOOLKIT_AICLI_ENTRY` 固定到受管的当前源码入口，该入口缺失就明确失败。当前 Codex app-server 最低已验证基线是 `codex-cli 0.145.0`，`0.146.0-alpha.3.1` 曾通过兼容门；未来更新默认尝试，但协议漂移必须明确失败。该现行调用合同不会追溯改写本报告的历史 benchmark 锚点。
 

@@ -6,9 +6,11 @@
 
 候选链路：`fast-middle-agent → data_factory → codex-cli → aicli codex-spark-xhigh → gpt-5.3-codex-spark / xhigh`
 
-对照链路：`local-default → data_factory → codex-cli → aicli codex-ollama-main → LocalGpuBroker:32100 → qwen-main-v1 → Qwen3.6 35B Q4_K_M`
+对照链路（历史基线）：`local-default → data_factory → codex-cli → aicli codex-ollama-main → LocalGpuBroker:32100 → qwen-main-v1 → Qwen3.6 35B Q4_K_M`
 
 协议失效安全默认保持：省略 backend 时解析到质量优先的免费 `local-default`。Spark 只允许显式选择，不自动回退或自动推荐。
+
+当前 Toolkit 的 `local-default` 已切换为 Qwen3.8 27B。本文的 Qwen3.6 35B 只保留为历史对照证据；三条非 Codex legacy route（`claude-code`、`qwen-code`、`opencode`）当前为 `unverified` / `pending_reacceptance`，不会继承这份旧验收或冒充当前能力。
 
 ## 2026-07-29 当前裁决
 
