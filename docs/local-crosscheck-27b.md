@@ -33,7 +33,7 @@
 }
 ```
 
-注册表会拒绝把 `routing_role=crosscheck_only` 的 backend 设为 `default_backend`，也会拒绝为它配置非空 `agent_routes`。因此省略 `backend` 仍解析到 35B `local-default`，`execution.mode=agent` 也不会借此模型运行。Toolkit 没有自动 fallback；一次失败只返回当前 backend 的错误和裁决选项。
+注册表会拒绝把 `routing_role=crosscheck_only` 的 backend 设为 `default_backend`，也会拒绝为它配置非空 `agent_routes`。因此省略 `backend` 始终解析到当前 Qwen3.8 27B 的 `local-default`；`local-crosscheck-27b` 自身是独立的 Qwen3.6 27B 第二意见，`execution.mode=agent` 也不会借此模型运行。Toolkit 没有自动 fallback；一次失败只返回当前 backend 的错误和裁决选项。
 
 ## 何时选择
 
@@ -41,9 +41,9 @@
 
 - 对关键提取结果做不同模型结构的复核；
 - 对边界明确的判断生成第二份候选，再由顶级模型核对证据；
-- 在 verifier 存在时检查 35B 结果是否稳定。
+- 在 verifier 存在时检查交叉验证结果是否稳定。
 
-不要把它用于省略 backend 的常规任务、Agent 文件或命令循环、无 verifier 的最终裁决，或把一次失败静默重提给另一个模型。benchmark 候选注册表把它标记为 `crosscheck_available_not_primary`：可用于交叉验证，但不推翻 35B 主默认。
+不要把它用于省略 backend 的常规任务、Agent 文件或命令循环、无 verifier 的最终裁决，或把一次失败静默重提给另一个模型。benchmark 候选注册表把它标记为 `crosscheck_available_not_primary`：可用于交叉验证，但不推翻当前 Qwen3.8 27B 主默认。
 
 ## Direct 请求
 

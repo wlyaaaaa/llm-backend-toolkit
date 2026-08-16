@@ -79,7 +79,7 @@ Toolkit 自己的 `context.compaction.completed` 是模型调用前的确定性�
 
 ## 2026-08-13 本地模型与完整主对话验收
 
-当前实机 Demo 使用本地 `qwen-main-v1`、AICLI `0.3.5` 与 Codex CLI `0.147.0`，三轮均为真实模型运行而非 UI fixture。三轮共 1,962 条底层事件、19 个公开思路节点；首轮包含 11 个去重命令 lifecycle、3 个 `public_web_search` lifecycle 和 3 个工作区变化。首轮末端因未完成 item 失败关闭，GUI 将已公开正文标为“失败前草稿”；后续成功轮给出带标题、列表、GFM 表格、引用、代码块、粗体与安全 HTTPS 链接的 Markdown 最终答复。
+本节是 2026-08-13 的历史实机验收，不是当前模型验收。当前 Toolkit 的 `local-default` 已切换为 Qwen3.8 27B；本节的本地 `qwen-main-v1`、AICLI `0.3.5` 与 Codex CLI `0.147.0` 仅作为当时真实运行证据保留。三轮共 1,962 条底层事件、19 个公开思路节点；首轮包含 11 个去重命令 lifecycle、3 个 `public_web_search` lifecycle 和 3 个工作区变化。首轮末端因未完成 item 失败关闭，GUI 将已公开正文标为“失败前草稿”；后续成功轮给出带标题、列表、GFM 表格、引用、代码块、粗体与安全 HTTPS 链接的 Markdown 最终答复。
 
 主对话扫描完整耐久事件流并只生成语义节点，因此 160 条 raw event page 不会截断这些思路和活动；原始技术事件仍可通过 API 分页诊断。1440×1000 的隔离无窗口浏览器验收确认：12 个首轮思路全部默认展开，12 个相邻活动块按 sequence 穿插，三次网络搜索分别可见，命令合计 11、工作区变化合计 3，页面无横向溢出。该次搜索工具确实被调用三次，但上游端点返回 `PUBLIC_WEB_SEARCH_UNAVAILABLE`；验收只证明工具发现、调用和 lifecycle 投影，不声称取得有效搜索结果。
 

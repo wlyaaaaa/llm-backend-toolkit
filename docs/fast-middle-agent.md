@@ -21,7 +21,7 @@ Codex 0.145 原生 app-server 的 `workspace-write` 根目录合同已经修正�
 - 路由/写权限修复：通过；
 - 当前能力验收：未通过；
 - 2026-07-24 的以下结果保留为历史证据，不再支撑自动优先 Spark；
-- Spark 仍可由顶级模型显式选择，但默认使用本地 35B 或更高等级 Codex。
+- Spark 仍可由顶级模型显式选择，但省略 backend 时默认使用当前本地 Qwen3.8 27B；需要更高等级 Codex 时必须显式选择，不自动 fallback。
 
 当前正式 skill 把 `LLM_TOOLKIT_AICLI_ENTRY` 固定为受管的当前源码入口，入口缺失时明确失败，不会静默调用旧安装态。Codex app-server 以 `codex-cli 0.145.0` 为当前最低已验证基线，`0.146.0-alpha.3.1` 曾通过兼容验收；后续版本默认尝试，但字段、通知、生命周期或清理协议漂移必须明确失败。
 
@@ -62,7 +62,7 @@ Spark 值得作为 PersonalOS 与 `.agents` 的高速中档候选，但不是 Qw
 
 ## PersonalOS 与本地调优基线
 
-PersonalOS 已有冻结的本地模型能力回执 `receipt:model-calibration-20260724-v1`，本地角色为 `local-default/qwen-main-v1`，状态 `pass_with_restricted_scope`。本次不覆盖该基线，只增加互补的 Spark 证据：
+PersonalOS 已有一份 2026-07-24 冻结的历史本地模型能力回执 `receipt:model-calibration-20260724-v1`，当时本地角色为 `local-default/qwen-main-v1`，状态 `pass_with_restricted_scope`。它不是当前 Toolkit 的 Qwen3.8 27B 验收，本次不覆盖该历史基线，只增加互补的 Spark 证据：
 
 - PersonalOS 的业务门禁仍要求 unknown 存活、来源闭包、角色/语义约束和高影响升级。
 - canonical raw 不交给中档或本地模型无验证改写；两者只在 staged/derived 工作区产出。

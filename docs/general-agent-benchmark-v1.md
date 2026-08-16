@@ -1,22 +1,24 @@
 # 四 harness 通用代理验收报告
 
-状态：**PASS（Codex CLI 为默认；其余为显式候选）**
+状态：**HISTORICAL / SUPERSEDED（仅记录当时 Codex CLI 为默认）**
 
 验收日期：2026-07-22（UTC）  
 Toolkit：`0.3.1`  
 最终 suite fingerprint：`eb8e7d81933de2351b231a17233b2e99a20e24b435467d0ea4bfe78cb3583b1a`
 
-## 结论
+> 历史/已被当前 registry superseded：本报告记录的是 2026-07-22 至 2026-07-29 的 Qwen3.6 35B 与当时 CLI/沙箱组合。当前 Toolkit 的 `local-default` 已是 Qwen3.8 27B；下文的默认建议、模型身份和 runner 排名只适用于各自记录的历史环境，不构成当前默认或当前 legacy route 的能力验收，也不会自动迁移或重跑。
 
-在本报告限定的模型、CLI、沙箱和三项任务下，`data_factory` 继续固定路由到 Codex CLI 是最优默认。Codex CLI 是唯一三题全部通过的 harness，总耗时 91.618 秒；它比第二名 Claude Code 少 50.6% 墙钟时间。
+## 历史结论（不作为当前路由依据）
+
+在本报告限定的历史模型、CLI、沙箱和三项任务下，`data_factory` 当时继续固定路由到 Codex CLI 是最优默认。Codex CLI 是唯一三题全部通过的 harness，总耗时 91.618 秒；它比第二名 Claude Code 少 50.6% 墙钟时间。
 
 这不是“Codex 模型比其他模型强”的结论。四个 harness 使用的是同一个本地 Qwen3.6 35B；报告比较的是 **同一模型经不同智能体外壳后的任务完成质量和耗时**。
 
-顶级模型可以不同意默认建议并显式选择其他 runner，但日常调用不需要重复本次四 harness 烤机。只有模型 digest、CLI 主版本、沙箱合同、任务合同发生实质变化，或实际结果异常时，才建议做一个小样本复核。
+在当时环境中，顶级模型可以不同意默认建议并显式选择其他 runner，但日常调用不需要重复本次四 harness 烤机。只有模型 digest、CLI 主版本、沙箱合同、任务合同发生实质变化，或实际结果异常时，才建议做一个小样本复核。
 
-## 2026-07-25 当前源码链回归
+## 2026-07-25 历史源码链回归
 
-本节是现行调用链的新增回归，不改写 2026-07-22 四 harness 横向排名。最终运行显式固定 `LLM_TOOLKIT_AICLI_ENTRY=<current-source-entry>`，确保使用受管当前源码而非旧安装态；三题 suite fingerprint 为 `7f46548f9aa914584e998c1f00df1db2a72b25061782dde5610ded4e3ce2b88e`。
+本节是当时调用链的新增历史回归，不改写 2026-07-22 四 harness 横向排名。最终运行显式固定 `LLM_TOOLKIT_AICLI_ENTRY=<current-source-entry>`，确保使用当时受管源码而非旧安装态；三题 suite fingerprint 为 `7f46548f9aa914584e998c1f00df1db2a72b25061782dde5610ded4e3ce2b88e`。
 
 | 任务 | 确定性验收 | Action steps / tools | Machine events / app-server events | 实测上下文 | 墙钟 |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -24,7 +26,7 @@ Toolkit：`0.3.1`
 | 证据推理 | 11/11 | 12 / 5 | 47 / 51 | 10,004 / 258,400 | 50.631 秒 |
 | 约束规划 | 10/10 | 14 / 6 | 55 / 60 | 10,442 / 258,400 | 57.767 秒 |
 
-最终为 **30/30**、协议成功 **3/3**、总墙钟 169.257 秒。三题均返回 `codex-app-server`、`distinct-non-output-thread-item-v2`、exit 0、`stop_reason=completed`，并确认完整清理；当前上下文和 258,400 上限均来自 Codex app-server 的同一运行时快照。
+最终为 **30/30**、协议成功 **3/3**、总墙钟 169.257 秒。三题均返回 `codex-app-server`、`distinct-non-output-thread-item-v2`、exit 0、`stop_reason=completed`，并确认完整清理；当时上下文和 258,400 上限均来自 Codex app-server 的同一运行时快照。
 
 这轮验收没有掩盖中间失败：第一次现行协议回归为 27/30，暴露公开任务要求与 checker 不一致，模型为 `unknown` / `ignored` 留下空来源或理由；同步 checker 后的下一次现行链回归为 10/11，又暴露模型把 `weekly on Sunday` 缩写成 `weekly`。最终公开合同明确所有答案都需要非空理由与决定性最小来源，并要求日程值保留频率和具体日期；对应结构回归测试通过后，单题先获 11/11，再由上述完整三题运行确认 30/30。它属于任务契约可靠性修复，不是改变模型权重或隐藏 verifier 放水。
 
@@ -32,7 +34,7 @@ Toolkit：`0.3.1`
 
 同一 suite fingerprint、模型 digest 与 Codex CLI 0.145.0 的一次新鲜完整运行得到 28/30、协议 3/3：代码 9/9、证据 11/11、规划 8/10。规划结果漏列一个未选任务及理由；这说明上述 30/30 是可信的已观测最终结果，但不是每次独立运行的确定性保证。
 
-同轮四 runner 中，Qwen Code 的确定性产物达到 30/30，进一步排除了模型本体无法完成整套题；但 Qwen Code 0.21.0 两题以代表会话轮次耗尽的 exit 53 结束，且非 Codex runner 均不能证明步数/工具调用为硬限制，因此不能取代 Codex 默认。先前显示的两组 4/30 分别来自缺少 AICLI 源码入口的零模型空跑和跨版本 Codex sandbox helper 启动失败，均已作废。完整证据与更新隔离建议见 [本地 Qwen 四智能体复核与更新兼容调查](local-qwen-four-agent-investigation-2026-07-29.md)。
+同轮四 runner 中，Qwen Code 的确定性产物达到 30/30，进一步排除了模型本体无法完成整套题；但 Qwen Code 0.21.0 两题以代表会话轮次耗尽的 exit 53 结束，且非 Codex runner 均不能证明步数/工具调用为硬限制，因此当时不能取代 Codex 默认。先前显示的两组 4/30 分别来自缺少 AICLI 源码入口的零模型空跑和跨版本 Codex sandbox helper 启动失败，均已作废。完整证据与更新隔离建议见 [本地 Qwen 四智能体复核与更新兼容调查](local-qwen-four-agent-investigation-2026-07-29.md)。
 
 ## 固定环境
 
@@ -56,7 +58,7 @@ Toolkit：`0.3.1`
 
 | 排名 | Harness | 代码修复 | 证据推理 | 约束规划 | 总分 | 总耗时 | 判定 |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| 1 | Codex CLI | 9/9 | 11/11 | 10/10 | **30/30** | **91.618 秒** | 三题通过，默认 |
+| 1 | Codex CLI | 9/9 | 11/11 | 10/10 | **30/30** | **91.618 秒** | 历史环境三题通过，默认 |
 | 2 | Claude Code | 9/9 | 11/11 | 9/10 | 29/30 | 185.425 秒 | 可用候选；规划标签有误 |
 | 3 | Qwen Code | 9/9 | 11/11 | 7/10 | 27/30 | 355.940 秒 | 有限制；规划算术/最优性失误 |
 | 4 | OpenCode | 9/9 | 9/11 | 6/10 | 24/30 | 395.228 秒 | 有限制；来源最小化和依赖约束失误 |
@@ -75,13 +77,13 @@ Toolkit：`0.3.1`
 
 ## 建议委派边界
 
-适合默认交给 Codex CLI + 本地 35B：
+历史环境下适合默认交给 Codex CLI + 本地 35B：
 
 - 目标、输入、输出和验收条件明确的代码修复、格式转换、抽取、分类和派生数据生成。
 - 可由 schema、hash、计数、测试、约束求解器或独立 verifier 判定的短阶段任务。
 - PersonalOS 数据工厂中的隔离批次：canonical raw 在可写根之外，产物保留 lineage、冲突、不确定性、checkpoint 和 receipt。
 
-不应让本地 35B 独立承担：
+历史环境下不应让本地 35B 独立承担：
 
 - 含糊产品策略、跨项目架构、授权边界、公开发布、付费或不可逆主机变更。
 - 无独立验收器的 source-of-truth 改写，以及把冲突、缺时区、OCR/ASR 低置信度自行猜成确定事实。

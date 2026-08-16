@@ -279,6 +279,39 @@ class ContractFileTests(unittest.TestCase):
             self.assertIn("codex-cli", text)
             self.assertIn("no fallback", text.lower())
 
+    def test_current_model_docs_do_not_promote_superseded_35b_default(self):
+        crosscheck = (ROOT / "docs" / "local-crosscheck-27b.md").read_text(
+            encoding="utf-8"
+        )
+        fast_middle = (ROOT / "docs" / "fast-middle-agent.md").read_text(
+            encoding="utf-8"
+        )
+        benchmark = (ROOT / "docs" / "general-agent-benchmark-v1.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("当前 Qwen3.8 27B 的 `local-default`", crosscheck)
+        self.assertNotIn("省略 `backend` 仍解析到 35B `local-default`", crosscheck)
+        self.assertIn("默认使用当前本地 Qwen3.8 27B", fast_middle)
+        self.assertNotIn("默认使用本地 35B 或更高等级 Codex", fast_middle)
+        self.assertIn("HISTORICAL / SUPERSEDED", benchmark)
+        self.assertIn("不构成当前默认", benchmark)
+
+        data_factory = (ROOT / "docs" / "agent-data-factory.md").read_text(
+            encoding="utf-8"
+        )
+        investigation = (
+            ROOT / "docs" / "local-qwen-four-agent-investigation-2026-07-29.md"
+        ).read_text(encoding="utf-8")
+        qwen_report = (
+            ROOT / "docs" / "qwen3.7-flash-vs-plus-report-2026-07-28.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("历史/已被当前 registry superseded", data_factory)
+        self.assertIn("历史环境下适合交给当时本地 35B", data_factory)
+        self.assertIn("历史结论（不作为当前路由依据）", investigation)
+        self.assertIn("历史结论（不作为当前路由依据）", qwen_report)
+        self.assertIn("当时默认模型：`local-default`", qwen_report)
+
 
 if __name__ == "__main__":
     unittest.main()
