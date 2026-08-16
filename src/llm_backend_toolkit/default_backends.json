@@ -31,7 +31,7 @@
         "implicit_selection": false,
         "fallback_eligible": false,
         "receipt_required": true,
-        "reason": "profile_missing_from_current_aicli_catalog"
+        "reason": "aicli_profile_does_not_activate_toolkit_route"
       }
     }
   },
@@ -46,7 +46,7 @@
   "backends": {
     "local-default": {
       "adapter": "ollama",
-      "model": "qwen-main-v1",
+      "model": "aicli-qwen3.8-27b-256k:2026-08-14",
       "cloud": false,
       "supports_vision": true,
       "context_window_tokens": 262144,
@@ -67,38 +67,62 @@
       "agent_routes": {
         "data_factory": {
           "runner": "codex-cli",
-          "profile": "codex-ollama-main",
-          "model": "qwen-main-v1",
+          "profile": "codex-ollama-qwen3-8-27b",
+          "model": "aicli-qwen3.8-27b-256k:2026-08-14",
           "reasoning_effort": "max",
           "evidence": {
-            "basis": "accepted_local_bakeoff",
+            "basis": "aicli_agent_acceptance_2026-08-15",
             "live_verified": true,
             "evidence_state": "historical",
             "receipt_schema": "aicli.agent.acceptance-receipt.v1",
             "receipt_authority": "aicli",
             "capability_acceptance_state": "historical_nontrivial_agent",
+            "identity_scope": "exact-model",
+            "profile_fingerprint": "b70293e853ae9a953fa976e8870550e26aaa7355a3ad0dfcaedbdf4df563287c",
+            "provider_id": "aicli_ollama_qwen38_27b",
+            "wire": "responses",
+            "aicli_version": "0.3.12",
+            "codex_cli_version": "0.147.0",
+            "receipt_observed_utc": "2026-08-15T13:31:28.0479741Z",
+            "task_contract_sha256": "sha256:797e410ec67bf7a71a64f26464e85db6bffec92088e024589318f5288d833884",
+            "verifier_sha256": "sha256:06ed464e4c142ee92c2c8887c85b9eaa6b2cce6f1a582fb1c49f38c7075f1086",
+            "cleanup_confirmed": true,
             "stability_evidence": "not_required",
             "stress_evidence": "not_required",
-            "model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a",
-            "parent_model": "qwen3.6:35b"
+            "model_digest": "e200453f7eea321eab068edbc22c5d38a384a162e46c30ed266c62f0388c4723",
+            "parent_model": "qwen3.8:27b",
+            "quantization": "Q4_K_M",
+            "context_window_tokens": 262144
           }
         },
         "codex-cli": {
           "runner": "codex-cli",
-          "profile": "codex-ollama-main",
-          "model": "qwen-main-v1",
+          "profile": "codex-ollama-qwen3-8-27b",
+          "model": "aicli-qwen3.8-27b-256k:2026-08-14",
           "reasoning_effort": "max",
           "evidence": {
-            "basis": "accepted_local_bakeoff",
+            "basis": "aicli_agent_acceptance_2026-08-15",
             "live_verified": true,
             "evidence_state": "historical",
             "receipt_schema": "aicli.agent.acceptance-receipt.v1",
             "receipt_authority": "aicli",
             "capability_acceptance_state": "historical_nontrivial_agent",
+            "identity_scope": "exact-model",
+            "profile_fingerprint": "b70293e853ae9a953fa976e8870550e26aaa7355a3ad0dfcaedbdf4df563287c",
+            "provider_id": "aicli_ollama_qwen38_27b",
+            "wire": "responses",
+            "aicli_version": "0.3.12",
+            "codex_cli_version": "0.147.0",
+            "receipt_observed_utc": "2026-08-15T13:31:28.0479741Z",
+            "task_contract_sha256": "sha256:797e410ec67bf7a71a64f26464e85db6bffec92088e024589318f5288d833884",
+            "verifier_sha256": "sha256:06ed464e4c142ee92c2c8887c85b9eaa6b2cce6f1a582fb1c49f38c7075f1086",
+            "cleanup_confirmed": true,
             "stability_evidence": "not_required",
             "stress_evidence": "not_required",
-            "model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a",
-            "parent_model": "qwen3.6:35b"
+            "model_digest": "e200453f7eea321eab068edbc22c5d38a384a162e46c30ed266c62f0388c4723",
+            "parent_model": "qwen3.8:27b",
+            "quantization": "Q4_K_M",
+            "context_window_tokens": 262144
           }
         },
         "claude-code": {
@@ -123,7 +147,7 @@
     },
     "local-hard-reasoning": {
       "adapter": "ollama",
-      "model": "qwen-main-v1",
+      "model": "aicli-qwen3.8-27b-256k:2026-08-14",
       "cloud": false,
       "supports_vision": true,
       "context_window_tokens": 262144,

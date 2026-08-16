@@ -82,6 +82,14 @@ class ContractFileTests(unittest.TestCase):
             "codex-cli"
         ]["evidence"]
         self.assertEqual("historical", local_evidence["evidence_state"])
+        self.assertEqual(
+            "codex-ollama-qwen3-8-27b",
+            registry["backends"]["local-default"]["agent_routes"]["codex-cli"]["profile"],
+        )
+        self.assertEqual(
+            "aicli-qwen3.8-27b-256k:2026-08-14",
+            registry["backends"]["local-default"]["model"],
+        )
         self.assertEqual("not_required", local_evidence["stability_evidence"])
         reserved_qwen38 = registry["acceptance_contract"]["reserved_routes"][
             "codex-qwen3-8-max-paygo"
@@ -89,7 +97,7 @@ class ContractFileTests(unittest.TestCase):
         self.assertEqual("unverified", reserved_qwen38["state"])
         self.assertFalse(reserved_qwen38["selectable"])
         self.assertEqual(
-            "profile_missing_from_current_aicli_catalog",
+            "aicli_profile_does_not_activate_toolkit_route",
             reserved_qwen38["reason"],
         )
         self.assertIn("cache_identity", response_schema["properties"])

@@ -85,7 +85,39 @@ class ReplacementRunner:
 
 
 class BackendRegistryTests(unittest.TestCase):
-    def test_local_crosscheck_27b_keeps_35b_default_and_exposes_only_exact_codex_route(self):
+    def test_local_default_switches_to_receipted_qwen38_without_changing_backend_id(self):
+        registry = BackendRegistry.load()
+
+        default = registry.resolve(None)
+        legacy = registry.resolve("qwen-main-v1")
+
+        self.assertEqual("local-default", default.backend_id)
+        self.assertEqual("aicli-qwen3.8-27b-256k:2026-08-14", default.config["model"])
+        self.assertEqual("local-default", legacy.backend_id)
+        self.assertTrue(legacy.alias_applied)
+        for route_name in ("data_factory", "codex-cli"):
+            route = default.config["agent_routes"][route_name]
+            evidence = route["evidence"]
+            self.assertEqual("codex-cli", route["runner"])
+            self.assertEqual("codex-ollama-qwen3-8-27b", route["profile"])
+            self.assertEqual("aicli-qwen3.8-27b-256k:2026-08-14", route["model"])
+            self.assertEqual("aicli_agent_acceptance_2026-08-15", evidence["basis"])
+            self.assertEqual("historical", evidence["evidence_state"])
+            self.assertEqual("exact-model", evidence["identity_scope"])
+            self.assertEqual(
+                "b70293e853ae9a953fa976e8870550e26aaa7355a3ad0dfcaedbdf4df563287c",
+                evidence["profile_fingerprint"],
+            )
+            self.assertEqual(
+                "e200453f7eea321eab068edbc22c5d38a384a162e46c30ed266c62f0388c4723",
+                evidence["model_digest"],
+            )
+            self.assertEqual("qwen3.8:27b", evidence["parent_model"])
+            self.assertEqual("Q4_K_M", evidence["quantization"])
+            self.assertEqual(262144, evidence["context_window_tokens"])
+            self.assertTrue(evidence["cleanup_confirmed"])
+
+    def test_local_crosscheck_27b_survives_default_switch_and_exposes_only_exact_codex_route(self):
         registry = BackendRegistry.load()
 
         default = registry.resolve(None)
@@ -93,7 +125,7 @@ class BackendRegistryTests(unittest.TestCase):
         model_alias = registry.resolve("qwen-review-v1")
 
         self.assertEqual("local-default", default.backend_id)
-        self.assertEqual("qwen-main-v1", default.config["model"])
+        self.assertEqual("aicli-qwen3.8-27b-256k:2026-08-14", default.config["model"])
         self.assertEqual("local-crosscheck-27b", crosscheck.backend_id)
         self.assertEqual("local-crosscheck-27b", model_alias.backend_id)
         self.assertTrue(model_alias.alias_applied)
@@ -357,7 +389,7 @@ class BackendRegistryTests(unittest.TestCase):
         self.assertEqual("crosscheck_only", catalog_roles["local-crosscheck-27b"])
         self.assertEqual("latency_crosscheck", catalog_roles["fast-middle-agent"])
 
-    def test_missing_qwen38_profile_is_reserved_but_not_selectable(self):
+    def test_cloud_qwen38_route_remains_reserved_but_not_selectable(self):
         registry = BackendRegistry.load()
 
         default = registry.resolve(None)
@@ -375,17 +407,18 @@ class BackendRegistryTests(unittest.TestCase):
         self.assertEqual("unverified", reserved["state"])
         self.assertFalse(reserved["selectable"])
         self.assertEqual(
-            "profile_missing_from_current_aicli_catalog",
+            "aicli_profile_does_not_activate_toolkit_route",
             reserved["reason"],
         )
 
-    def test_default_registry_uses_the_frozen_quality_profile_and_keeps_hard_role(self):
+    def test_default_registry_uses_qwen38_and_keeps_hard_reasoning_on_the_same_artifact(self):
         registry = BackendRegistry.load()
 
         default = registry.resolve(None)
         hard = registry.resolve("local-hard-reasoning")
 
         self.assertEqual("local-default", default.backend_id)
+        self.assertEqual("aicli-qwen3.8-27b-256k:2026-08-14", default.config["model"])
         self.assertEqual("on", default.config["default_reasoning_mode"])
         self.assertEqual(
             {
@@ -400,7 +433,7 @@ class BackendRegistryTests(unittest.TestCase):
             },
             default.config["ollama_options"],
         )
-        self.assertEqual("qwen-main-v1", hard.config["model"])
+        self.assertEqual("aicli-qwen3.8-27b-256k:2026-08-14", hard.config["model"])
         self.assertFalse(hard.config["cloud"])
         self.assertEqual("on", hard.config["required_reasoning_mode"])
         self.assertEqual(
