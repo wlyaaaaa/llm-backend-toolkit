@@ -196,24 +196,31 @@ class BackendRegistryTests(unittest.TestCase):
         self.assertEqual(0, len(provider.calls))
         self.assertEqual(0, len(runner.calls))
 
-    def test_local_crosscheck_27b_survives_default_switch_and_exposes_only_exact_codex_route(self):
+    def test_local_crosscheck_35b_is_explicit_and_keeps_qwen_main_selector_on_default(self):
         registry = BackendRegistry.load()
 
         default = registry.resolve(None)
-        crosscheck = registry.resolve("local-crosscheck-27b")
-        model_alias = registry.resolve("qwen-review-v1")
+        legacy_default_selector = registry.resolve("qwen-main-v1")
+        crosscheck = registry.resolve("local-crosscheck-35b")
+        crosscheck_selector = registry.resolve("qwen-crosscheck-35b")
 
         self.assertEqual("local-default", default.backend_id)
         self.assertEqual("aicli-qwen3.8-27b-256k:2026-08-14", default.config["model"])
-        self.assertEqual("local-crosscheck-27b", crosscheck.backend_id)
-        self.assertEqual("local-crosscheck-27b", model_alias.backend_id)
-        self.assertTrue(model_alias.alias_applied)
+        self.assertEqual("local-default", legacy_default_selector.backend_id)
+        self.assertTrue(legacy_default_selector.alias_applied)
+        self.assertEqual("local-crosscheck-35b", crosscheck.backend_id)
+        self.assertEqual("local-crosscheck-35b", crosscheck_selector.backend_id)
+        self.assertTrue(crosscheck_selector.alias_applied)
         self.assertFalse(crosscheck.default_applied)
+        for retired in ("qwen-review-v1", "local-crosscheck-27b"):
+            with self.subTest(retired=retired):
+                with self.assertRaisesRegex(ValueError, "Unknown backend"):
+                    registry.resolve(retired)
         self.assertEqual("ollama", crosscheck.config["adapter"])
-        self.assertEqual("qwen-review-v1", crosscheck.config["model"])
+        self.assertEqual("qwen-main-v1", crosscheck.config["model"])
         self.assertFalse(crosscheck.config["cloud"])
         self.assertTrue(crosscheck.config["supports_vision"])
-        self.assertEqual(131_072, crosscheck.config["context_window_tokens"])
+        self.assertEqual(262_144, crosscheck.config["context_window_tokens"])
         self.assertEqual("on", crosscheck.config["default_reasoning_mode"])
         self.assertEqual("crosscheck_only", crosscheck.config["routing_role"])
         self.assertEqual(
@@ -224,7 +231,7 @@ class BackendRegistryTests(unittest.TestCase):
                 "min_p": 0.0,
                 "presence_penalty": 0.0,
                 "repeat_penalty": 1.0,
-                "num_ctx": 131_072,
+                "num_ctx": 262_144,
                 "num_predict": 32_768,
             },
             crosscheck.config["ollama_options"],
@@ -235,30 +242,53 @@ class BackendRegistryTests(unittest.TestCase):
         route = crosscheck.config["agent_routes"]["codex-cli"]
         self.assertEqual("codex-cli", route["runner"])
         self.assertEqual("codex-ollama-review", route["profile"])
-        self.assertEqual("qwen-review-v1", route["model"])
+        self.assertEqual("qwen-main-v1", route["model"])
         self.assertEqual("max", route["reasoning_effort"])
+        evidence = route["evidence"]
         self.assertEqual(
             "aicli.agent.acceptance-receipt.v1",
-            route["evidence"]["receipt_schema"],
+            evidence["receipt_schema"],
         )
-        self.assertEqual("aicli", route["evidence"]["receipt_authority"])
-        self.assertEqual("exact-model", route["evidence"]["identity_scope"])
+        self.assertEqual("aicli", evidence["receipt_authority"])
+        self.assertFalse(evidence["live_verified"])
+        self.assertEqual("unverified", evidence["evidence_state"])
         self.assertEqual(
-            "90a516a548f99c9a68f9915620e00bf1a800a507a9a2c86236a1354ab08e3195",
-            route["evidence"]["model_digest"],
+            "pending_reacceptance", evidence["capability_acceptance_state"]
         )
-        self.assertEqual("qwen3.6:27b", route["evidence"]["parent_model"])
+        self.assertEqual("current-model-unverified", evidence["identity_scope"])
+        self.assertEqual("qwen3.6:27b", evidence["previous_model"])
+        self.assertEqual(
+            "d62e939e-8d48-4a5f-a213-1646368104a8",
+            evidence["previous_receipt_id"],
+        )
+        self.assertEqual(
+            "retired_qwen3.6_27b_replaced_before_new_acceptance",
+            evidence["reason"],
+        )
+        retired_live_fields = {
+            "receipt_id",
+            "profile_fingerprint",
+            "source_entry_sha256",
+            "task_contract_sha256",
+            "verifier_sha256",
+            "cleanup_confirmed",
+            "stability_evidence",
+            "stress_evidence",
+            "model_digest",
+            "parent_model",
+        }
+        self.assertTrue(retired_live_fields.isdisjoint(evidence))
 
         catalog_entry = next(
             item
             for item in registry.catalog()["backends"]
-            if item["id"] == "local-crosscheck-27b"
+            if item["id"] == "local-crosscheck-35b"
         )
         self.assertFalse(catalog_entry["default"])
         self.assertEqual("crosscheck_only", catalog_entry["routing_role"])
         self.assertEqual(["codex-cli"], catalog_entry["agent_routes"])
 
-    def test_local_crosscheck_agent_request_fails_without_invoking_or_falling_back(self):
+    def test_local_crosscheck_default_agent_runner_is_not_implicitly_selected(self):
         registry = BackendRegistry.load()
         default_provider = ReplacementProvider()
         crosscheck_provider = ReplacementProvider()
@@ -267,7 +297,7 @@ class BackendRegistryTests(unittest.TestCase):
             registry=registry,
             providers={
                 "local-default": default_provider,
-                "local-crosscheck-27b": crosscheck_provider,
+                "local-crosscheck-35b": crosscheck_provider,
             },
             runners={"data_factory": runner},
         )
@@ -275,7 +305,7 @@ class BackendRegistryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as workspace:
             result = toolkit.invoke(
                 {
-                    "backend": "local-crosscheck-27b",
+                    "backend": "local-crosscheck-35b",
                     "task": {"goal": "crosscheck"},
                     "execution": {
                         "mode": "agent",
@@ -287,36 +317,25 @@ class BackendRegistryTests(unittest.TestCase):
 
         self.assertEqual("blocked", result["status"])
         self.assertEqual("agent_runner_incompatible", result["error"]["category"])
-        self.assertIn("backend local-crosscheck-27b", result["error"]["summary"])
+        self.assertIn("backend local-crosscheck-35b", result["error"]["summary"])
         self.assertEqual(0, len(default_provider.calls))
         self.assertEqual(0, len(crosscheck_provider.calls))
         self.assertEqual(0, len(runner.calls))
 
-    def test_local_crosscheck_explicit_codex_agent_uses_exact_route(self):
+    def test_local_crosscheck_explicit_codex_agent_is_pending_reacceptance(self):
         registry = BackendRegistry.load()
-        provider = ReplacementProvider(
-            "90a516a548f99c9a68f9915620e00bf1a800a507a9a2c86236a1354ab08e3195"
-        )
-        provider.status = lambda: {
-            "provider": "qwen-review-v1",
-            "cloud": False,
-            "model": {
-                "digest": "90a516a548f99c9a68f9915620e00bf1a800a507a9a2c86236a1354ab08e3195",
-                "parent_model": "qwen3.6:27b",
-            },
-            "live_call_performed": False,
-        }
+        provider = ReplacementProvider()
         runner = ReplacementRunner()
         toolkit = Toolkit(
             registry=registry,
-            providers={"local-crosscheck-27b": provider},
+            providers={"local-crosscheck-35b": provider},
             runners={"codex-cli": runner},
         )
 
         with tempfile.TemporaryDirectory() as workspace:
             result = toolkit.invoke(
                 {
-                    "backend": "local-crosscheck-27b",
+                    "backend": "local-crosscheck-35b",
                     "task": {"goal": "crosscheck"},
                     "execution": {
                         "mode": "agent",
@@ -327,13 +346,52 @@ class BackendRegistryTests(unittest.TestCase):
                 }
             )
 
-        self.assertEqual("ok", result["status"])
-        self.assertEqual("local-crosscheck-27b", result["backend"]["resolved"])
+        self.assertEqual("blocked", result["status"])
+        self.assertEqual(
+            "route_evidence_pending_reacceptance", result["error"]["category"]
+        )
+        self.assertEqual("local-crosscheck-35b", result["backend"]["resolved"])
         self.assertEqual("codex-cli", result["execution_receipt"]["resolved_runner"])
         self.assertEqual("codex-ollama-review", result["execution_receipt"]["profile"])
         self.assertEqual("max", result["execution_receipt"]["reasoning_effort"])
-        self.assertFalse(result["execution_receipt"]["fallback_used"])
-        self.assertEqual(1, len(runner.calls))
+        self.assertFalse(result["execution_receipt"]["route_live_verified"])
+        self.assertEqual(
+            "unverified", result["execution_receipt"]["route_evidence_state"]
+        )
+        self.assertEqual(
+            "pending_reacceptance",
+            result["execution_receipt"]["route_capability_acceptance_state"],
+        )
+        self.assertEqual(0, len(provider.calls))
+        self.assertEqual(0, len(runner.calls))
+
+    def test_local_crosscheck_direct_request_uses_35b_without_fallback(self):
+        registry = BackendRegistry.load()
+        default_provider = ReplacementProvider()
+        crosscheck_provider = ReplacementProvider()
+        toolkit = Toolkit(
+            registry=registry,
+            providers={
+                "local-default": default_provider,
+                "local-crosscheck-35b": crosscheck_provider,
+            },
+            runners={},
+        )
+
+        result = toolkit.invoke(
+            {
+                "backend": "qwen-crosscheck-35b",
+                "task": {"goal": "crosscheck"},
+                "execution": {"mode": "direct"},
+            }
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual("local-crosscheck-35b", result["backend"]["resolved"])
+        self.assertTrue(result["backend"]["alias_applied"])
+        self.assertEqual("qwen-main-v1", result["backend"]["model"])
+        self.assertEqual(0, len(default_provider.calls))
+        self.assertEqual(1, len(crosscheck_provider.calls))
 
     def test_qwen_flash_is_direct_only_and_does_not_change_the_local_default(self):
         registry = BackendRegistry.load()
@@ -465,7 +523,7 @@ class BackendRegistryTests(unittest.TestCase):
             item["id"]: item["routing_role"]
             for item in registry.catalog()["backends"]
         }
-        self.assertEqual("crosscheck_only", catalog_roles["local-crosscheck-27b"])
+        self.assertEqual("crosscheck_only", catalog_roles["local-crosscheck-35b"])
         self.assertEqual("latency_crosscheck", catalog_roles["fast-middle-agent"])
 
     def test_cloud_qwen38_route_remains_reserved_but_not_selectable(self):
@@ -761,23 +819,18 @@ class BackendRegistryTests(unittest.TestCase):
         toolkit = Toolkit(
             registry=registry,
             providers={
-                "local-crosscheck-27b": ReplacementProvider(
-                    "90a516a548f99c9a68f9915620e00bf1a800a507a9a2c86236a1354ab08e3195"
-                )
+                "local-crosscheck-35b": ReplacementProvider()
             },
             runners={},
         )
-        toolkit.providers["local-crosscheck-27b"].status = lambda: {
-            "provider": "qwen-review-v1",
+        toolkit.providers["local-crosscheck-35b"].status = lambda: {
+            "provider": "qwen-main-v1",
             "cloud": False,
-            "model": {
-                "digest": "90a516a548f99c9a68f9915620e00bf1a800a507a9a2c86236a1354ab08e3195",
-                "parent_model": "qwen3.6:27b",
-            },
+            "model": {"parent_model": "qwen3.6:35b"},
             "live_call_performed": False,
         }
 
-        result = toolkit.status("local-crosscheck-27b")
+        result = toolkit.status("local-crosscheck-35b")
 
         status = result["provider_status"]
         self.assertNotIn("agent_default", status)
@@ -786,13 +839,14 @@ class BackendRegistryTests(unittest.TestCase):
             {
                 "runner": "codex-cli",
                 "profile": "codex-ollama-review",
-                "model": "qwen-review-v1",
+                "model": "qwen-main-v1",
                 "reasoning_effort": "max",
-                "evidence_state": "current",
+                "evidence_state": "unverified",
                 "receipt_schema": "aicli.agent.acceptance-receipt.v1",
                 "receipt_authority": "aicli",
-                "model_digest": "90a516a548f99c9a68f9915620e00bf1a800a507a9a2c86236a1354ab08e3195",
-                "parent_model": "qwen3.6:27b",
+                "model_digest": None,
+                "parent_model": None,
+                "capability_acceptance_state": "pending_reacceptance",
             },
             status["agent_routes"]["codex-cli"],
         )

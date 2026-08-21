@@ -279,8 +279,8 @@ class ContractFileTests(unittest.TestCase):
             self.assertIn("codex-cli", text)
             self.assertIn("no fallback", text.lower())
 
-    def test_current_model_docs_do_not_promote_superseded_35b_default(self):
-        crosscheck = (ROOT / "docs" / "local-crosscheck-27b.md").read_text(
+    def test_current_model_docs_keep_35b_explicit_and_qwen38_as_default(self):
+        crosscheck = (ROOT / "docs" / "local-crosscheck-35b.md").read_text(
             encoding="utf-8"
         )
         fast_middle = (ROOT / "docs" / "fast-middle-agent.md").read_text(
@@ -290,7 +290,10 @@ class ContractFileTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("当前 Qwen3.8 27B 的 `local-default`", crosscheck)
+        self.assertFalse((ROOT / "docs" / "local-crosscheck-27b.md").exists())
+        self.assertIn("selector alias `qwen-main-v1` 仍指向 Qwen3.8 27B `local-default`", crosscheck)
+        self.assertIn("`unverified/pending_reacceptance`", crosscheck)
+        self.assertIn("`route_evidence_pending_reacceptance`", crosscheck)
         self.assertNotIn("省略 `backend` 仍解析到 35B `local-default`", crosscheck)
         self.assertIn("默认使用当前本地 Qwen3.8 27B", fast_middle)
         self.assertNotIn("默认使用本地 35B 或更高等级 Codex", fast_middle)

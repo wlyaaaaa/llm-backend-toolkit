@@ -38,7 +38,7 @@
   "default_backend": "local-default",
   "aliases": {
     "qwen-main-v1": "local-default",
-    "qwen-review-v1": "local-crosscheck-27b",
+    "qwen-crosscheck-35b": "local-crosscheck-35b",
     "qwen3.7-flash": "cloud-qwen-flash",
     "deepseek-v4-flash": "cloud-deepseek-v4-flash",
     "gpt-5.3-codex-spark": "fast-middle-agent"
@@ -197,12 +197,12 @@
       },
       "agent_routes": {}
     },
-    "local-crosscheck-27b": {
+    "local-crosscheck-35b": {
       "adapter": "ollama",
-      "model": "qwen-review-v1",
+      "model": "qwen-main-v1",
       "cloud": false,
       "supports_vision": true,
-      "context_window_tokens": 131072,
+      "context_window_tokens": 262144,
       "routing_role": "crosscheck_only",
       "default_reasoning_mode": "on",
       "ollama_options": {
@@ -212,7 +212,7 @@
         "min_p": 0.0,
         "presence_penalty": 0.0,
         "repeat_penalty": 1.0,
-        "num_ctx": 131072,
+        "num_ctx": 262144,
         "num_predict": 32768
       },
       "base_url_env": "LLM_TOOLKIT_OLLAMA_BASE_URL",
@@ -223,28 +223,21 @@
         "codex-cli": {
           "runner": "codex-cli",
           "profile": "codex-ollama-review",
-          "model": "qwen-review-v1",
+          "model": "qwen-main-v1",
           "reasoning_effort": "max",
           "evidence": {
-            "basis": "aicli_agent_acceptance_2026-08-08",
-            "live_verified": true,
-            "evidence_state": "historical",
+            "basis": "model_switch_2026-08-16",
+            "live_verified": false,
+            "evidence_state": "unverified",
             "receipt_schema": "aicli.agent.acceptance-receipt.v1",
             "receipt_authority": "aicli",
-            "receipt_id": "d62e939e-8d48-4a5f-a213-1646368104a8",
-            "capability_acceptance_state": "historical_nontrivial_agent",
-            "identity_scope": "exact-model",
-            "profile_fingerprint": "c60cf0754075f48710dfd8b2bfe64aa9a8a123583ed03112eee7f02640ef1f49",
-            "source_entry_sha256": "sha256:53acdd7b6312c52b679810f16c1b3c59c805ae5fea3c9e9be8bd7002ea6412aa",
+            "capability_acceptance_state": "pending_reacceptance",
+            "identity_scope": "current-model-unverified",
+            "previous_model": "qwen3.6:27b",
+            "previous_receipt_id": "d62e939e-8d48-4a5f-a213-1646368104a8",
             "provider_id": "aicli_ollama_review",
             "wire": "responses",
-            "task_contract_sha256": "sha256:797e410ec67bf7a71a64f26464e85db6bffec92088e024589318f5288d833884",
-            "verifier_sha256": "sha256:06ed464e4c142ee92c2c8887c85b9eaa6b2cce6f1a582fb1c49f38c7075f1086",
-            "cleanup_confirmed": true,
-            "stability_evidence": "not_required",
-            "stress_evidence": "not_required",
-            "model_digest": "90a516a548f99c9a68f9915620e00bf1a800a507a9a2c86236a1354ab08e3195",
-            "parent_model": "qwen3.6:27b"
+            "reason": "retired_qwen3.6_27b_replaced_before_new_acceptance"
           }
         }
       }
