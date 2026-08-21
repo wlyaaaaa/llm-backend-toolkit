@@ -38,6 +38,23 @@
 
 注册表会拒绝把 `routing_role=crosscheck_only` 的 backend 设为 `default_backend`，也禁止它参与 fallback。Qwen3.6 27B 的 `qwen-review-v1` / `local-crosscheck-27b` 已退役并从 live selector/backend surface 移除。35B direct 路径可显式调用；精确 `codex-cli` route 保留 Profile/模型绑定，但旧 27B 回执不迁移。只要 evidence 仍是 `pending_reacceptance`，agent 请求就在 provider 生成或 runner 调用前以 `route_evidence_pending_reacceptance` 失败关闭。只有取得并登记新的精确 AICLI acceptance 后，agent 路径才可执行。
 
+## 2026-08-21 Agent 重新验收
+
+本次唯一一次获授权的 35B Agent Live 在 `2026-08-21T19:28:51.9871927Z` 执行。注册表只保留下列公开安全、可核对的 receipt 标量，不保存 prompt、result、日志、线程或会话正文：
+
+| 证据 | 值 |
+| --- | --- |
+| capability outcome | `attempted_failed` |
+| receipt schema | `aicli.agent.acceptance-receipt.v1` |
+| AICLI / profile fingerprint | `0.3.12` / `a8c3eacc18e1b552481524c4145d6156f6b34a86840c032ecc39eaedd65a5421` |
+| requested binding | `qwen-main-v1` / `aicli_ollama_review` / `responses` / `max` / `danger-full-access` |
+| recovery | run `2ecc37e425fc4e31ab476ea5d88b5521`；`failed_closed`；attempts `1`；resume count `0` |
+| failure reason | `capture_exception_before_verified_receipt` |
+| agent | exit `4`；`aicli.recovery.capture_exception`；steps `0`；tool calls `0`；cleanup confirmed `false` |
+| runtime / verifier | 没有 verified runtime identity；verifier failed |
+
+这不是 PASS，也没有可继承的 verified model identity。`capability_acceptance_state` 因此继续为 `pending_reacceptance`，`live_verified=false`、`evidence_state=unverified`；不存在当前 35B 的 `receipt_id`、`model_digest` 或 `parent_model` 验证声明。本次失败后没有再次执行 Live。
+
 ## 何时选择
 
 仅在不同模型的第二意见有预期信息增益、且顶级模型有办法比较两个公开结果时显式选择，例如：

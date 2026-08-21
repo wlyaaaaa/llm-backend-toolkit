@@ -253,8 +253,13 @@ class BackendRegistryTests(unittest.TestCase):
         self.assertFalse(evidence["live_verified"])
         self.assertEqual("unverified", evidence["evidence_state"])
         self.assertEqual(
+            "aicli_agent_reacceptance_2026-08-21_attempted_failed",
+            evidence["basis"],
+        )
+        self.assertEqual(
             "pending_reacceptance", evidence["capability_acceptance_state"]
         )
+        self.assertEqual("attempted_failed", evidence["capability_acceptance"])
         self.assertEqual("current-model-unverified", evidence["identity_scope"])
         self.assertEqual("qwen3.6:27b", evidence["previous_model"])
         self.assertEqual(
@@ -262,22 +267,46 @@ class BackendRegistryTests(unittest.TestCase):
             evidence["previous_receipt_id"],
         )
         self.assertEqual(
-            "retired_qwen3.6_27b_replaced_before_new_acceptance",
+            "a8c3eacc18e1b552481524c4145d6156f6b34a86840c032ecc39eaedd65a5421",
+            evidence["profile_fingerprint"],
+        )
+        self.assertEqual("aicli_ollama_review", evidence["provider_id"])
+        self.assertEqual("responses", evidence["wire"])
+        self.assertEqual("0.3.12", evidence["aicli_version"])
+        self.assertEqual(
+            "2026-08-21T19:28:51.9871927Z", evidence["receipt_observed_utc"]
+        )
+        self.assertEqual("danger-full-access", evidence["sandbox_policy"])
+        self.assertEqual(
+            "2ecc37e425fc4e31ab476ea5d88b5521", evidence["recovery_run_id"]
+        )
+        self.assertEqual("failed_closed", evidence["recovery_status"])
+        self.assertEqual(1, evidence["recovery_attempts"])
+        self.assertEqual(0, evidence["recovery_resume_count"])
+        self.assertEqual(4, evidence["agent_exit_code"])
+        self.assertEqual(
+            "aicli.recovery.capture_exception", evidence["agent_error_code"]
+        )
+        self.assertEqual(0, evidence["agent_steps"])
+        self.assertEqual(0, evidence["agent_tool_calls"])
+        self.assertFalse(evidence["cleanup_confirmed"])
+        self.assertFalse(evidence["runtime_identity_verified"])
+        self.assertFalse(evidence["verifier_passed"])
+        self.assertEqual(
+            "capture_exception_before_verified_receipt",
             evidence["reason"],
         )
-        retired_live_fields = {
+        verified_identity_fields = {
             "receipt_id",
-            "profile_fingerprint",
             "source_entry_sha256",
             "task_contract_sha256",
             "verifier_sha256",
-            "cleanup_confirmed",
             "stability_evidence",
             "stress_evidence",
             "model_digest",
             "parent_model",
         }
-        self.assertTrue(retired_live_fields.isdisjoint(evidence))
+        self.assertTrue(verified_identity_fields.isdisjoint(evidence))
 
         catalog_entry = next(
             item
@@ -354,6 +383,10 @@ class BackendRegistryTests(unittest.TestCase):
         self.assertEqual("codex-cli", result["execution_receipt"]["resolved_runner"])
         self.assertEqual("codex-ollama-review", result["execution_receipt"]["profile"])
         self.assertEqual("max", result["execution_receipt"]["reasoning_effort"])
+        self.assertEqual(
+            "aicli_agent_reacceptance_2026-08-21_attempted_failed",
+            result["execution_receipt"]["route_basis"],
+        )
         self.assertFalse(result["execution_receipt"]["route_live_verified"])
         self.assertEqual(
             "unverified", result["execution_receipt"]["route_evidence_state"]

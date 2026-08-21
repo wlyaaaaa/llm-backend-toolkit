@@ -226,18 +226,34 @@
           "model": "qwen-main-v1",
           "reasoning_effort": "max",
           "evidence": {
-            "basis": "model_switch_2026-08-16",
+            "basis": "aicli_agent_reacceptance_2026-08-21_attempted_failed",
             "live_verified": false,
             "evidence_state": "unverified",
             "receipt_schema": "aicli.agent.acceptance-receipt.v1",
             "receipt_authority": "aicli",
             "capability_acceptance_state": "pending_reacceptance",
+            "capability_acceptance": "attempted_failed",
             "identity_scope": "current-model-unverified",
             "previous_model": "qwen3.6:27b",
             "previous_receipt_id": "d62e939e-8d48-4a5f-a213-1646368104a8",
+            "profile_fingerprint": "a8c3eacc18e1b552481524c4145d6156f6b34a86840c032ecc39eaedd65a5421",
             "provider_id": "aicli_ollama_review",
             "wire": "responses",
-            "reason": "retired_qwen3.6_27b_replaced_before_new_acceptance"
+            "aicli_version": "0.3.12",
+            "receipt_observed_utc": "2026-08-21T19:28:51.9871927Z",
+            "sandbox_policy": "danger-full-access",
+            "recovery_run_id": "2ecc37e425fc4e31ab476ea5d88b5521",
+            "recovery_status": "failed_closed",
+            "recovery_attempts": 1,
+            "recovery_resume_count": 0,
+            "agent_exit_code": 4,
+            "agent_error_code": "aicli.recovery.capture_exception",
+            "agent_steps": 0,
+            "agent_tool_calls": 0,
+            "cleanup_confirmed": false,
+            "runtime_identity_verified": false,
+            "verifier_passed": false,
+            "reason": "capture_exception_before_verified_receipt"
           }
         }
       }
