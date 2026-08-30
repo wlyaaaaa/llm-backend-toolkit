@@ -42,6 +42,27 @@ class CliContractTests(unittest.TestCase):
         )
         self.assertEqual("C:/jobs", args.state_dir)
 
+    def test_submit_returns_structured_invalid_request_for_non_object_task(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = io.StringIO()
+            with (
+                patch("sys.stdin", io.StringIO('{"task":"not-an-object"}')),
+                patch("sys.stdout", output),
+            ):
+                exit_code = main(
+                    [
+                        "submit",
+                        "--state-dir",
+                        str(Path(temporary) / "jobs"),
+                    ]
+                )
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(2, exit_code)
+        self.assertEqual("blocked", result["status"])
+        self.assertEqual("invalid_request", result["error"]["category"])
+        self.assertEqual("task must be an object", result["error"]["summary"])
+
     def test_invoke_records_one_job_before_returning_the_original_result(self):
         class FakeStore:
             instance = None

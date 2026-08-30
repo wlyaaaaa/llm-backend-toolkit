@@ -58,6 +58,37 @@ def base_request(provider="qwen-main-v1"):
 
 
 class ToolkitTests(unittest.TestCase):
+    def test_non_object_request_sections_fail_before_provider_routing(self):
+        provider = FakeProvider(
+            ProviderResponse(content='{"answer": 56}', model="qwen-main-v1")
+        )
+        toolkit = Toolkit(providers={"qwen-main-v1": provider})
+        malformed_requests = []
+        for name in (
+            "task",
+            "context",
+            "reasoning",
+            "media",
+            "privacy",
+            "observability",
+            "execution",
+            "continuation",
+        ):
+            request = base_request()
+            request[name] = "not-an-object"
+            malformed_requests.append((name, request))
+        expected_output = base_request()
+        expected_output["task"]["expected_output"] = "not-an-object"
+        malformed_requests.append(("task.expected_output", expected_output))
+
+        for name, request in malformed_requests:
+            with self.subTest(name=name):
+                result = toolkit.invoke(request)
+                self.assertEqual("blocked", result["status"])
+                self.assertEqual("invalid_request", result["error"]["category"])
+                self.assertEqual(f"{name} must be an object", result["error"]["summary"])
+        self.assertEqual([], provider.calls)
+
     def test_progress_callback_reports_safe_generation_and_validation_phases(self):
         provider = FakeProvider(
             ProviderResponse(content='{"answer": 56}', model="qwen-main-v1")

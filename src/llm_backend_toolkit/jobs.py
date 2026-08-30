@@ -35,6 +35,7 @@ from .public_progress import (
     has_potential_secret_suffix,
     is_safe_public_progress_text,
 )
+from .request_validation import validate_request_object_sections
 from .workspace_observer import (
     WorkspaceRootError,
     revalidate_workspace_root,
@@ -304,6 +305,7 @@ class JobStore:
         force: bool = False,
         before_spawn: BeforeSpawn | None = None,
     ) -> dict[str, Any]:
+        validate_request_object_sections(request)
         request, conversation = self._prepare_continuation(request)
         input_integrity = pending_receipt(request)
         request_digest = self.request_digest(request)

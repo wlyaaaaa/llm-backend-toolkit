@@ -12,6 +12,7 @@ from .errors import MediaError, ProviderCallError, ToolError
 from .input_integrity import declaration_scope
 from .media import MediaProcessor
 from .providers import default_providers
+from .request_validation import validate_request_object_sections
 from .sources import SourceLoader
 from .workspace_observer import (
     ValidatedWorkspaceRoot,
@@ -174,6 +175,7 @@ class Toolkit:
     ) -> dict[str, Any]:
         self._emit_progress(progress_callback, {"phase": "preparing"})
         try:
+            validate_request_object_sections(request)
             integrity_declarations = declaration_scope(request)
         except ValueError as exc:
             return self._blocked("invalid_request", str(exc))
