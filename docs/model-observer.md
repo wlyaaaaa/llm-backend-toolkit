@@ -110,12 +110,13 @@ Toolkit 调用 OCR/ASR 时会把开始/完成阶段写入同一个模型 job。�
 
 当前默认注册表中，本地 Ollama、云 Qwen/DeepSeek direct job 都能进入观察台；local Qwen Codex routes 与 Spark agent route 已接入 AICLI/Codex 事件链。`cloud-qwen-flash` 和 `cloud-deepseek-v4-flash` 当前是 direct-only，只显示受管 job 生命周期、公开输出和实际存在的最终 usage，不能显示 Codex 工具/上下文事件。旧 `cloud-qwen3-8-max-agent` 已因当前 AICLI catalog 缺少精确 Profile 而撤出可选注册表，仅保留 `unverified/selectable=false` 的 reserved 记录；不会借用 Qwen 3.7 Profile 或历史回执。AICLI Profile Manager 自身存在某个 Profile 也不等于 Toolkit 已登记相应 agent route。
 
-## 四基座边界
+## 外部责任边界
 
-- `.agents`：AI 能力路由、skill 和自动打开观察台的个人 wrapper。
+- `.agents`：AI 行为与授权、能力路由、skill 和自动打开观察台的个人 wrapper。
 - GitHub 索引：仓库身份、PUBLIC/PRIVATE、remote、worktree 和发布事实。
 - PCConfig：安装路径、端口、服务、计划任务、桌面入口和 LocalGpuBroker 机器事实。
-- PersonalOS：个人连续性与授权语义；不拥有模型事件、GPU 或 GUI 历史。
+
+模型事件、GPU 仲裁和 GUI 历史分别由上面的实际运行链负责；观察台不依赖个人中央资料系统。
 
 ## 实时与性能
 
