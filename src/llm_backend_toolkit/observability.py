@@ -183,10 +183,27 @@ def file_lock(path: Path, *, timeout_seconds: float = 5.0) -> Iterator[None]:
     stream = None
     acquired = False
     try:
-        stream = path.open("a+b", buffering=0)
-        if os.fstat(stream.fileno()).st_size == 0:
-            stream.write(b"\0")
         while not acquired:
+            if stream is None:
+                try:
+                    stream = path.open("a+b", buffering=0)
+                    if os.fstat(stream.fileno()).st_size == 0:
+                        stream.write(b"\0")
+                except OSError as error:
+                    if error.errno in {errno.EACCES, errno.EAGAIN} or getattr(
+                        error, "winerror", None
+                    ) in {5, 13, 32, 33}:
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except Exception:
+                                pass
+                            stream = None
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError(f"Timed out acquiring lock: {path.name}")
+                        time.sleep(_LOCK_POLL_SECONDS)
+                        continue
+                    raise
             acquired = _try_lock_file(stream)
             if acquired:
                 break
