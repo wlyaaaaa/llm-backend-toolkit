@@ -268,7 +268,7 @@ DeepSeek V4 Flash 0731 路由固定使用 `deepseek-v4-flash` 与 `POST https://
 "continuation": {"from_job_id": "<completed-job-id>", "max_turns": 3}
 ```
 
-工具只携带上一轮紧凑结果预览与 receipt，默认最多 3 轮、硬上限 8 轮；它不依赖 Codex、Claude 或某家 API 的隐藏 session，因此更换模型和平台后仍可延续。`delegation_receipt` 记录后端压缩和按路径引用的数据规模，`delivery_receipt` 记录长结果预览避免回传的估算量；二者是成本判断证据，不冒充 Codex 计费 token。
+工具在新请求的 `task.inputs` 中追加一个 `previous_result`，只包含前轮 `job_id`、`result_status` 和 `output_preview`；不会自动携带完整回执、完整输出或原始输入。若下一轮需要这些依据，调用者须明确提供。默认最多 3 轮、硬上限 8 轮；它不依赖 Codex、Claude 或某家 API 的隐藏 session，因此更换模型和平台后仍可延续。每次任务自身仍分别返回 `delegation_receipt`（后端压缩和按路径引用的数据规模）与 `delivery_receipt`（长结果预览避免回传的估算量）；二者是成本判断证据，不冒充 Codex 计费 token，也不自动成为下一轮输入。
 
 ## 不做什么
 
