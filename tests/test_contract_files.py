@@ -81,12 +81,20 @@ class ContractFileTests(unittest.TestCase):
         local_evidence = registry["backends"]["local-default"]["agent_routes"][
             "codex-cli"
         ]["evidence"]
-        self.assertEqual("historical", local_evidence["evidence_state"])
-        self.assertTrue(local_evidence["live_verified"])
+        self.assertEqual("configuration_sync_no_e2e", local_evidence["basis"])
+        self.assertEqual("unverified", local_evidence["evidence_state"])
+        self.assertFalse(local_evidence["live_verified"])
         self.assertEqual(
-            "historical_nontrivial_agent",
+            "configured",
             local_evidence["capability_acceptance_state"],
         )
+        self.assertEqual("aicli_ollama_main", local_evidence["provider_id"])
+        self.assertEqual("responses", local_evidence["wire"])
+        self.assertRegex(local_evidence["profile_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertRegex(local_evidence["model_digest"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("receipt_schema", local_evidence)
+        self.assertNotIn("runtime_manifest_sha256", local_evidence)
+        self.assertNotIn("historical_model", local_evidence)
         self.assertEqual(
             "codex-ollama-main",
             registry["backends"]["local-default"]["agent_routes"]["codex-cli"]["profile"],
@@ -94,14 +102,6 @@ class ContractFileTests(unittest.TestCase):
         self.assertEqual(
             "aicli-qwen3.8-27b-256k:2026-09-15",
             registry["backends"]["local-default"]["model"],
-        )
-        self.assertEqual(
-            "aicli-qwen3.8-27b-256k:2026-08-14",
-            local_evidence["historical_model"],
-        )
-        self.assertEqual(
-            "885ca6e9d68fbda050eee055145891e7c45fa8a0bec8c62dc8cd90708f6bedcd",
-            local_evidence["runtime_manifest_sha256"],
         )
         reserved_qwen38 = registry["acceptance_contract"]["reserved_routes"][
             "codex-qwen3-8-max-paygo"

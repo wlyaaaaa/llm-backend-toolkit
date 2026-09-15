@@ -1,5 +1,19 @@
 # 低频 AICLI 模型同步
 
+## 日常统一入口
+
+日常四模型集合由 AICLI `data/local-model-set.json` 选择，Provider Manifest 拥有
+模型、参数及能力。使用 AICLI 项目的 `scripts/Sync-LocalModelConfiguration.ps1`
+预览，传 `-Apply` 同步 AICLI 安装、Codex Desktop、OpenCode、Toolkit 注册表和
+本机镜像。消费者路径通过 AICLI 本机 `local-model-consumers.json` 指定。
+普通配置同步保留未验收事实，但不要求重新跑整套 E2E；未验证的普通本地 route
+使用 `configured` 状态，不设置 `pending_reacceptance` 阻塞日常工具调用。
+
+下方脚本是保留的单独 Toolkit 导入入口，不负责完整客户端集合；日常统一维护
+使用上述入口，避免只更新一处或重新引入历史待验收标记。
+
+## 单独导入 Toolkit
+
 日常调用优先使用既有 Toolkit registry；只有明确更换本地 AICLI 模型、Profile 或模型 catalog 时才运行此脚本。它读取本机 JSON，并调用 AICLI `profile show --json` 取得既有配置 fingerprint；不会启动模型、GPU Broker 或后台服务。
 
 ```powershell

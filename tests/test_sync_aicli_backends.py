@@ -108,7 +108,7 @@ def write_aicli(root: Path, *, main_model: str, review_model: str) -> Path:
         data,
         "codex-ollama-qwen3-8-27b-abliterated",
         "aicli-qwen3.8-27b-abliterated-256k:2026-09-15",
-        display="Codex CLI + Qwen3.8 27B Abliterated",
+        display="Codex CLI + Qwen3.8 27B 去限制版（256K）",
         images=True,
         output=32768,
         catalog=True,
