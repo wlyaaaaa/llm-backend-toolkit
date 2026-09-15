@@ -19,6 +19,7 @@ from llm_backend_toolkit.agent_runners import (
     _json_values,
     default_runners,
 )
+from llm_backend_toolkit.backends import BackendRegistry
 from llm_backend_toolkit.providers import OpenAIChatProvider, ProviderResponse
 from llm_backend_toolkit.toolkit import Toolkit
 from llm_backend_toolkit.errors import ToolError
@@ -97,6 +98,32 @@ def agent_request(workspace):
     }
 
 
+def accepted_local_agent_registry():
+    """Return an in-memory accepted fixture for Agent execution mechanics.
+
+    The checked-in default route intentionally remains pending until the new
+    immutable runtime tag has its own AICLI receipt. These tests exercise the
+    runner, workspace, and receipt mechanics with fake runners, so they must
+    not make the offline suite depend on a live machine receipt.
+    """
+    registry_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "llm_backend_toolkit"
+        / "default_backends.json"
+    )
+    value = json.loads(registry_path.read_text(encoding="utf-8"))
+    for route_name in ("data_factory", "codex-cli"):
+        evidence = value["backends"]["local-default"]["agent_routes"][route_name][
+            "evidence"
+        ]
+        evidence["basis"] = "unit-test-accepted-runtime-fixture"
+        evidence["live_verified"] = True
+        evidence["evidence_state"] = "current"
+        evidence.pop("capability_acceptance_state", None)
+    return BackendRegistry.from_dict(value, source="unit-test-accepted-runtime-fixture")
+
+
 def after_codex_machine_event_probe(run_result):
     def bounded(command, **kwargs):
         if command[-2:] == ["version", "--json"]:
@@ -118,6 +145,16 @@ def after_codex_machine_event_probe(run_result):
 
 
 class AgentExecutionTests(unittest.TestCase):
+    def setUp(self):
+        self._default_registry = patch(
+            "llm_backend_toolkit.toolkit.BackendRegistry.load",
+            side_effect=accepted_local_agent_registry,
+        )
+        self._default_registry.start()
+
+    def tearDown(self):
+        self._default_registry.stop()
+
     def test_powershell_aicli_entry_preserves_native_argument_delimiter(self):
         pwsh = shutil.which("pwsh")
         if not pwsh:

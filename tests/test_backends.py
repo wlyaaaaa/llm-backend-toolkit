@@ -85,43 +85,63 @@ class ReplacementRunner:
 
 
 class BackendRegistryTests(unittest.TestCase):
-    def test_local_default_switches_to_receipted_qwen38_without_changing_backend_id(self):
+    def test_local_default_uses_new_main_receipt_and_keeps_old_evidence_historical(self):
         registry = BackendRegistry.load()
 
         default = registry.resolve(None)
         legacy = registry.resolve("qwen-main-v1")
 
         self.assertEqual("local-default", default.backend_id)
-        self.assertEqual("aicli-qwen3.8-27b-256k:2026-08-14", default.config["model"])
+        self.assertEqual("aicli-qwen3.8-27b-256k:2026-09-15", default.config["model"])
         self.assertEqual("local-default", legacy.backend_id)
         self.assertTrue(legacy.alias_applied)
         for route_name in ("data_factory", "codex-cli"):
             route = default.config["agent_routes"][route_name]
             evidence = route["evidence"]
             self.assertEqual("codex-cli", route["runner"])
-            self.assertEqual("codex-ollama-qwen3-8-27b", route["profile"])
-            self.assertEqual("aicli-qwen3.8-27b-256k:2026-08-14", route["model"])
-            self.assertEqual("aicli_agent_acceptance_2026-08-15", evidence["basis"])
+            self.assertEqual("codex-ollama-main", route["profile"])
+            self.assertEqual("aicli-qwen3.8-27b-256k:2026-09-15", route["model"])
+            self.assertEqual(
+                "aicli_agent_acceptance_2026-09-15",
+                evidence["basis"],
+            )
+            self.assertTrue(evidence["live_verified"])
             self.assertEqual("historical", evidence["evidence_state"])
+            self.assertEqual("historical_nontrivial_agent", evidence["capability_acceptance_state"])
             self.assertEqual("exact-model", evidence["identity_scope"])
             self.assertEqual(
+                "885ca6e9d68fbda050eee055145891e7c45fa8a0bec8c62dc8cd90708f6bedcd",
+                evidence["runtime_manifest_sha256"],
+            )
+            self.assertEqual(
+                "14bb2c63f1a0e61969a5bceba301ea9d60740ce64b72813cc018acfc63c940c2",
+                evidence["runtime_parameter_sha256"],
+            )
+            self.assertEqual(
+                "aicli-qwen3.8-27b-256k:2026-08-14",
+                evidence["historical_model"],
+            )
+            self.assertEqual(
                 "b70293e853ae9a953fa976e8870550e26aaa7355a3ad0dfcaedbdf4df563287c",
-                evidence["profile_fingerprint"],
+                evidence["historical_profile_fingerprint"],
             )
             self.assertEqual(
                 "e200453f7eea321eab068edbc22c5d38a384a162e46c30ed266c62f0388c4723",
-                evidence["model_digest"],
+                evidence["historical_model_digest"],
             )
+            self.assertEqual("qwen3.8:27b", evidence["historical_parent_model"])
+            self.assertEqual("Q4_K_M", evidence["historical_quantization"])
+            self.assertEqual(262144, evidence["historical_context_window_tokens"])
+            self.assertTrue(evidence["historical_cleanup_confirmed"])
+            self.assertNotEqual(evidence["profile_fingerprint"], evidence["historical_profile_fingerprint"])
+            self.assertEqual(evidence["runtime_manifest_sha256"], evidence["model_digest"])
             self.assertEqual("qwen3.8:27b", evidence["parent_model"])
-            self.assertEqual("Q4_K_M", evidence["quantization"])
-            self.assertEqual(262144, evidence["context_window_tokens"])
-            self.assertTrue(evidence["cleanup_confirmed"])
 
     def test_legacy_agent_routes_are_qwen38_unverified_pending_reacceptance(self):
         registry = BackendRegistry.load()
         default = registry.resolve(None)
         self.assertEqual(
-            "aicli-qwen3.8-27b-256k:2026-08-14", default.config["model"]
+            "aicli-qwen3.8-27b-256k:2026-09-15", default.config["model"]
         )
 
         for route_name in ("claude-code", "qwen-code", "opencode"):
@@ -143,7 +163,7 @@ class BackendRegistryTests(unittest.TestCase):
 
     def test_pending_reacceptance_cannot_inherit_old_live_receipt(self):
         route = {
-            "model": "aicli-qwen3.8-27b-256k:2026-08-14",
+            "model": "aicli-qwen3.8-27b-256k:2026-09-15",
             "evidence": {
                 "basis": "legacy_route_pending_reacceptance_after_default_model_switch",
                 "live_verified": True,
@@ -205,7 +225,7 @@ class BackendRegistryTests(unittest.TestCase):
         crosscheck_selector = registry.resolve("qwen-crosscheck-35b")
 
         self.assertEqual("local-default", default.backend_id)
-        self.assertEqual("aicli-qwen3.8-27b-256k:2026-08-14", default.config["model"])
+        self.assertEqual("aicli-qwen3.8-27b-256k:2026-09-15", default.config["model"])
         self.assertEqual("local-default", legacy_default_selector.backend_id)
         self.assertTrue(legacy_default_selector.alias_applied)
         self.assertEqual("local-crosscheck-35b", crosscheck.backend_id)
@@ -588,7 +608,7 @@ class BackendRegistryTests(unittest.TestCase):
         hard = registry.resolve("local-hard-reasoning")
 
         self.assertEqual("local-default", default.backend_id)
-        self.assertEqual("aicli-qwen3.8-27b-256k:2026-08-14", default.config["model"])
+        self.assertEqual("aicli-qwen3.8-27b-256k:2026-09-15", default.config["model"])
         self.assertEqual("on", default.config["default_reasoning_mode"])
         self.assertEqual(
             {
@@ -603,7 +623,7 @@ class BackendRegistryTests(unittest.TestCase):
             },
             default.config["ollama_options"],
         )
-        self.assertEqual("aicli-qwen3.8-27b-256k:2026-08-14", hard.config["model"])
+        self.assertEqual("aicli-qwen3.8-27b-256k:2026-09-15", hard.config["model"])
         self.assertFalse(hard.config["cloud"])
         self.assertEqual("on", hard.config["required_reasoning_mode"])
         self.assertEqual(

@@ -82,15 +82,27 @@ class ContractFileTests(unittest.TestCase):
             "codex-cli"
         ]["evidence"]
         self.assertEqual("historical", local_evidence["evidence_state"])
+        self.assertTrue(local_evidence["live_verified"])
         self.assertEqual(
-            "codex-ollama-qwen3-8-27b",
+            "historical_nontrivial_agent",
+            local_evidence["capability_acceptance_state"],
+        )
+        self.assertEqual(
+            "codex-ollama-main",
             registry["backends"]["local-default"]["agent_routes"]["codex-cli"]["profile"],
         )
         self.assertEqual(
-            "aicli-qwen3.8-27b-256k:2026-08-14",
+            "aicli-qwen3.8-27b-256k:2026-09-15",
             registry["backends"]["local-default"]["model"],
         )
-        self.assertEqual("not_required", local_evidence["stability_evidence"])
+        self.assertEqual(
+            "aicli-qwen3.8-27b-256k:2026-08-14",
+            local_evidence["historical_model"],
+        )
+        self.assertEqual(
+            "885ca6e9d68fbda050eee055145891e7c45fa8a0bec8c62dc8cd90708f6bedcd",
+            local_evidence["runtime_manifest_sha256"],
+        )
         reserved_qwen38 = registry["acceptance_contract"]["reserved_routes"][
             "codex-qwen3-8-max-paygo"
         ]
