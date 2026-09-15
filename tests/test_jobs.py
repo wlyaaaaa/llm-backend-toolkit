@@ -188,7 +188,7 @@ class JobStoreTests(unittest.TestCase):
                     "task_label": "模型生成任务",
                     "execution_mode": "direct",
                     "reasoning_mode": "on",
-                    "model": BackendRegistry.load().resolve("qwen-main-v1").config["model"],
+                    "model": "Qwen3.8 27B",
                 },
                 state["display"],
             )

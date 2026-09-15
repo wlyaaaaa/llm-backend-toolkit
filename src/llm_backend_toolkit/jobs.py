@@ -567,7 +567,11 @@ class JobStore:
             registry = self.registry or BackendRegistry.load()
             resolved = registry.resolve(requested_backend)
             resolved_backend = resolved.backend_id
-            display_metadata["model"] = str(resolved.config.get("model") or "")
+            display_metadata["model"] = str(
+                resolved.config.get("display_name")
+                or resolved.config.get("model")
+                or ""
+            )
             display_metadata["reasoning_mode"] = str(
                 (request.get("reasoning") or {}).get("mode")
                 or resolved.config.get("default_reasoning_mode")
@@ -581,11 +585,7 @@ class JobStore:
                         {
                             "runner": str(route.get("runner") or route_id),
                             "profile": str(route.get("profile") or ""),
-                            "model": str(
-                                route.get("model")
-                                or display_metadata.get("model")
-                                or ""
-                            ),
+                            "model": str(display_metadata.get("model") or ""),
                             "reasoning_effort": str(
                                 route.get("reasoning_effort") or ""
                             ),

@@ -613,7 +613,7 @@ def _project_result(result: dict[str, Any]) -> dict[str, Any]:
             value = _project_flat(
                 result.get(key),
                 text_fields=frozenset(
-                    {"requested", "resolved", "actual", "model"}
+                    {"requested", "resolved", "actual", "model", "display_name"}
                 ),
                 bool_fields=frozenset(
                     {"cloud", "default_applied", "alias_applied"}
@@ -992,8 +992,11 @@ def _with_local_workspace_paths(
 def _model_name(result: dict[str, Any], state: dict[str, Any]) -> str:
     provider = result.get("provider") or {}
     backend = result.get("backend") or {}
+    display = state.get("display") or {}
     return str(
-        backend.get("model")
+        display.get("model")
+        or backend.get("display_name")
+        or backend.get("model")
         or result.get("model")
         or state.get("model")
         or provider.get("actual")

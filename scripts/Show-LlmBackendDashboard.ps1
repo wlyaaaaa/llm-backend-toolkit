@@ -338,7 +338,11 @@ function Show-Dashboard {
     } else {
         'unknown'
     }
-    $model = if ($result.provider.actual) {
+    $model = if ($display.model) {
+        [string]$display.model
+    } elseif ($result.backend.display_name) {
+        [string]$result.backend.display_name
+    } elseif ($result.provider.actual) {
         [string]$result.provider.actual
     } elseif ($result.backend.model) {
         [string]$result.backend.model

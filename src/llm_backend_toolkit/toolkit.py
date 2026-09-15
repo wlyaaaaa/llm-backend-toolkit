@@ -773,6 +773,7 @@ class Toolkit:
                         "runner": route["runner"],
                         "profile": route["profile"],
                         "model": route["model"],
+                        "display_name": resolved.config.get("display_name") or route["model"],
                         "reasoning_effort": route.get("reasoning_effort"),
                         "evidence_state": evidence["evidence_state"],
                         "receipt_schema": declared_evidence.get("receipt_schema"),
@@ -796,6 +797,7 @@ class Toolkit:
                     "runner": default_route["runner"],
                     "profile": default_route["profile"],
                     "model": default_route["model"],
+                    "display_name": resolved.config.get("display_name") or default_route["model"],
                     **evidence,
                 }
             return {
@@ -981,6 +983,7 @@ class Toolkit:
             "requested": resolved.requested,
             "resolved": resolved.backend_id,
             "model": resolved.config.get("model"),
+            "display_name": resolved.config.get("display_name") or resolved.config.get("model"),
             "cloud": bool(resolved.config.get("cloud")),
             "default_applied": resolved.default_applied,
             "alias_applied": resolved.alias_applied,

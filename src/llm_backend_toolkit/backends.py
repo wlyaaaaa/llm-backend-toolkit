@@ -291,6 +291,7 @@ class BackendRegistry:
                     "cloud": bool(config.get("cloud")),
                     "adapter": config.get("adapter"),
                     "model": config.get("model"),
+                    "display_name": config.get("display_name") or config.get("model"),
                     "supports_vision": bool(config.get("supports_vision")),
                     "context_window_tokens": config.get("context_window_tokens"),
                     "data_destination": config.get("data_destination"),

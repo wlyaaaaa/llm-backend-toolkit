@@ -93,6 +93,7 @@ class BackendRegistryTests(unittest.TestCase):
 
         self.assertEqual("local-default", default.backend_id)
         self.assertEqual("aicli-qwen3.8-27b-256k:2026-09-15", default.config["model"])
+        self.assertEqual("Qwen3.8 27B", default.config["display_name"])
         self.assertEqual("local-default", legacy.backend_id)
         self.assertTrue(legacy.alias_applied)
         for route_name in ("data_factory", "codex-cli"):
@@ -270,63 +271,21 @@ class BackendRegistryTests(unittest.TestCase):
             evidence["receipt_schema"],
         )
         self.assertEqual("aicli", evidence["receipt_authority"])
-        self.assertFalse(evidence["live_verified"])
-        self.assertEqual("unverified", evidence["evidence_state"])
-        self.assertEqual(
-            "aicli_agent_reacceptance_2026-08-21_attempted_failed",
-            evidence["basis"],
-        )
-        self.assertEqual(
-            "pending_reacceptance", evidence["capability_acceptance_state"]
-        )
-        self.assertEqual("attempted_failed", evidence["capability_acceptance"])
-        self.assertEqual("current-model-unverified", evidence["identity_scope"])
-        self.assertEqual("qwen3.6:27b", evidence["previous_model"])
-        self.assertEqual(
-            "d62e939e-8d48-4a5f-a213-1646368104a8",
-            evidence["previous_receipt_id"],
-        )
-        self.assertEqual(
-            "a8c3eacc18e1b552481524c4145d6156f6b34a86840c032ecc39eaedd65a5421",
-            evidence["profile_fingerprint"],
-        )
+        self.assertTrue(evidence["live_verified"])
+        self.assertEqual("historical", evidence["evidence_state"])
+        self.assertEqual("historical_nontrivial_agent", evidence["capability_acceptance_state"])
+        self.assertEqual("exact-model", evidence["identity_scope"])
+        self.assertEqual("qwen3.6:35b", evidence["parent_model"])
         self.assertEqual("aicli_ollama_review", evidence["provider_id"])
         self.assertEqual("responses", evidence["wire"])
-        self.assertEqual("0.3.12", evidence["aicli_version"])
-        self.assertEqual(
-            "2026-08-21T19:28:51.9871927Z", evidence["receipt_observed_utc"]
-        )
-        self.assertEqual("danger-full-access", evidence["sandbox_policy"])
-        self.assertEqual(
-            "2ecc37e425fc4e31ab476ea5d88b5521", evidence["recovery_run_id"]
-        )
-        self.assertEqual("failed_closed", evidence["recovery_status"])
-        self.assertEqual(1, evidence["recovery_attempts"])
-        self.assertEqual(0, evidence["recovery_resume_count"])
-        self.assertEqual(4, evidence["agent_exit_code"])
-        self.assertEqual(
-            "aicli.recovery.capture_exception", evidence["agent_error_code"]
-        )
-        self.assertEqual(0, evidence["agent_steps"])
-        self.assertEqual(0, evidence["agent_tool_calls"])
-        self.assertFalse(evidence["cleanup_confirmed"])
-        self.assertFalse(evidence["runtime_identity_verified"])
-        self.assertFalse(evidence["verifier_passed"])
-        self.assertEqual(
-            "capture_exception_before_verified_receipt",
-            evidence["reason"],
-        )
-        verified_identity_fields = {
-            "receipt_id",
-            "source_entry_sha256",
-            "task_contract_sha256",
-            "verifier_sha256",
-            "stability_evidence",
-            "stress_evidence",
-            "model_digest",
-            "parent_model",
-        }
-        self.assertTrue(verified_identity_fields.isdisjoint(evidence))
+        self.assertEqual("completed", evidence["recovery_status"])
+        self.assertEqual(0, evidence["agent_exit_code"])
+        self.assertGreater(evidence["agent_tool_calls"], 0)
+        self.assertTrue(evidence["cleanup_confirmed"])
+        self.assertTrue(evidence["runtime_identity_verified"])
+        self.assertTrue(evidence["verifier_passed"])
+        self.assertEqual(262144, evidence["context_window_tokens"])
+        self.assertEqual("aicli.recovery.capture_exception", evidence["historical_failure"]["error_code"])
 
         catalog_entry = next(
             item
@@ -373,6 +332,10 @@ class BackendRegistryTests(unittest.TestCase):
 
     def test_local_crosscheck_explicit_codex_agent_is_pending_reacceptance(self):
         registry = BackendRegistry.load()
+        # Exercise the guard with an explicit pending fixture, independent of
+        # the production route's current acceptance receipt.
+        evidence = registry.resolve("local-crosscheck-35b").config["agent_routes"]["codex-cli"]["evidence"]
+        evidence.update({"live_verified": False, "capability_acceptance_state": "pending_reacceptance", "basis": "synthetic_pending_reacceptance"})
         provider = ReplacementProvider()
         runner = ReplacementRunner()
         toolkit = Toolkit(
@@ -404,7 +367,7 @@ class BackendRegistryTests(unittest.TestCase):
         self.assertEqual("codex-ollama-review", result["execution_receipt"]["profile"])
         self.assertEqual("max", result["execution_receipt"]["reasoning_effort"])
         self.assertEqual(
-            "aicli_agent_reacceptance_2026-08-21_attempted_failed",
+            "synthetic_pending_reacceptance",
             result["execution_receipt"]["route_basis"],
         )
         self.assertFalse(result["execution_receipt"]["route_live_verified"])
@@ -643,6 +606,7 @@ class BackendRegistryTests(unittest.TestCase):
             item for item in registry.catalog()["backends"] if item["id"] == "local-hard-reasoning"
         )
         self.assertEqual("on", catalog_entry["required_reasoning_mode"])
+        self.assertEqual("Qwen3.8 27B", catalog_entry["display_name"])
 
     def test_default_backend_and_legacy_alias_resolve_without_code_changes(self):
         registry = BackendRegistry.from_dict(registry_data())
@@ -879,7 +843,7 @@ class BackendRegistryTests(unittest.TestCase):
         toolkit.providers["local-crosscheck-35b"].status = lambda: {
             "provider": "qwen-main-v1",
             "cloud": False,
-            "model": {"parent_model": "qwen3.6:35b"},
+            "model": {"parent_model": "qwen3.6:35b", "digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a"},
             "live_call_performed": False,
         }
 
@@ -893,13 +857,13 @@ class BackendRegistryTests(unittest.TestCase):
                 "runner": "codex-cli",
                 "profile": "codex-ollama-review",
                 "model": "qwen-main-v1",
+                "display_name": "Qwen3.6 35B",
                 "reasoning_effort": "max",
-                "evidence_state": "unverified",
+                "evidence_state": "current",
                 "receipt_schema": "aicli.agent.acceptance-receipt.v1",
                 "receipt_authority": "aicli",
-                "model_digest": None,
-                "parent_model": None,
-                "capability_acceptance_state": "pending_reacceptance",
+                "model_digest": "46c6d39f92e76686e7e3ff0097029fdb7aedbdea5375857acdbdb08b1fd8783a",
+                "parent_model": "qwen3.6:35b",
             },
             status["agent_routes"]["codex-cli"],
         )

@@ -1509,7 +1509,7 @@ class ObserverStoreTests(unittest.TestCase):
             detail = observer.get_run(job_id)
 
             self.assertEqual(job_id, listing["runs"][0]["job_id"])
-            self.assertEqual("qwen-main-v1", detail["model"])
+            self.assertEqual("Qwen3.8 27B", detail["model"])
             self.assertEqual(20.0, detail["performance"]["tokens_per_second"])
             self.assertEqual(
                 "eval_duration",
