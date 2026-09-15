@@ -98,8 +98,8 @@ def write_aicli(root: Path, *, main_model: str, review_model: str) -> Path:
     write_profile(
         data,
         "codex-ollama-qwen3-6-35b-abliterated",
-        "aicli-qwen3.6-35b-abliterated-256k:2026-09-15",
-        display="Codex CLI + Qwen3.6 35B Abliterated",
+        "qwen3.6-35b-abliterated:256k",
+        display="Codex CLI + Qwen3.6 35B 去限制版",
         images=False,
         output=32768,
         catalog=True,
@@ -107,8 +107,8 @@ def write_aicli(root: Path, *, main_model: str, review_model: str) -> Path:
     write_profile(
         data,
         "codex-ollama-qwen3-8-27b-abliterated",
-        "aicli-qwen3.8-27b-abliterated-256k:2026-09-15",
-        display="Codex CLI + Qwen3.8 27B 去限制版（256K）",
+        "qwen3.8-27b-abliterated:256k",
+        display="Codex CLI + Qwen3.8 27B 去限制版",
         images=True,
         output=32768,
         catalog=True,

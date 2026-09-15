@@ -100,7 +100,7 @@ class ContractFileTests(unittest.TestCase):
             registry["backends"]["local-default"]["agent_routes"]["codex-cli"]["profile"],
         )
         self.assertEqual(
-            "aicli-qwen3.8-27b-256k:2026-09-15",
+            "qwen3.8-27b:256k",
             registry["backends"]["local-default"]["model"],
         )
         reserved_qwen38 = registry["acceptance_contract"]["reserved_routes"][

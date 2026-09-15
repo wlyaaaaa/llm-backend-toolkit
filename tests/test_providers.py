@@ -211,7 +211,7 @@ class ProviderContractTests(unittest.TestCase):
             seen.append((request, timeout))
             return FakeHttpResponse(
                 {
-                    "model": "qwen-main-v1:latest",
+                    "model": "qwen-main-v1",
                     "message": {"content": "local", "thinking": "not returned by toolkit"},
                     "done_reason": "stop",
                     "prompt_eval_count": 8,
@@ -263,7 +263,7 @@ class ProviderContractTests(unittest.TestCase):
             seen.append((request, timeout))
             return FakeHttpResponse(
                 {
-                    "model": "qwen-main-v1:latest",
+                    "model": "qwen-main-v1",
                     "message": {"content": "local", "thinking": "PRIVATE_HIDDEN_TRACE"},
                     "done_reason": "stop",
                 }
@@ -298,27 +298,27 @@ class ProviderContractTests(unittest.TestCase):
         hidden_secret = "PRIVATE_HIDDEN_REASONING_MUST_NOT_LEAK"
         chunks = [
             {
-                "model": "qwen-main-v1:latest",
+                "model": "qwen-main-v1",
                 "message": {"thinking": hidden_secret, "content": ""},
                 "done": False,
             },
             {
-                "model": "qwen-main-v1:latest",
+                "model": "qwen-main-v1",
                 "message": {"thinking": "more hidden", "content": ""},
                 "done": False,
             },
             {
-                "model": "qwen-main-v1:latest",
+                "model": "qwen-main-v1",
                 "message": {"content": "公开"},
                 "done": False,
             },
             {
-                "model": "qwen-main-v1:latest",
+                "model": "qwen-main-v1",
                 "message": {"content": "回复"},
                 "done": False,
             },
             {
-                "model": "qwen-main-v1:latest",
+                "model": "qwen-main-v1",
                 "message": {"content": ""},
                 "done": True,
                 "done_reason": "stop",
@@ -369,12 +369,12 @@ class ProviderContractTests(unittest.TestCase):
     def test_ollama_progress_callback_failure_does_not_interrupt_result(self):
         chunks = [
             {
-                "model": "qwen-main-v1:latest",
+                "model": "qwen-main-v1",
                 "message": {"content": "safe"},
                 "done": False,
             },
             {
-                "model": "qwen-main-v1:latest",
+                "model": "qwen-main-v1",
                 "message": {},
                 "done": True,
                 "done_reason": "stop",
@@ -407,7 +407,7 @@ class ProviderContractTests(unittest.TestCase):
             "/api/tags": {
                 "models": [
                     {
-                        "name": "qwen-main-v1:latest",
+                        "name": "qwen-main-v1",
                         "digest": "a" * 64,
                         "modified_at": "2026-07-03T08:14:44-07:00",
                     }

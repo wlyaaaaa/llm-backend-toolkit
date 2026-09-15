@@ -51,7 +51,7 @@
   "backends": {
     "local-default": {
       "adapter": "ollama",
-      "model": "aicli-qwen3.8-27b-256k:2026-09-15",
+      "model": "qwen3.8-27b:256k",
       "display_name": "Qwen3.8 27B",
       "cloud": false,
       "supports_vision": true,
@@ -74,14 +74,14 @@
         "data_factory": {
           "runner": "codex-cli",
           "profile": "codex-ollama-main",
-          "model": "aicli-qwen3.8-27b-256k:2026-09-15",
+          "model": "qwen3.8-27b:256k",
           "reasoning_effort": "max",
           "evidence": {
             "basis": "configuration_sync_no_e2e",
             "live_verified": false,
             "evidence_state": "unverified",
             "capability_acceptance_state": "configured",
-            "profile_fingerprint": "da5f0be3b58ff83ff3d39ef013fe58b4df0f21e11be80f5349874547dc2961cc",
+            "profile_fingerprint": "8d2717ed225318b505e036909a22bbbd899dafd08c8cd1f3aa7d17b2a4d03004",
             "provider_id": "aicli_ollama_main",
             "wire": "responses",
             "model_digest": "8040835723046ec2631b64b960d44414636ea5147942a7d68eaaa7ccdb492e20"
@@ -90,14 +90,14 @@
         "codex-cli": {
           "runner": "codex-cli",
           "profile": "codex-ollama-main",
-          "model": "aicli-qwen3.8-27b-256k:2026-09-15",
+          "model": "qwen3.8-27b:256k",
           "reasoning_effort": "max",
           "evidence": {
             "basis": "configuration_sync_no_e2e",
             "live_verified": false,
             "evidence_state": "unverified",
             "capability_acceptance_state": "configured",
-            "profile_fingerprint": "da5f0be3b58ff83ff3d39ef013fe58b4df0f21e11be80f5349874547dc2961cc",
+            "profile_fingerprint": "8d2717ed225318b505e036909a22bbbd899dafd08c8cd1f3aa7d17b2a4d03004",
             "provider_id": "aicli_ollama_main",
             "wire": "responses",
             "model_digest": "8040835723046ec2631b64b960d44414636ea5147942a7d68eaaa7ccdb492e20"
@@ -106,7 +106,7 @@
         "claude-code": {
           "runner": "claude-code",
           "profile": "claude-ollama-main",
-          "model": "aicli-qwen3.8-27b-256k:2026-09-15",
+          "model": "qwen3.8-27b:256k",
           "evidence": {
             "basis": "legacy_route_pending_reacceptance_after_default_model_switch",
             "live_verified": false,
@@ -122,7 +122,7 @@
         "qwen-code": {
           "runner": "qwen-code",
           "profile": "qwen-code-ollama-main",
-          "model": "aicli-qwen3.8-27b-256k:2026-09-15",
+          "model": "qwen3.8-27b:256k",
           "evidence": {
             "basis": "legacy_route_pending_reacceptance_after_default_model_switch",
             "live_verified": false,
@@ -138,7 +138,7 @@
         "opencode": {
           "runner": "opencode",
           "profile": "opencode-ollama-main",
-          "model": "aicli-qwen3.8-27b-256k:2026-09-15",
+          "model": "qwen3.8-27b:256k",
           "evidence": {
             "basis": "legacy_route_pending_reacceptance_after_default_model_switch",
             "live_verified": false,
@@ -155,7 +155,7 @@
     },
     "local-hard-reasoning": {
       "adapter": "ollama",
-      "model": "aicli-qwen3.8-27b-256k:2026-09-15",
+      "model": "qwen3.8-27b:256k",
       "display_name": "Qwen3.8 27B",
       "hidden": true,
       "cloud": false,
@@ -179,7 +179,7 @@
     },
     "local-crosscheck-35b": {
       "adapter": "ollama",
-      "model": "qwen-main-v1",
+      "model": "qwen3.6-35b:256k",
       "display_name": "Qwen3.6 35B",
       "cloud": false,
       "supports_vision": true,
@@ -204,14 +204,14 @@
         "codex-cli": {
           "runner": "codex-cli",
           "profile": "codex-ollama-review",
-          "model": "qwen-main-v1",
+          "model": "qwen3.6-35b:256k",
           "reasoning_effort": "max",
           "evidence": {
             "basis": "configuration_sync_no_e2e",
             "live_verified": false,
             "evidence_state": "unverified",
             "capability_acceptance_state": "configured",
-            "profile_fingerprint": "7a59fbfe00aca18fa54986da0f163c3f8ca556a13a35e10d3765ddcc08898541",
+            "profile_fingerprint": "e0f62d5f28843c3059c6541c94e86771aec7e970fda61a72daac90c47366bb2a",
             "provider_id": "aicli_ollama_review",
             "wire": "responses",
             "model_digest": "7dd8a375ab919bd63cc558161d4209b4d9f66ea858acb4f10641a8d80028626a"
@@ -221,8 +221,8 @@
     },
     "local-qwen3-6-35b-abliterated": {
       "adapter": "ollama",
-      "model": "aicli-qwen3.6-35b-abliterated-256k:2026-09-15",
-      "display_name": "Qwen3.6 35B Abliterated",
+      "model": "qwen3.6-35b-abliterated:256k",
+      "display_name": "Qwen3.6 35B 去限制版",
       "cloud": false,
       "supports_vision": false,
       "context_window_tokens": 262144,
@@ -245,7 +245,7 @@
         "codex-cli": {
           "runner": "codex-cli",
           "profile": "codex-ollama-qwen3-6-35b-abliterated",
-          "model": "aicli-qwen3.6-35b-abliterated-256k:2026-09-15",
+          "model": "qwen3.6-35b-abliterated:256k",
           "reasoning_effort": "max",
           "evidence": {
             "basis": "configuration_sync_no_e2e",
@@ -254,7 +254,7 @@
             "capability_acceptance_state": "configured",
             "model_digest": "bdb98c4eedddabf2ed3f64d12bfe6bc6a24af7c3242354e91a059fba126de201",
             "wire": "responses",
-            "profile_fingerprint": "02d8448371297bfc22a7071e33bad0ccf16661382a20a03168a8210daeb2af25",
+            "profile_fingerprint": "0266f38ce5e46b52fe62f0b2047f2c388f6c63d728b8468ecb9771bb9c23bcc3",
             "provider_id": "aicli_ollama_qwen36_35b_abliterated"
           }
         }
@@ -336,8 +336,8 @@
     },
     "local-qwen3-8-27b-abliterated": {
       "adapter": "ollama",
-      "model": "aicli-qwen3.8-27b-abliterated-256k:2026-09-15",
-      "display_name": "Qwen3.8 27B 去限制版（256K）",
+      "model": "qwen3.8-27b-abliterated:256k",
+      "display_name": "Qwen3.8 27B 去限制版",
       "cloud": false,
       "supports_vision": true,
       "context_window_tokens": 262144,
@@ -360,7 +360,7 @@
         "codex-cli": {
           "runner": "codex-cli",
           "profile": "codex-ollama-qwen3-8-27b-abliterated",
-          "model": "aicli-qwen3.8-27b-abliterated-256k:2026-09-15",
+          "model": "qwen3.8-27b-abliterated:256k",
           "reasoning_effort": "max",
           "evidence": {
             "basis": "configuration_sync_no_e2e",
@@ -369,7 +369,7 @@
             "capability_acceptance_state": "configured",
             "model_digest": "8175b17fb6b4325a327e04081eab6aafb197f72b92fac74148d8801a5886ad4a",
             "wire": "responses",
-            "profile_fingerprint": "22bdbb6f8692aef3232388d71afa57519b96a0b4984d38f68c9429cca5b84829",
+            "profile_fingerprint": "7b15fa7599fbc35098a53b3a386f6db9a1e6d0830adbd9689a99f665c8e84970",
             "provider_id": "aicli_ollama_qwen38_abliterated"
           }
         }
