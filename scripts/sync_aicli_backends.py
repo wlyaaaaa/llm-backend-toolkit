@@ -33,6 +33,10 @@ ROUTE_PROFILES = {
     "opencode": "opencode-ollama-main",
 }
 REVIEW_PROFILE = "codex-ollama-review"
+EXACT_PROFILE_BACKENDS = {
+    "codex-ollama-qwen3-6-35b-abliterated": "local-qwen3-6-35b-abliterated",
+    "codex-ollama-qwen3-8-27b-abliterated": "local-qwen3-8-27b-abliterated",
+}
 EXPECTED_CONTEXT = 262_144
 PROFILE_CONTRACTS = {
     "codex-ollama-main": ("codex", "responses"),
@@ -40,6 +44,8 @@ PROFILE_CONTRACTS = {
     "qwen-code-ollama-main": ("qwen-code", "openai-compatible"),
     "opencode-ollama-main": ("opencode", "openai-compatible"),
     "codex-ollama-review": ("codex", "responses"),
+    "codex-ollama-qwen3-6-35b-abliterated": ("codex", "responses"),
+    "codex-ollama-qwen3-8-27b-abliterated": ("codex", "responses"),
 }
 
 
@@ -303,7 +309,7 @@ def build_plan(
     main_profiles = [_profile(aicli_data, name) for name in MAIN_PROFILES]
     review = _profile(aicli_data, REVIEW_PROFILE)
     fingerprints = profile_fingerprints
-    if set(fingerprints) != {*MAIN_PROFILES, REVIEW_PROFILE}:
+    if set(fingerprints) != {*MAIN_PROFILES, REVIEW_PROFILE, *EXACT_PROFILE_BACKENDS}:
         raise SyncError("AICLI profile fingerprint set is incomplete")
     main_model = _consistent("AICLI main models", [profile["model"] for profile in main_profiles])
     main_origin = _consistent("AICLI main endpoint origins", [profile["origin"] for profile in main_profiles])
@@ -389,6 +395,32 @@ def build_plan(
     if review_changed or review_binding_changed:
         _replace_evidence(review_route, fingerprint=fingerprints[REVIEW_PROFILE], profile=review)
 
+    exact_changes = []
+    for profile_id, backend_id in EXACT_PROFILE_BACKENDS.items():
+        if not isinstance(candidate_backends.get(backend_id), dict):
+            raise SyncError(f"Toolkit registry lacks {backend_id}")
+        profile = _profile(aicli_data, profile_id)
+        if any(context != EXPECTED_CONTEXT for context in profile["contexts"]):
+            raise SyncError(f"{profile_id} context must be {EXPECTED_CONTEXT}")
+        outputs = profile["outputs"]
+        if not outputs:
+            raise SyncError(f"{profile_id} provides no output capacity")
+        _validate_output(candidate_backends[backend_id], _consistent(f"{profile_id} output capacity", outputs), backend_id)
+        config = candidate_backends[backend_id]
+        original = registry["backends"][backend_id]
+        changed = _apply_backend(config, model=profile["model"], display_name=profile["display_name"], origin=profile["origin"], images=profile["images"], label=backend_id)
+        route = (config.get("agent_routes") or {}).get("codex-cli")
+        original_route = (original.get("agent_routes") or {}).get("codex-cli")
+        if not isinstance(route, dict) or not isinstance(original_route, dict) or route.get("profile") != profile_id:
+            raise SyncError(f"{backend_id} lacks its exact {profile_id} codex-cli route")
+        if route.get("model") != profile["model"]:
+            route["model"] = profile["model"]
+            changed = True
+        if changed or (original_route.get("evidence") or {}).get("profile_fingerprint") != fingerprints[profile_id]:
+            _replace_evidence(route, fingerprint=fingerprints[profile_id], profile=profile)
+        if _canonical_bytes(original) != _canonical_bytes(config):
+            exact_changes.append({"backend": backend_id, "profile": profile_id})
+
     changes = []
     if _canonical_bytes(candidate) != _canonical_bytes(registry):
         for backend_id in ("local-default", "local-hard-reasoning", "local-crosscheck-35b"):
@@ -410,6 +442,7 @@ def build_plan(
             if _canonical_bytes(original_review_route.get("evidence") or {}) != _canonical_bytes(review_route.get("evidence") or {}):
                 fields.append({"field": "evidence", "before": _evidence_summary(original_review_route.get("evidence") or {}), "after": _evidence_summary(review_route.get("evidence") or {})})
             changes.append({"backend": "local-crosscheck-35b", "route": "codex-cli", "fields": fields})
+        changes.extend(exact_changes)
     return candidate, changes
 
 
@@ -447,7 +480,7 @@ def main(argv: list[str] | None = None) -> int:
         registry = json.loads(registry_bytes.decode("utf-8"))
         if not isinstance(registry, dict):
             raise SyncError("Registry JSON object required")
-        fingerprints = _profile_fingerprints(args.aicli_root, (*MAIN_PROFILES, REVIEW_PROFILE))
+        fingerprints = _profile_fingerprints(args.aicli_root, (*MAIN_PROFILES, REVIEW_PROFILE, *EXACT_PROFILE_BACKENDS))
         candidate, changes = build_plan(
             registry,
             data,

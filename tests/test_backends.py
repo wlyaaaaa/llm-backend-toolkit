@@ -111,11 +111,11 @@ class BackendRegistryTests(unittest.TestCase):
             self.assertEqual("historical_nontrivial_agent", evidence["capability_acceptance_state"])
             self.assertEqual("exact-model", evidence["identity_scope"])
             self.assertEqual(
-                "885ca6e9d68fbda050eee055145891e7c45fa8a0bec8c62dc8cd90708f6bedcd",
+        "8040835723046ec2631b64b960d44414636ea5147942a7d68eaaa7ccdb492e20",
                 evidence["runtime_manifest_sha256"],
             )
             self.assertEqual(
-                "14bb2c63f1a0e61969a5bceba301ea9d60740ce64b72813cc018acfc63c940c2",
+        "f31338adbd0f8703936e46b65304ae9369378184f88dd20b9760b0d8ed8b50f0",
                 evidence["runtime_parameter_sha256"],
             )
             self.assertEqual(
@@ -602,11 +602,10 @@ class BackendRegistryTests(unittest.TestCase):
             },
             hard.config["ollama_options"],
         )
-        catalog_entry = next(
-            item for item in registry.catalog()["backends"] if item["id"] == "local-hard-reasoning"
+        self.assertNotIn(
+            "local-hard-reasoning",
+            {item["id"] for item in registry.catalog()["backends"]},
         )
-        self.assertEqual("on", catalog_entry["required_reasoning_mode"])
-        self.assertEqual("Qwen3.8 27B", catalog_entry["display_name"])
 
     def test_default_backend_and_legacy_alias_resolve_without_code_changes(self):
         registry = BackendRegistry.from_dict(registry_data())

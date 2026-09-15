@@ -84,8 +84,8 @@
             "receipt_authority": "aicli",
             "capability_acceptance_state": "historical_nontrivial_agent",
             "identity_scope": "exact-model",
-            "runtime_manifest_sha256": "885ca6e9d68fbda050eee055145891e7c45fa8a0bec8c62dc8cd90708f6bedcd",
-            "runtime_parameter_sha256": "14bb2c63f1a0e61969a5bceba301ea9d60740ce64b72813cc018acfc63c940c2",
+            "runtime_manifest_sha256": "8040835723046ec2631b64b960d44414636ea5147942a7d68eaaa7ccdb492e20",
+            "runtime_parameter_sha256": "f31338adbd0f8703936e46b65304ae9369378184f88dd20b9760b0d8ed8b50f0",
             "historical_evidence_basis": "aicli_agent_acceptance_2026-08-15",
             "historical_model": "aicli-qwen3.8-27b-256k:2026-08-14",
             "historical_profile_fingerprint": "b70293e853ae9a953fa976e8870550e26aaa7355a3ad0dfcaedbdf4df563287c",
@@ -114,7 +114,7 @@
             "cleanup_confirmed": true,
             "stability_evidence": "not_required",
             "stress_evidence": "not_required",
-            "model_digest": "885ca6e9d68fbda050eee055145891e7c45fa8a0bec8c62dc8cd90708f6bedcd",
+            "model_digest": "8040835723046ec2631b64b960d44414636ea5147942a7d68eaaa7ccdb492e20",
             "parent_model": "qwen3.8:27b",
             "quantization": "Q4_K_M",
             "context_window_tokens": 262144
@@ -133,8 +133,8 @@
             "receipt_authority": "aicli",
             "capability_acceptance_state": "historical_nontrivial_agent",
             "identity_scope": "exact-model",
-            "runtime_manifest_sha256": "885ca6e9d68fbda050eee055145891e7c45fa8a0bec8c62dc8cd90708f6bedcd",
-            "runtime_parameter_sha256": "14bb2c63f1a0e61969a5bceba301ea9d60740ce64b72813cc018acfc63c940c2",
+            "runtime_manifest_sha256": "8040835723046ec2631b64b960d44414636ea5147942a7d68eaaa7ccdb492e20",
+            "runtime_parameter_sha256": "f31338adbd0f8703936e46b65304ae9369378184f88dd20b9760b0d8ed8b50f0",
             "historical_evidence_basis": "aicli_agent_acceptance_2026-08-15",
             "historical_model": "aicli-qwen3.8-27b-256k:2026-08-14",
             "historical_profile_fingerprint": "b70293e853ae9a953fa976e8870550e26aaa7355a3ad0dfcaedbdf4df563287c",
@@ -163,7 +163,7 @@
             "cleanup_confirmed": true,
             "stability_evidence": "not_required",
             "stress_evidence": "not_required",
-            "model_digest": "885ca6e9d68fbda050eee055145891e7c45fa8a0bec8c62dc8cd90708f6bedcd",
+            "model_digest": "8040835723046ec2631b64b960d44414636ea5147942a7d68eaaa7ccdb492e20",
             "parent_model": "qwen3.8:27b",
             "quantization": "Q4_K_M",
             "context_window_tokens": 262144
@@ -223,6 +223,7 @@
       "adapter": "ollama",
       "model": "aicli-qwen3.8-27b-256k:2026-09-15",
       "display_name": "Qwen3.8 27B",
+      "hidden": true,
       "cloud": false,
       "supports_vision": true,
       "context_window_tokens": 262144,
@@ -313,6 +314,46 @@
         }
       }
     },
+    "local-qwen3-6-35b-abliterated": {
+      "adapter": "ollama",
+      "model": "aicli-qwen3.6-35b-abliterated-256k:2026-09-15",
+      "display_name": "Qwen3.6 35B Abliterated",
+      "cloud": false,
+      "supports_vision": false,
+      "context_window_tokens": 262144,
+      "default_reasoning_mode": "on",
+      "ollama_options": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 1.5,
+        "repeat_penalty": 1.0,
+        "num_ctx": 262144,
+        "num_predict": 32768
+      },
+      "base_url_env": "LLM_TOOLKIT_OLLAMA_BASE_URL",
+      "base_url_default": "http://127.0.0.1:32100",
+      "data_destination": "LocalGpuBroker Ollama endpoint",
+      "fallback_eligible": false,
+      "agent_routes": {
+        "codex-cli": {
+          "runner": "codex-cli",
+          "profile": "codex-ollama-qwen3-6-35b-abliterated",
+          "model": "aicli-qwen3.6-35b-abliterated-256k:2026-09-15",
+          "reasoning_effort": "max",
+          "evidence": {
+            "basis": "artifact_verified_pending_aicli_agent_acceptance",
+            "live_verified": false,
+            "evidence_state": "unverified",
+            "capability_acceptance_state": "pending_reacceptance",
+            "identity_scope": "exact-model-unverified",
+            "model_digest": "fac24b27fb75f7b365db6061ca2f43ec780ef6dbea30473593a6b7251af9fd53",
+            "parent_model": ""
+          }
+        }
+      }
+    },
     "fast-middle-agent": {
       "adapter": "agent-only",
       "model": "gpt-5.3-codex-spark",
@@ -386,6 +427,47 @@
       },
       "data_destination": "DeepSeek API",
       "agent_routes": {}
+    },
+    "local-qwen3-8-27b-abliterated": {
+      "adapter": "ollama",
+      "model": "aicli-qwen3.8-27b-abliterated-256k:2026-09-15",
+      "display_name": "Qwen3.8 27B Abliterated",
+      "cloud": false,
+      "supports_vision": true,
+      "context_window_tokens": 262144,
+      "default_reasoning_mode": "on",
+      "ollama_options": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "repeat_penalty": 1.0,
+        "num_ctx": 262144,
+        "num_predict": 32768
+      },
+      "base_url_env": "LLM_TOOLKIT_OLLAMA_BASE_URL",
+      "base_url_default": "http://127.0.0.1:32100",
+      "data_destination": "LocalGpuBroker Ollama endpoint",
+      "fallback_eligible": false,
+      "agent_routes": {
+        "codex-cli": {
+          "runner": "codex-cli",
+          "profile": "codex-ollama-qwen3-8-27b-abliterated",
+          "model": "aicli-qwen3.8-27b-abliterated-256k:2026-09-15",
+          "reasoning_effort": "max",
+          "evidence": {
+            "basis": "artifact_verified_pending_aicli_agent_acceptance",
+            "live_verified": false,
+            "evidence_state": "unverified",
+            "capability_acceptance_state": "pending_reacceptance",
+            "identity_scope": "exact-model-unverified",
+            "model_digest": "8ee8e56391b2b404a050562b931d53888ca6fa747fd5201a65c291600d44988d",
+            "parameter_digest": "f31338adbd0f8703936e46b65304ae9369378184f88dd20b9760b0d8ed8b50f0",
+            "projector_digest": "ac3714bfdddeca31351f2752bf1a63f266f4df87c0b68c895e44945ca704448e"
+          }
+        }
+      }
     }
   }
 }

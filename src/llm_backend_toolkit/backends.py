@@ -284,6 +284,8 @@ class BackendRegistry:
         output: list[dict[str, Any]] = []
         for backend_id in sorted(self.backends):
             config = self.backends[backend_id]
+            if bool(config.get("hidden", False)):
+                continue
             output.append(
                 {
                     "id": backend_id,

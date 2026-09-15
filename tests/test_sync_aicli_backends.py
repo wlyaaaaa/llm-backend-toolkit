@@ -95,6 +95,24 @@ def write_aicli(root: Path, *, main_model: str, review_model: str) -> Path:
         output=8192,
         catalog=True,
     )
+    write_profile(
+        data,
+        "codex-ollama-qwen3-6-35b-abliterated",
+        "aicli-qwen3.6-35b-abliterated-256k:2026-09-15",
+        display="Codex CLI + Qwen3.6 35B Abliterated",
+        images=False,
+        output=32768,
+        catalog=True,
+    )
+    write_profile(
+        data,
+        "codex-ollama-qwen3-8-27b-abliterated",
+        "aicli-qwen3.8-27b-abliterated-256k:2026-09-15",
+        display="Codex CLI + Qwen3.8 27B Abliterated",
+        images=True,
+        output=32768,
+        catalog=True,
+    )
     return data
 
 
@@ -102,6 +120,8 @@ def fingerprints(data: Path, *, codex: str = "codex-fingerprint", review: str = 
     values = {profile_id: f"{profile_id}-fingerprint" for profile_id in MAIN_IDS}
     values["codex-ollama-main"] = codex
     values["codex-ollama-review"] = review
+    values["codex-ollama-qwen3-6-35b-abliterated"] = "abliterated-fingerprint"
+    values["codex-ollama-qwen3-8-27b-abliterated"] = "abliterated27-fingerprint"
     return values
 
 
@@ -118,6 +138,8 @@ class SyncAicliBackendsTests(unittest.TestCase):
             source["backends"]["local-default"]["agent_routes"]["data_factory"]["evidence"]["profile_fingerprint"] = "codex-fingerprint"
             source["backends"]["local-default"]["agent_routes"]["codex-cli"]["evidence"]["profile_fingerprint"] = "codex-fingerprint"
             source["backends"]["local-crosscheck-35b"]["agent_routes"]["codex-cli"]["evidence"]["profile_fingerprint"] = "review-fingerprint"
+            source["backends"]["local-qwen3-6-35b-abliterated"]["agent_routes"]["codex-cli"]["evidence"]["profile_fingerprint"] = "abliterated-fingerprint"
+            source["backends"]["local-qwen3-8-27b-abliterated"]["agent_routes"]["codex-cli"]["evidence"]["profile_fingerprint"] = "abliterated27-fingerprint"
             candidate, changes = SYNC.build_plan(source, data, profile_fingerprints=fingerprints(data))
         self.assertEqual([], changes)
         self.assertEqual(source, candidate)
