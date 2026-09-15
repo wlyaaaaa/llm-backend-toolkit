@@ -5,6 +5,7 @@ This is a public, secret-free tool project. Collaborate with the owner in Simpli
 ## Product boundary
 
 - Keep this a tool for a top-level model, not an autonomous agent.
+- Toolkit is an explicit non-native task tool. Its `local-default` is only this registry's default, never a global model default or a reason to replace Luna because a local route is available. Model configuration remains replaceable; use the low-frequency [AICLI backend sync guide](docs/aicli-backend-sync.md) for a deliberate model change and do not create another long-lived model configuration source.
 - Resolve backends from the versioned registry. Omitted selection means the registry's local-only `default_backend`; concrete model, endpoint, platform, and aicli Profile IDs must remain replaceable without changing core routing code. Never add automatic fallback.
 - Keep machine-facing backend IDs and route fields stable. In user-visible Toolkit output, job titles, observer cards, and dashboard prompts, show the registry's `display_name` (or the concrete model identifier when no name exists); do not present an internal alias or routing role such as `local-default`, `main`, primary, or auxiliary as the model name.
 - Keep context compaction visible through receipts and keep reasoning output disabled by default.
