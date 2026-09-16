@@ -58,14 +58,14 @@
       "context_window_tokens": 262144,
       "default_reasoning_mode": "on",
       "ollama_options": {
-        "temperature": 1,
-        "top_p": 0.95,
         "top_k": 20,
-        "min_p": 0,
-        "presence_penalty": 0,
+        "temperature": 1,
         "repeat_penalty": 1,
-        "num_ctx": 262144,
-        "num_predict": 32768
+        "presence_penalty": 0,
+        "min_p": 0,
+        "num_predict": 32768,
+        "top_p": 0.95,
+        "num_ctx": 262144
       },
       "base_url_env": "LLM_TOOLKIT_OLLAMA_BASE_URL",
       "base_url_default": "http://127.0.0.1:32100",
@@ -77,13 +77,13 @@
           "model": "qwen3.8-27b:256k",
           "reasoning_effort": "max",
           "evidence": {
-            "basis": "configuration_sync_no_e2e",
-            "live_verified": false,
-            "evidence_state": "unverified",
-            "capability_acceptance_state": "configured",
-            "profile_fingerprint": "8d2717ed225318b505e036909a22bbbd899dafd08c8cd1f3aa7d17b2a4d03004",
-            "provider_id": "aicli_ollama_main",
             "wire": "responses",
+            "live_verified": false,
+            "provider_id": "aicli_ollama_main",
+            "evidence_state": "unverified",
+            "profile_fingerprint": "9abc231ee2d7b9f1850ca9d694805743e8a4019b37e225d59099cff5c72ef277",
+            "basis": "configuration_sync_no_e2e",
+            "capability_acceptance_state": "configured",
             "model_digest": "8040835723046ec2631b64b960d44414636ea5147942a7d68eaaa7ccdb492e20"
           }
         },
@@ -93,13 +93,13 @@
           "model": "qwen3.8-27b:256k",
           "reasoning_effort": "max",
           "evidence": {
-            "basis": "configuration_sync_no_e2e",
-            "live_verified": false,
-            "evidence_state": "unverified",
-            "capability_acceptance_state": "configured",
-            "profile_fingerprint": "8d2717ed225318b505e036909a22bbbd899dafd08c8cd1f3aa7d17b2a4d03004",
-            "provider_id": "aicli_ollama_main",
             "wire": "responses",
+            "live_verified": false,
+            "provider_id": "aicli_ollama_main",
+            "evidence_state": "unverified",
+            "profile_fingerprint": "9abc231ee2d7b9f1850ca9d694805743e8a4019b37e225d59099cff5c72ef277",
+            "basis": "configuration_sync_no_e2e",
+            "capability_acceptance_state": "configured",
             "model_digest": "8040835723046ec2631b64b960d44414636ea5147942a7d68eaaa7ccdb492e20"
           }
         },
@@ -166,14 +166,14 @@
       "data_destination": "LocalGpuBroker Ollama endpoint",
       "required_reasoning_mode": "on",
       "ollama_options": {
-        "temperature": 1,
-        "top_p": 0.95,
         "top_k": 20,
-        "min_p": 0,
-        "presence_penalty": 0,
+        "temperature": 1,
         "repeat_penalty": 1,
-        "num_ctx": 262144,
-        "num_predict": 32768
+        "presence_penalty": 0,
+        "min_p": 0,
+        "num_predict": 32768,
+        "top_p": 0.95,
+        "num_ctx": 262144
       },
       "agent_routes": {}
     },
@@ -187,14 +187,14 @@
       "routing_role": "crosscheck_only",
       "default_reasoning_mode": "on",
       "ollama_options": {
-        "temperature": 1,
-        "top_p": 0.95,
         "top_k": 20,
-        "min_p": 0,
-        "presence_penalty": 1.5,
+        "temperature": 1,
         "repeat_penalty": 1,
-        "num_ctx": 262144,
-        "num_predict": 32768
+        "presence_penalty": 1.5,
+        "min_p": 0,
+        "num_predict": 32768,
+        "top_p": 0.95,
+        "num_ctx": 262144
       },
       "base_url_env": "LLM_TOOLKIT_OLLAMA_BASE_URL",
       "base_url_default": "http://127.0.0.1:32100",
@@ -207,14 +207,14 @@
           "model": "qwen3.6-35b:256k",
           "reasoning_effort": "max",
           "evidence": {
-            "basis": "configuration_sync_no_e2e",
-            "live_verified": false,
-            "evidence_state": "unverified",
-            "capability_acceptance_state": "configured",
-            "profile_fingerprint": "e0f62d5f28843c3059c6541c94e86771aec7e970fda61a72daac90c47366bb2a",
-            "provider_id": "aicli_ollama_review",
             "wire": "responses",
-            "model_digest": "7dd8a375ab919bd63cc558161d4209b4d9f66ea858acb4f10641a8d80028626a"
+            "live_verified": false,
+            "provider_id": "aicli_ollama_review",
+            "evidence_state": "unverified",
+            "profile_fingerprint": "9e7092d83d94dc33037ceb4ed2371fc6472495d4021ed772e1d87af54ffa88a8",
+            "basis": "configuration_sync_no_e2e",
+            "capability_acceptance_state": "configured",
+            "model_digest": "ee22ef7004d1e835e913313b78c5811d8044002c18b435f88c3f6aae1c820023"
           }
         }
       }
@@ -228,14 +228,14 @@
       "context_window_tokens": 262144,
       "default_reasoning_mode": "on",
       "ollama_options": {
-        "temperature": 1,
-        "top_p": 0.95,
         "top_k": 20,
-        "min_p": 0,
-        "presence_penalty": 1.5,
+        "temperature": 1,
         "repeat_penalty": 1,
-        "num_ctx": 262144,
-        "num_predict": 32768
+        "presence_penalty": 1.5,
+        "min_p": 0,
+        "num_predict": 32768,
+        "top_p": 0.95,
+        "num_ctx": 262144
       },
       "base_url_env": "LLM_TOOLKIT_OLLAMA_BASE_URL",
       "base_url_default": "http://127.0.0.1:32100",
@@ -248,14 +248,14 @@
           "model": "qwen3.6-35b-abliterated:256k",
           "reasoning_effort": "max",
           "evidence": {
-            "basis": "configuration_sync_no_e2e",
+            "model_digest": "3b401cad6eb22eb1d8bcdc18f92d0f49594dce8e7b05fa07750c58275a3b6a26",
+            "profile_fingerprint": "74ef23e83ac0a0169207bbedd3863035942548697a3786e070da61c426d0327f",
             "live_verified": false,
-            "evidence_state": "unverified",
+            "basis": "configuration_sync_no_e2e",
+            "provider_id": "aicli_ollama_qwen36_35b_abliterated",
             "capability_acceptance_state": "configured",
-            "model_digest": "bdb98c4eedddabf2ed3f64d12bfe6bc6a24af7c3242354e91a059fba126de201",
             "wire": "responses",
-            "profile_fingerprint": "0266f38ce5e46b52fe62f0b2047f2c388f6c63d728b8468ecb9771bb9c23bcc3",
-            "provider_id": "aicli_ollama_qwen36_35b_abliterated"
+            "evidence_state": "unverified"
           }
         }
       }
@@ -343,14 +343,14 @@
       "context_window_tokens": 262144,
       "default_reasoning_mode": "on",
       "ollama_options": {
-        "temperature": 1,
-        "top_p": 0.95,
         "top_k": 20,
-        "min_p": 0,
-        "presence_penalty": 0,
+        "temperature": 1,
         "repeat_penalty": 1,
-        "num_ctx": 262144,
-        "num_predict": 32768
+        "presence_penalty": 0,
+        "min_p": 0,
+        "num_predict": 32768,
+        "top_p": 0.95,
+        "num_ctx": 262144
       },
       "base_url_env": "LLM_TOOLKIT_OLLAMA_BASE_URL",
       "base_url_default": "http://127.0.0.1:32100",
@@ -363,14 +363,14 @@
           "model": "qwen3.8-27b-abliterated:256k",
           "reasoning_effort": "max",
           "evidence": {
-            "basis": "configuration_sync_no_e2e",
-            "live_verified": false,
-            "evidence_state": "unverified",
-            "capability_acceptance_state": "configured",
-            "model_digest": "8175b17fb6b4325a327e04081eab6aafb197f72b92fac74148d8801a5886ad4a",
             "wire": "responses",
-            "profile_fingerprint": "7b15fa7599fbc35098a53b3a386f6db9a1e6d0830adbd9689a99f665c8e84970",
-            "provider_id": "aicli_ollama_qwen38_abliterated"
+            "live_verified": false,
+            "provider_id": "aicli_ollama_qwen38_abliterated",
+            "evidence_state": "unverified",
+            "profile_fingerprint": "57ed6151350ea49f9a582e1e79df325500e4e382f221abc6ad9d714004ae1121",
+            "basis": "configuration_sync_no_e2e",
+            "capability_acceptance_state": "configured",
+            "model_digest": "8175b17fb6b4325a327e04081eab6aafb197f72b92fac74148d8801a5886ad4a"
           }
         }
       }
