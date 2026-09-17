@@ -608,6 +608,102 @@ class AiCliProfileRunner:
             str(entry),
         ]
 
+    def capabilities(self) -> dict[str, Any]:
+        return {
+            "arguments": "structured",
+            "policies": ["danger-full-access"] if self.engine == "codex" else ["read-only", "workspace-write"],
+            "default_policy": "danger-full-access" if self.engine == "codex" else "workspace-write",
+            "budget_modes": ["watchdog_only", "bounded"],
+            "native_images": False,
+            "preflight": "aicli.machine-run-preflight.v1",
+        }
+
+    def _run_command(
+        self, execution: dict[str, Any], *, prefix: list[str] | None = None,
+        event_path: Path | None = None, dry_run: bool = False,
+    ) -> list[str]:
+        if self.engine not in {"codex", "claude", "opencode", "qwen-code"}:
+            raise _runner_error("agent_runner_unavailable", "Unsupported AICLI engine.")
+        if execution.get("native_images"):
+            raise _runner_error(
+                "agent_media_unsupported",
+                "This AICLI machine interface accepts text only; use direct native vision or an explicit OCR route.",
+            )
+        capabilities = self.capabilities()
+        policy = str(execution.get("policy") or capabilities["default_policy"])
+        # Preserve the frozen, fingerprint-verified historical benchmark path.
+        # invoke() must pass _benchmark_preflight before this command can run;
+        # the current public preflight never admits this legacy policy.
+        historical_benchmark = (
+            self.engine == "codex" and execution.get("require_benchmark_preflight") is True
+            and policy == "workspace-write" and execution.get("require_network_proof") is True
+            and execution.get("network_policy") == "forbidden"
+            and execution.get("search_policy") == "disabled"
+        )
+        if policy not in capabilities["policies"] and not historical_benchmark:
+            raise _runner_error("agent_runner_incompatible", "Requested policy is not supported by this AICLI engine.")
+        budget = execution.get("budget") or {}
+        if not isinstance(budget, dict):
+            raise _runner_error("invalid_request", "Agent execution budget must be an object.")
+        mode = budget.get("limit_mode")
+        if mode is None:
+            mode = "bounded" if any(budget.get(k) is not None for k in ("timeout_seconds", "max_steps", "max_tool_calls")) else "watchdog_only"
+        if mode not in capabilities["budget_modes"]:
+            raise _runner_error("agent_runner_incompatible", "AICLI supports watchdog_only and bounded budgets.")
+        profile = str(execution.get("profile") or self.default_profile)
+        command = list(prefix or self._prefix()) + [
+            "run", profile, "--project", str(execution["workspace"]), "--stdin", "--json",
+            "--sandbox-policy", policy, "--max-output-chars", "1000000",
+            "--timeout-seconds", str(budget.get("timeout_seconds") or 900),
+        ]
+        if mode == "watchdog_only":
+            command.append("--watchdog-only")
+        else:
+            command.extend(["--max-steps", str(budget.get("max_steps", 20)),
+                            "--max-tool-calls", str(budget.get("max_tool_calls", 80))])
+        if historical_benchmark:
+            command.append("--no-web-search")
+        if event_path is not None:
+            command.extend(["--event-file", str(event_path)])
+        if dry_run:
+            command.append("--dry-run")
+        return command
+
+    def preflight(self, execution: dict[str, Any]) -> dict[str, Any]:
+        if execution.get("require_benchmark_preflight"):
+            raise _runner_error("agent_runner_incompatible", "Use the separate fingerprint-bound historical benchmark contract.")
+        command = self._run_command(execution, dry_run=True)
+        code, stdout, _, _ = _bounded_process(
+            command, cwd=Path(execution["workspace"]), stdin_text="",
+            timeout_seconds=20, max_output_chars=100000,
+        )
+        values = _json_values(stdout)
+        envelope = values[-1] if values else {}
+        observed = envelope.get("preflight") or {}
+        if not isinstance(observed, dict):
+            raise _runner_error("agent_runner_incompatible", "AICLI preflight must be an object.")
+        if code != 0 or observed.get("schema") != "aicli.machine-run-preflight.v1":
+            raise _runner_error(
+                "agent_runner_incompatible", "The installed AICLI rejected the structured run preflight.",
+                receipt={"preflight": observed, "aicli_error": envelope.get("error")},
+            )
+        if observed.get("model") != execution.get("model") or observed.get("profileId") != execution.get("profile"):
+            raise _runner_error(
+                "agent_model_mismatch", "The actual AICLI profile does not match the registered model.",
+                receipt={"preflight": observed},
+            )
+        if (observed.get("engine") != self.engine
+                or observed.get("policy") != (execution.get("policy") or self.capabilities()["default_policy"])
+                or observed.get("arguments") != "structured"
+                or observed.get("modelInvoked") is not False
+                or observed.get("runtimeCreated") is not False
+                or observed.get("budgetMode") not in self.capabilities()["budget_modes"]):
+            raise _runner_error(
+                "agent_runner_incompatible", "AICLI preflight did not preserve the required execution contract.",
+                receipt={"preflight": observed},
+            )
+        return {"entry": str(Path(self.entry).resolve()), **observed}
+
     @staticmethod
     def _benchmark_source_receipt(entry: Path) -> dict[str, Any]:
         module_root = entry.parent.parent / "src" / "AiCliProfileManager"
@@ -1320,29 +1416,8 @@ class AiCliProfileRunner:
         model = str(execution.get("model") or "qwen-main-v1")
         profile = str(execution.get("profile") or self.default_profile)
         native_images = [str(path) for path in execution.get("native_images") or []]
-        if self.engine == "codex":
-            native = [
-                "exec", "--json", "--ephemeral", "--dangerously-bypass-approvals-and-sandbox",
-                "--skip-git-repo-check", "--disable", "plugins",
-            ]
-            for path in native_images:
-                native.extend(["--image", path])
-            native.append("-")
-        elif self.engine == "claude":
-            native = [
-                "--model", model, "-p", "--output-format", "json",
-                "--dangerously-skip-permissions",
-            ]
-            if limit_mode == "bounded":
-                native.extend(["--max-turns", str(budget["max_steps"])])
-        elif self.engine == "opencode":
-            native = []
-            for path in native_images:
-                native.extend(["--file", path])
-        elif self.engine == "qwen-code":
-            native = []
-        else:
-            raise _runner_error("agent_runner_unavailable", f"Unsupported aicli agent engine: {self.engine}")
+        # Validate the same structured arguments used by preflight before IO.
+        self._run_command(execution)
         prefix = self._prefix()
         aicli_preflight: dict[str, Any] = {}
         if execution.get("require_benchmark_preflight") is True:
@@ -1389,28 +1464,8 @@ class AiCliProfileRunner:
                 )
             except Exception:
                 pass
-        command = prefix + [
-            "run", profile, "--project", str(workspace), "--stdin", "--json",
-            "--sandbox-policy", str(execution["policy"]),
-            "--max-output-chars", "1000000",
-        ]
         watchdog_only = limit_mode == "watchdog_only"
         completion_driven = False
-        if watchdog_only:
-            command.extend(
-                ["--timeout-seconds", str(budget["timeout_seconds"]), "--watchdog-only"]
-            )
-        else:
-            command.extend(
-                [
-                    "--timeout-seconds",
-                    str(budget["timeout_seconds"]),
-                    "--max-steps",
-                    str(budget["max_steps"]),
-                    "--max-tool-calls",
-                    str(budget["max_tool_calls"]),
-                ]
-            )
         event_temp: tempfile.TemporaryDirectory[str] | None = None
         event_path: Path | None = None
         if machine_events_supported:
@@ -1419,8 +1474,7 @@ class AiCliProfileRunner:
             )
             event_path = Path(event_temp.name) / "events.jsonl"
             event_path.touch()
-            command.extend(["--event-file", str(event_path)])
-        command.extend([_AICLI_NATIVE_ARGS_SENTINEL, *native])
+        command = self._run_command(execution, prefix=prefix, event_path=event_path)
         try:
             code, stdout, stderr, duration_ms = _bounded_process(
                 command,
@@ -1690,6 +1744,12 @@ class AiCliProfileRunner:
                 receipt=receipt,
             )
         if code != 0 or child_code != 0:
+            if receipt.get("error_code") == "aicli.local_gpu_broker.owner_process_unavailable":
+                raise _runner_error(
+                    "agent_runner_unavailable",
+                    "Local GPU broker cannot verify the controller process. Run from the ordinary user session that owns the GPU runtime; do not bypass the broker.",
+                    receipt=receipt,
+                )
             detail = "\n".join(
                 part for part in (str(run.get("stderr") or ""), stderr, child_stdout) if part
             ).strip()[-2000:]

@@ -1241,21 +1241,15 @@ class JobStoreTests(unittest.TestCase):
 
             receipt = store.submit(request)
 
-            self.assertEqual(
-                {
-                    "schema": (
-                        "llm-backend-toolkit.explicit-cache-identity.v2"
-                    ),
-                    "mode": "request_digest",
-                    "digest": (
-                        "sha256:" + JobStore.request_digest(request)
-                    ),
-                    "canonicalization": (
-                        "stdlib-json-sort-compact-utf8-v1"
-                    ),
-                },
-                receipt["cache_identity"],
-            )
+            identity = receipt["cache_identity"]
+            self.assertEqual("llm-backend-toolkit.explicit-cache-identity.v2", identity["schema"])
+            self.assertEqual("request_digest", identity["mode"])
+            self.assertEqual("stdlib-json-sort-compact-utf8-v1", identity["canonicalization"])
+            request_hash = "sha256:" + JobStore.request_digest(request)
+            self.assertEqual(request_hash, identity["request_sha256"])
+            self.assertNotEqual(request_hash, identity["digest"])
+            self.assertEqual(BackendRegistry.load().default_backend, identity["backend"])
+            self.assertEqual(BackendRegistry.load().resolve(None).config["model"], identity["model"])
 
     def test_old_or_missing_explicit_identity_is_readable_but_never_a_v2_hit(self):
         variants = ("v1", "missing")

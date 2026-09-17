@@ -15,7 +15,7 @@ from .worker_contract import registry_from_worker_contract
 
 def _read_request(path_value: str) -> dict[str, Any]:
     text = sys.stdin.read() if path_value == "-" else Path(path_value).read_text(encoding="utf-8")
-    value = json.loads(text)
+    value = json.loads(text.removeprefix("\ufeff"))
     if not isinstance(value, dict):
         raise ValueError("Request must be a JSON object")
     return value
@@ -103,6 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
     status_target.add_argument("--backend", help="Backend registry ID; omitted means the local default")
     status_target.add_argument("--provider", help="Deprecated backend alias")
     subparsers.add_parser("backends", help="List safe backend registry metadata without generation")
+    subparsers.add_parser("version", help="Show package and interpreter origins")
+    preflight = subparsers.add_parser("preflight", help="Check routing without starting a model or job")
+    preflight.add_argument("--request", default="-", help="JSON request path or - for stdin")
     probe = subparsers.add_parser("probe", help="Run one bounded capability probe")
     probe_target = probe.add_mutually_exclusive_group()
     probe_target.add_argument("--backend", help="Backend registry ID; omitted means the local default")
@@ -235,6 +238,10 @@ def main(argv: list[str] | None = None) -> int:
             result = toolkit.status(args.backend or args.provider)
         elif args.command == "backends":
             result = Toolkit().catalog()
+        elif args.command == "version":
+            result = {"status": "ok", "runtime": Toolkit.runtime_identity()}
+        elif args.command == "preflight":
+            result = Toolkit().preflight(_read_request(args.request))
         elif args.command == "probe":
             backend = args.backend or args.provider
             request = _probe_request(

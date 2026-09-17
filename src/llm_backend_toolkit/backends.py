@@ -301,6 +301,15 @@ class BackendRegistry:
                     "default_reasoning_mode": config.get("default_reasoning_mode"),
                     "required_reasoning_mode": config.get("required_reasoning_mode"),
                     "agent_routes": sorted((config.get("agent_routes") or {}).keys()),
+                    "api_key_env": config.get("api_key_env"),
+                    "base_url_env": config.get("base_url_env"),
+                    "configuration_state": "configured",
+                    "agent_route_details": {
+                        name: {"runner": route.get("runner"), "profile": route.get("profile"),
+                               "model": route.get("model"), "reasoning_effort": route.get("reasoning_effort"),
+                               "evidence": self.evaluate_route_evidence(route, None)}
+                        for name, route in (config.get("agent_routes") or {}).items()
+                    },
                 }
             )
         return {
@@ -316,7 +325,7 @@ class BackendRegistry:
         evidence = dict(route.get("evidence") or {})
         basis = str(evidence.get("basis") or route.get("basis") or "unverified")
         acceptance_state = str(evidence.get("capability_acceptance_state") or "").strip()
-        declared_live = bool(evidence.get("live_verified", route.get("live_verified", False)))
+        declared_live = evidence.get("live_verified", route.get("live_verified", False)) is True
         expected = {
             key: str(evidence.get(key) or "")
             for key in ("model_digest", "parent_model")
@@ -325,7 +334,10 @@ class BackendRegistry:
         # A route explicitly awaiting reacceptance is never allowed to inherit
         # an old live receipt, even if a stale registry accidentally leaves
         # live_verified=true or old digest fields behind.
-        if acceptance_state == "pending_reacceptance":
+        outcome = str(evidence.get("capability_acceptance") or "").lower()
+        if outcome.startswith(("fail", "reject", "blocked")):
+            acceptance_state = "failed"
+        if acceptance_state in {"pending_reacceptance", "configured", "failed"}:
             return {
                 "basis": basis,
                 "live_verified": False,
@@ -343,9 +355,10 @@ class BackendRegistry:
         if not expected:
             return {
                 "basis": basis,
-                "live_verified": True,
-                "evidence_state": "current",
+                "live_verified": False,
+                "evidence_state": "unknown",
                 "evidence_mismatches": [],
+                "acceptance_note": "Legacy evidence has no verifiable model identity.",
             }
         model = (provider_status or {}).get("model") or {}
         observed = {

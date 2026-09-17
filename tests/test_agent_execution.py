@@ -101,8 +101,8 @@ def agent_request(workspace):
 def accepted_local_agent_registry():
     """Return an in-memory accepted fixture for Agent execution mechanics.
 
-    The checked-in default route intentionally remains pending until the new
-    immutable runtime tag has its own AICLI receipt. These tests exercise the
+    The checked-in route is configured without claiming live acceptance.
+    This synthetic fixture marks only its own offline route as accepted. These tests exercise the
     runner, workspace, and receipt mechanics with fake runners, so they must
     not make the offline suite depend on a live machine receipt.
     """
@@ -212,7 +212,7 @@ class AgentExecutionTests(unittest.TestCase):
             execution = {
                 "workspace": str(root),
                 "model": "qwen-main-v1",
-                "policy": "workspace-write",
+                "policy": "danger-full-access",
                 "native_images": [],
                 "budget": {
                     "timeout_seconds": 30,
@@ -372,12 +372,29 @@ class AgentExecutionTests(unittest.TestCase):
                 bounded.call_args.args[0][-2:],
             )
 
+    def test_known_gpu_owner_error_preserves_actionable_nonsecret_diagnosis(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entry = root / "aicli.ps1"
+            entry.write_text("# public fixture\n", encoding="utf-8")
+            runner = AiCliProfileRunner(name="codex-cli", engine="codex", default_profile="codex-ollama-main", entry=str(entry))
+            envelope = {"exitCode": 5, "run": {"exitCode": 5, "errorCode": "aicli.local_gpu_broker.owner_process_unavailable"}}
+            with patch("llm_backend_toolkit.agent_runners.shutil.which", return_value="pwsh"), patch(
+                "llm_backend_toolkit.agent_runners._bounded_process",
+                side_effect=after_codex_machine_event_probe((5, json.dumps(envelope), "", 1)),
+            ):
+                with self.assertRaises(AgentRunnerError) as caught:
+                    runner.invoke("public fixture", self._codex_execution(root))
+            self.assertEqual("agent_runner_unavailable", caught.exception.error.category)
+            self.assertIn("ordinary user session", caught.exception.error.summary)
+            self.assertEqual("aicli.local_gpu_broker.owner_process_unavailable", caught.exception.receipt["error_code"])
+
     @staticmethod
     def _codex_execution(root):
         return {
             "workspace": str(root),
             "model": "qwen-main-v1",
-            "policy": "workspace-write",
+            "policy": "danger-full-access",
             "native_images": [],
             "budget": {
                 "timeout_seconds": 30,
@@ -1699,7 +1716,7 @@ class AgentExecutionTests(unittest.TestCase):
             execution = {
                 "workspace": str(root),
                 "model": "qwen-main-v1",
-                "policy": "workspace-write",
+                "policy": "danger-full-access",
                 "native_images": [],
                 "budget": {
                     "timeout_seconds": 30,
@@ -2300,7 +2317,7 @@ class AgentExecutionTests(unittest.TestCase):
                 runner.invoke("task", {"workspace": ".", "budget": {}})
             self.assertEqual("unsafe_direct_runner_disabled", raised.exception.error.category)
 
-    def test_codex_agent_attaches_approved_native_images(self):
+    def test_codex_agent_structured_text_run_preserves_public_usage(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             entry = root / "aicli.ps1"
@@ -2313,8 +2330,8 @@ class AgentExecutionTests(unittest.TestCase):
             execution = {
                 "workspace": str(root),
                 "model": "qwen-main-v1",
-                "policy": "workspace-write",
-                "native_images": [str(image)],
+                "policy": "danger-full-access",
+                "native_images": [],
                 "budget": {"timeout_seconds": 30, "max_steps": 4, "max_tool_calls": 4},
             }
             envelope = {
@@ -2365,8 +2382,10 @@ class AgentExecutionTests(unittest.TestCase):
 
             command = bounded.call_args.args[0]
             self.assertEqual("done", response.content)
-            self.assertIn("--image", command)
-            self.assertIn(str(image), command)
+            self.assertNotIn("--image", command)
+            self.assertNotIn(str(image), command)
+            self.assertNotIn("--disable", command)
+            self.assertNotIn("exec", command)
             # AICLI owns the exact Profile model binding and rejects native
             # --model overrides for protected local profiles.  The runner
             # verifies the reported model after completion instead.
@@ -2412,7 +2431,7 @@ class AgentExecutionTests(unittest.TestCase):
                 "workspace": str(root),
                 "model": "qwen3.7-flash",
                 "profile": "codex-qwen-paygo",
-                "policy": "read-only",
+                "policy": "danger-full-access",
                 "native_images": [],
                 "budget": {
                     "timeout_seconds": 30,
@@ -2516,7 +2535,7 @@ class AgentExecutionTests(unittest.TestCase):
                     {
                         "workspace": str(root),
                         "model": "qwen-main-v1",
-                        "policy": "workspace-write",
+                        "policy": "danger-full-access",
                         "native_images": [],
                         "budget": {
                             "timeout_seconds": 30,
@@ -2560,7 +2579,7 @@ class AgentExecutionTests(unittest.TestCase):
                         {
                             "workspace": str(root),
                             "model": "qwen-main-v1",
-                            "policy": "workspace-write",
+                            "policy": "danger-full-access",
                             "native_images": [],
                             "budget": {"timeout_seconds": 30, "max_steps": 4, "max_tool_calls": 4},
                         },
@@ -2614,7 +2633,7 @@ class AgentExecutionTests(unittest.TestCase):
                         {
                             "workspace": str(root),
                             "model": "qwen-main-v1",
-                            "policy": "workspace-write",
+                            "policy": "danger-full-access",
                             "native_images": [],
                             "budget": {"timeout_seconds": 30, "max_steps": 4, "max_tool_calls": 1},
                         },
@@ -2659,7 +2678,7 @@ class AgentExecutionTests(unittest.TestCase):
                         {
                             "workspace": str(root),
                             "model": "qwen-main-v1",
-                            "policy": "workspace-write",
+                            "policy": "danger-full-access",
                             "native_images": [],
                             "budget": {"timeout_seconds": 30, "max_steps": 4, "max_tool_calls": 4},
                         },
@@ -2703,7 +2722,7 @@ class AgentExecutionTests(unittest.TestCase):
                         {
                             "workspace": str(root),
                             "model": "qwen-main-v1",
-                            "policy": "workspace-write",
+                            "policy": "danger-full-access",
                             "native_images": [],
                             "budget": {"timeout_seconds": 30, "max_steps": 4, "max_tool_calls": 4},
                         },
@@ -2870,7 +2889,7 @@ class AgentExecutionTests(unittest.TestCase):
             self.assertEqual("gpt-5.3-codex-spark", execution["model"])
             receipt = result["execution_receipt"]
             self.assertEqual("xhigh", receipt["reasoning_effort"])
-            self.assertTrue(receipt["route_live_verified"])
+            self.assertFalse(receipt["route_live_verified"])
             self.assertEqual(
                 "aicli_source_codex_0.145_workspace_rootfix_live_2026-07-29",
                 receipt["route_basis"],
@@ -3105,7 +3124,7 @@ class AgentExecutionTests(unittest.TestCase):
                 "workspace": str(root),
                 "model": "remote-model-v1",
                 "profile": "codex-cloud-paygo",
-                "policy": "workspace-write",
+                "policy": "danger-full-access",
                 "native_images": [],
                 "budget": {"timeout_seconds": 30, "max_steps": 4, "max_tool_calls": 4},
             }

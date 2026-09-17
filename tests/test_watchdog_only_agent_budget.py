@@ -321,7 +321,7 @@ class CompletionDrivenBudgetTests(unittest.TestCase):
                 "workspace": str(root),
                 "model": "qwen-main-v1",
                 "profile": "codex-ollama-main",
-                "policy": "workspace-write",
+                "policy": "danger-full-access",
                 "native_images": [],
                 "budget": {
                     "timeout_seconds": 900,

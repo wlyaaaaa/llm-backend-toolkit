@@ -96,6 +96,8 @@ def _estimate_tokens(text: str) -> int:
 
 def _clip(value: Any, budget: int) -> str:
     text = _canonical(value)
+    if len(text) <= budget:
+        return text
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     marker = f"\n...[compacted; sha256:{digest}]...\n"
     if budget <= len(marker) + 8:
@@ -106,7 +108,19 @@ def _clip(value: Any, budget: int) -> str:
     return text[:head] + marker + text[-tail:]
 
 
-def compact_task(request: dict[str, Any], supplemental_inputs: list[Any] | None = None) -> CompactedContext:
+def default_context_target(context_window_tokens: int | None = None) -> int:
+    """Choose the registered input budget without guessing an unknown window."""
+    if type(context_window_tokens) is not int or context_window_tokens < 16:
+        return DEFAULT_TARGET_TOKENS
+    return 262_144 if context_window_tokens >= 262_144 else context_window_tokens * 9 // 10
+
+
+def compact_task(
+    request: dict[str, Any],
+    supplemental_inputs: list[Any] | None = None,
+    *,
+    context_window_tokens: int | None = None,
+) -> CompactedContext:
     task = request.get("task") or {}
     context = request.get("context") or {}
     execution = request.get("execution") or {}
@@ -148,10 +162,11 @@ def compact_task(request: dict[str, Any], supplemental_inputs: list[Any] | None 
     inputs, removed_inputs = _dedupe(raw_inputs)
     deduped_inputs = list(inputs)
     duplicates_removed = removed_instructions + removed_inputs
-    target_tokens = int(context.get("target_tokens") or DEFAULT_TARGET_TOKENS)
-    if target_tokens < 16:
-        raise ValueError("context.target_tokens must be at least 16")
-    target_chars = target_tokens * CHARS_PER_TOKEN_ESTIMATE
+    target_tokens = context.get("target_tokens")
+    if target_tokens is None:
+        target_tokens = default_context_target(context_window_tokens)
+    if type(target_tokens) is not int or target_tokens < 16:
+        raise ValueError("context.target_tokens must be an integer of at least 16")
 
     prompt = _render(
         goal,
@@ -173,34 +188,32 @@ def compact_task(request: dict[str, Any], supplemental_inputs: list[Any] | None 
         )
         if _estimate_tokens(baseline) > target_tokens:
             raise ContextOverflow("Pinned context and task contract exceed the requested target")
-        available = max(96, target_chars - len(baseline) - max(0, len(inputs) - 1) * 4)
-        per_item = max(48, available // max(1, len(inputs)))
-        inputs = [_clip(value, per_item) for value in inputs]
-        prompt = _render(
-            goal,
-            pinned,
-            instructions,
-            inputs,
-            expected_output,
-            execution_mode,
-        )
-        while _estimate_tokens(prompt) > target_tokens and per_item > 48:
-            excess_tokens = _estimate_tokens(prompt) - target_tokens
-            per_item = max(
-                48,
-                per_item - max(8, math.ceil(excess_tokens * CHARS_PER_TOKEN_ESTIMATE / max(1, len(inputs)))),
+        # Search a character cap using the same token estimate as admission.
+        # Multiplying a CJK token excess by four over-trims the original input.
+        # Short inputs remain untouched; unused space is available to long ones.
+        minimum_cap = len("\n...[compacted; sha256:" + "0" * 64 + "]...\n") + 8
+
+        def render_cap(cap: int) -> tuple[list[str], str]:
+            clipped = [_clip(value, cap) for value in deduped_inputs]
+            return clipped, _render(
+                goal, pinned, instructions, clipped, expected_output, execution_mode
             )
-            inputs = [_clip(value, per_item) for value in deduped_inputs]
-            prompt = _render(
-                goal,
-                pinned,
-                instructions,
-                inputs,
-                expected_output,
-                execution_mode,
-            )
+
+        inputs, prompt = render_cap(minimum_cap)
         if _estimate_tokens(prompt) > target_tokens:
-            raise ContextOverflow("Context cannot be compacted to the requested target without dropping inputs")
+            raise ContextOverflow(
+                "Context budget cannot preserve meaningful excerpts of every input"
+            )
+        low = minimum_cap
+        high = max((len(_canonical(value)) for value in deduped_inputs), default=low)
+        while low < high:
+            candidate = (low + high + 1) // 2
+            candidate_inputs, candidate_prompt = render_cap(candidate)
+            if _estimate_tokens(candidate_prompt) <= target_tokens:
+                low = candidate
+                inputs, prompt = candidate_inputs, candidate_prompt
+            else:
+                high = candidate - 1
         lossy = True
 
     receipt = {

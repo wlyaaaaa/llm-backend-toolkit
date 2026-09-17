@@ -68,8 +68,9 @@ def build_local_codex_benchmark_registry(
     if not isinstance(source_registry, Mapping):
         raise ValueError("source_registry")
     backend_id = _safe_id(backend_id, "backend_id")
-    provider_model = _safe_id(provider_model, "provider_model")
-    route_model = _safe_id(route_model, "route_model")
+    for field, value in (("provider_model", provider_model), ("route_model", route_model)):
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", value):
+            raise ValueError(field)
     profile = _safe_id(profile, "profile")
     if provider_id:
         provider_id = _safe_id(provider_id, "provider_id")

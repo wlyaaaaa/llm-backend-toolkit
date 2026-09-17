@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Callable
 
 from .agent_runners import AgentRunnerError, default_runners
 from .backends import BackendRegistry, ResolvedBackend
-from .context import ContextOverflow, compact_task
+from .context import ContextOverflow, compact_task, default_context_target
 from .errors import MediaError, ProviderCallError, ToolError
 from .input_integrity import declaration_scope
 from .media import MediaProcessor
@@ -74,8 +76,25 @@ class Toolkit:
         self.source_loader = source_loader or SourceLoader()
         self.runners = default_runners() if runners is None else runners
 
+    @staticmethod
+    def runtime_identity() -> dict[str, Any]:
+        try:
+            package_version = version("llm-backend-toolkit")
+        except PackageNotFoundError:
+            package_version = "source-uninstalled"
+        from . import __version__
+        return {"version": package_version, "source_version": __version__,
+                "version_matches_source": package_version == __version__,
+                "python": sys.executable,
+                "package_source": str(Path(__file__).resolve().parent)}
+
     def catalog(self) -> dict[str, Any]:
-        return {"status": "ok", "backend_catalog": self.registry.catalog()}
+        return {"status": "ok", "backend_catalog": self.registry.catalog(),
+                "runtime": self.runtime_identity(),
+                "runner_capabilities": {
+                    name: runner.capabilities() for name, runner in self.runners.items()
+                    if callable(getattr(runner, "capabilities", None))
+                }}
 
     @staticmethod
     def _emit_progress(
@@ -196,31 +215,17 @@ class Toolkit:
         except ValueError as exc:
             return self._blocked("invalid_request", str(exc))
 
-        requested_reasoning_mode = (request.get("reasoning") or {}).get("mode")
-        reasoning_mode = str(
-            requested_reasoning_mode
-            or resolved.config.get("default_reasoning_mode")
-            or "off"
-        )
-        if reasoning_mode not in {"off", "on"}:
-            result = self._blocked("invalid_request", f"Unsupported reasoning mode: {reasoning_mode}")
-            result["backend"] = self._backend_receipt(resolved)
-            return result
-        required_reasoning_mode = resolved.config.get("required_reasoning_mode")
-        if required_reasoning_mode and reasoning_mode != required_reasoning_mode:
-            result = self._blocked(
-                "invalid_request",
-                f"Backend {resolved.backend_id} requires reasoning.mode={required_reasoning_mode}.",
-            )
+        try:
+            reasoning_mode = self._resolve_reasoning_mode(request, resolved)
+        except ValueError as exc:
+            result = self._blocked("invalid_request", str(exc))
             result["backend"] = self._backend_receipt(resolved)
             return result
 
         media_config = request.get("media") or {}
         attachments = list(media_config.get("attachments") or [])
         privacy = request.get("privacy") or {}
-        if bool(getattr(provider, "cloud", resolved.config.get("cloud", False))) and not bool(
-            privacy.get("cloud_allowed")
-        ):
+        if bool(getattr(provider, "cloud", resolved.config.get("cloud", False))) and privacy.get("cloud_allowed") is not True:
             result = self._blocked(
                 "privacy_block",
                 "Any cloud backend transfer requires privacy.cloud_allowed=true.",
@@ -246,7 +251,10 @@ class Toolkit:
                 for item in media.supplemental_text
             ]
             supplemental.extend(sources.inputs)
-            compacted = compact_task(request, supplemental)
+            compacted = compact_task(
+                request, supplemental,
+                context_window_tokens=resolved.config.get("context_window_tokens"),
+            )
         except MediaError as exc:
             result = self._from_error("blocked", exc.error)
             result["backend"] = self._backend_receipt(resolved)
@@ -341,6 +349,13 @@ class Toolkit:
 
         self._emit_progress(progress_callback, {"phase": "validating"})
         output, checks = self._check_output(response.content, (request.get("task") or {}).get("expected_output") or {})
+        completion_ok = response.finish_reason in {"stop", "end_turn"} and not response.tool_calls
+        checks.append({
+            "id": "provider_completed",
+            "passed": completion_ok,
+            "summary": "Provider completed the response." if completion_ok else
+                "Provider response is incomplete, interrupted, filtered, or has unhandled tool calls.",
+        })
         status = "ok" if all(check["passed"] for check in checks) else "partial"
         result = {
             "status": status,
@@ -350,6 +365,7 @@ class Toolkit:
             "context_receipt": compacted.receipt,
             "delegation_receipt": self._delegation_receipt(compacted.receipt, sources.receipt),
             "usage": response.usage,
+            "finish_reason": response.finish_reason,
             "checks": checks,
             "uncertainties": [] if status == "ok" else ["One or more deterministic result checks failed."],
             "artifacts": media.artifacts,
@@ -357,8 +373,129 @@ class Toolkit:
             "source_receipt": sources.receipt,
             "decision": None,
         }
-        self._emit_progress(progress_callback, {"phase": "completed"})
+        self._emit_progress(progress_callback, {"phase": "completed" if status == "ok" else "failed"})
         return result
+
+    @staticmethod
+    def _resolve_reasoning_mode(request: dict[str, Any], resolved: ResolvedBackend) -> str:
+        mode = str((request.get("reasoning") or {}).get("mode")
+                   or resolved.config.get("default_reasoning_mode") or "off")
+        if mode not in {"on", "off"}:
+            raise ValueError(f"Unsupported reasoning mode: {mode}")
+        required = resolved.config.get("required_reasoning_mode")
+        if required and mode != required:
+            raise ValueError(f"Backend {resolved.backend_id} requires reasoning.mode={required}.")
+        return mode
+
+    def preflight(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Check configuration and the real parser, not task files or generation."""
+        try:
+            validate_request_object_sections(request)
+            if not str((request.get("task") or {}).get("goal") or "").strip():
+                raise ValueError("task.goal is required")
+            resolved, provider = self._resolve_provider(
+                str(request.get("backend") or request.get("provider") or "") or None
+            )
+            if resolved.config.get("cloud") and (request.get("privacy") or {}).get("cloud_allowed") is not True:
+                return self._blocked("privacy_block", "This request requires privacy.cloud_allowed=true.")
+            reasoning_mode = self._resolve_reasoning_mode(request, resolved)
+            execution = request.get("execution") or {}
+            mode = str(execution.get("mode") or "direct")
+            detail = {"mode": mode, "reasoning_mode": reasoning_mode,
+                      "model_invoked": False, "materials_read": False,
+                      "job_created": False, "live_acceptance": "not_checked",
+                      "context_target_tokens": (request.get("context") or {}).get("target_tokens")
+                          or default_context_target(resolved.config.get("context_window_tokens"))}
+            result = {"status": "ok", "runtime": self.runtime_identity(),
+                      "backend": self._backend_receipt(resolved), "preflight": detail}
+            if mode == "direct":
+                if resolved.config.get("adapter") == "agent-only":
+                    return self._blocked("direct_mode_unavailable", "This backend supports agent mode only.")
+                env_name = str(resolved.config.get("api_key_env") or "")
+                detail["credential_env"] = env_name or None
+                detail["configured"] = bool(getattr(provider, "api_key", False)) if env_name else True
+                return result
+            if mode != "agent":
+                raise ValueError("execution.mode must be direct or agent")
+            route_id = str(execution.get("runner") or "data_factory")
+            route = (resolved.config.get("agent_routes") or {}).get(route_id)
+            if not isinstance(route, dict):
+                return self._blocked("agent_runner_incompatible", "No exact backend-bound agent route exists.")
+            runner = self.runners.get(str(route.get("runner") or "")) or self.runners.get(route_id)
+            if runner is None or not callable(getattr(runner, "preflight", None)):
+                return self._blocked("agent_runner_incompatible", "This runner has no read-only preflight contract.")
+            workspace = validate_workspace_root(Path(str(execution.get("workspace") or "")).expanduser())
+            capabilities = runner.capabilities()
+            effective = {**execution, "workspace": str(workspace.canonical_path),
+                         "policy": execution.get("policy") or capabilities["default_policy"],
+                         "budget": self._agent_budget(execution), "profile": route["profile"], "model": route["model"]}
+            attachments = (request.get("media") or {}).get("attachments") or []
+            media_mode = (request.get("media") or {}).get("mode") or "auto"
+            effective["native_images"] = [item.get("path") for item in attachments
+                if isinstance(item, dict) and item.get("kind") == "image"
+                and (item.get("route") or media_mode) in {"native", "auto"}
+                and (item.get("route") == "native" or resolved.config.get("supports_vision"))]
+            evidence = self.registry.evaluate_route_evidence(route, None)
+            detail["route_evidence"] = evidence
+            if evidence.get("capability_acceptance_state") == "pending_reacceptance":
+                return self._blocked("route_evidence_pending_reacceptance", "This legacy route is not accepted for the current model.")
+            detail["capabilities"] = capabilities
+            detail["aicli"] = runner.preflight(effective)
+            return result
+        except AgentRunnerError as exc:
+            result = self._from_error("blocked", exc.error)
+            result["preflight"] = exc.receipt
+            return result
+        except (ValueError, OSError, WorkspaceRootError) as exc:
+            return self._blocked("invalid_request", str(exc))
+
+    @staticmethod
+    def _agent_budget(execution: dict[str, Any]) -> dict[str, Any]:
+        values = execution.get("budget") or {}
+        if not isinstance(values, dict):
+            raise ValueError("Agent execution.budget must be an object.")
+        mode = values.get("limit_mode")
+        if mode is None:
+            mode = "bounded" if any(values.get(k) is not None for k in ("timeout_seconds", "max_steps", "max_tool_calls")) else "watchdog_only"
+        if mode not in {"completion_driven", "bounded", "watchdog_only"}:
+            raise ValueError("Agent budget limit_mode must be completion_driven, bounded, or watchdog_only.")
+
+        def integer(name: str, default: int | None) -> int | None:
+            value = values.get(name)
+            if value is None:
+                return default
+            if isinstance(value, (bool, float)):
+                raise ValueError("Agent budget values must be integers.")
+            try:
+                return int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Agent budget values must be integers.") from exc
+
+        if mode == "completion_driven":
+            if any(values.get(k) is not None for k in ("timeout_seconds", "max_steps", "max_tool_calls")):
+                raise ValueError("completion_driven cannot declare a total wall, step, or tool-call cutoff.")
+            timeout, steps, calls = None, None, None
+            idle = integer("idle_timeout_seconds", 3600)
+        else:
+            timeout = integer("timeout_seconds", 900)
+            idle = integer("idle_timeout_seconds", None)
+            if mode == "watchdog_only":
+                if any(values.get(k) is not None for k in ("max_steps", "max_tool_calls")):
+                    raise ValueError("watchdog_only cannot declare max_steps or max_tool_calls.")
+                steps, calls = None, None
+            else:
+                steps = integer("max_steps", 20)
+                calls = integer("max_tool_calls", 80)
+                if not 1 <= steps <= 200:
+                    raise ValueError("Agent max_steps must be between 1 and 200.")
+                if not 0 <= calls <= 10000:
+                    raise ValueError("Agent max_tool_calls must be between 0 and 10000.")
+        if timeout is not None and not 30 <= timeout <= 86400:
+            raise ValueError("Agent timeout_seconds must be between 30 and 86400.")
+        if idle is not None and idle != 0 and not 60 <= idle <= 604800:
+            raise ValueError("Agent idle_timeout_seconds must be 0 or between 60 and 604800.")
+        return {"limit_mode": mode, "timeout_seconds": timeout,
+                "idle_timeout_seconds": idle, "max_steps": steps, "max_tool_calls": calls}
 
     def _invoke_agent(
         self,
@@ -471,101 +608,13 @@ class Toolkit:
                 route, evidence, requested_runner=requested_runner
             )
             return result
-        budget_input = execution.get("budget") or {}
-        if not isinstance(budget_input, dict):
-            return self._blocked("invalid_request", "Agent execution.budget must be an object.")
-
-        # Current AICLI exposes watchdog-only and explicit-limit contracts.
-        # Keep completion_driven as an explicit legacy request, but never
-        # select an option that the installed harness cannot parse by default.
-        requested_limit_mode = budget_input.get("limit_mode")
-        if requested_limit_mode is None:
-            has_legacy_cutoff = any(
-                budget_input.get(name) is not None
-                for name in ("timeout_seconds", "max_steps", "max_tool_calls")
-            )
-            limit_mode = "bounded" if has_legacy_cutoff else "watchdog_only"
-        else:
-            limit_mode = str(requested_limit_mode)
-        if limit_mode not in {"completion_driven", "bounded", "watchdog_only"}:
-            return self._blocked(
-                "invalid_request",
-                "Agent budget limit_mode must be completion_driven, bounded, or watchdog_only.",
-            )
-
         try:
-            if limit_mode == "completion_driven":
-                if any(
-                    budget_input.get(name) is not None
-                    for name in ("timeout_seconds", "max_steps", "max_tool_calls")
-                ):
-                    return self._blocked(
-                        "invalid_request",
-                        "completion_driven cannot declare a total wall, step, or tool-call cutoff.",
-                    )
-                idle_value = budget_input.get("idle_timeout_seconds", 3600)
-                idle_timeout_seconds = int(3600 if idle_value is None else idle_value)
-                budget = {
-                    "timeout_seconds": None,
-                    "idle_timeout_seconds": idle_timeout_seconds,
-                    "limit_mode": "completion_driven",
-                    "max_steps": None,
-                    "max_tool_calls": None,
-                }
-            else:
-                timeout_value = budget_input.get("timeout_seconds", 900)
-                timeout_seconds = int(900 if timeout_value is None else timeout_value)
-                idle_value = budget_input.get("idle_timeout_seconds")
-                idle_timeout_seconds = (
-                    int(idle_value) if idle_value is not None else None
-                )
-                if limit_mode == "watchdog_only":
-                    if any(
-                        budget_input.get(name) is not None
-                        for name in ("max_steps", "max_tool_calls")
-                    ):
-                        return self._blocked(
-                            "invalid_request",
-                            "watchdog_only cannot declare max_steps or max_tool_calls.",
-                        )
-                    budget = {
-                        "timeout_seconds": timeout_seconds,
-                        "idle_timeout_seconds": idle_timeout_seconds,
-                        "limit_mode": "watchdog_only",
-                        "max_steps": None,
-                        "max_tool_calls": None,
-                    }
-                else:
-                    max_steps_value = budget_input.get("max_steps", 20)
-                    max_tool_calls_value = budget_input.get("max_tool_calls", 80)
-                    budget = {
-                        "timeout_seconds": timeout_seconds,
-                        "idle_timeout_seconds": idle_timeout_seconds,
-                        "limit_mode": "bounded",
-                        "max_steps": int(20 if max_steps_value is None else max_steps_value),
-                        "max_tool_calls": int(
-                            80 if max_tool_calls_value is None else max_tool_calls_value
-                        ),
-                    }
-        except (TypeError, ValueError):
-            return self._blocked("invalid_request", "Agent budget values must be integers.")
-        idle_timeout_seconds = budget["idle_timeout_seconds"]
-        if (
-            idle_timeout_seconds is not None
-            and idle_timeout_seconds != 0
-            and not 60 <= idle_timeout_seconds <= 604_800
-        ):
-            return self._blocked(
-                "invalid_request",
-                "Agent idle_timeout_seconds must be 0 or between 60 and 604800.",
-            )
-        if budget["timeout_seconds"] is not None and not 30 <= budget["timeout_seconds"] <= 86_400:
-            return self._blocked("invalid_request", "Agent timeout_seconds must be between 30 and 86400.")
-        if limit_mode == "bounded":
-            if not 1 <= budget["max_steps"] <= 200:
-                return self._blocked("invalid_request", "Agent max_steps must be between 1 and 200.")
-            if not 0 <= budget["max_tool_calls"] <= 10_000:
-                return self._blocked("invalid_request", "Agent max_tool_calls must be between 0 and 10000.")
+            budget = self._agent_budget(execution)
+        except ValueError as exc:
+            return self._blocked("invalid_request", str(exc))
+        limit_mode = budget["limit_mode"]
+        if not execution.get("policy") and callable(getattr(runner, "capabilities", None)):
+            policy = runner.capabilities()["default_policy"]
         resolved_execution = dict(execution)
         declared_route_evidence = dict(route.get("evidence") or {})
         resolved_execution.update(

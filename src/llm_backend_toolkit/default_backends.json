@@ -275,9 +275,12 @@
           "reasoning_effort": "xhigh",
           "evidence": {
             "basis": "aicli_source_codex_0.145_workspace_rootfix_live_2026-07-29",
-            "live_verified": true,
+            "live_verified": false,
             "capability_acceptance": "failed_max_steps_80",
-            "capability_score": "2/9"
+            "capability_score": "2/9",
+            "historical_live_verified": true,
+            "capability_acceptance_state": "failed",
+            "evidence_state": "unverified"
           }
         },
         "codex-cli": {
@@ -287,9 +290,12 @@
           "reasoning_effort": "xhigh",
           "evidence": {
             "basis": "aicli_source_codex_0.145_workspace_rootfix_live_2026-07-29",
-            "live_verified": true,
+            "live_verified": false,
             "capability_acceptance": "failed_max_steps_80",
-            "capability_score": "2/9"
+            "capability_score": "2/9",
+            "historical_live_verified": true,
+            "capability_acceptance_state": "failed",
+            "evidence_state": "unverified"
           }
         }
       }

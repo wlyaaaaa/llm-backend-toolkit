@@ -846,6 +846,7 @@ class BackendRegistryTests(unittest.TestCase):
                 "display_name": "Qwen3.6 35B",
                 "reasoning_effort": "max",
                 "evidence_state": "unverified",
+                "capability_acceptance_state": "configured",
                 "receipt_schema": None,
                 "receipt_authority": None,
                 "model_digest": model_digest,

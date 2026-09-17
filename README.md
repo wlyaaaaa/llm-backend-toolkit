@@ -4,6 +4,15 @@
 
 它不是 Agent，也不会自行决定模型降级。
 
+## 执行前自检
+
+`llm-backend-toolkit version` 返回实际解释器、已安装版本和源码位置；`backends` 返回路由详细信息与运行器能力。路由或安装变化后，使用 `llm-backend-toolkit preflight --request request.json` 检查同一请求：不启动模型、不创建 job、不读取任务文件。Agent 预检使用当前 AICLI 的真实参数解析器，并核对实际模型/Profile。配置可用、接口兼容和真实能力验收是三个不同状态，预检不冒充实测通过。
+
+未指定上下文预算时，采用所选后端的已登记窗口：窗口至少 262144 时预算 262144，否则取窗口的 90%；未知窗口沿用保守 16384。中文裁剪会保留可用原文，并报告有损状态，不能将整份输入裁成空标记。非正常终止、缺失流终止标记或仍需处理工具调用的答案以 `partial` 交付并保留原因，不当作成功缓存。
+
+
+输出检查写在 `task.expected_output`；顶层同名字段、未知输出格式或非字符串数组的 `required_keys` 会在读取材料与调用模型前明确报错，不会悄悄忽略约束。公开 Agent 示例默认不启用可变工作区缓存，只有调用者提供真实内容身份时才显式设置 `execution.cache_key`。
+
 ## 核心能力
 
 - 通过版本化 backend registry 接入可替换的本地模型和 API 平台；稳定角色 `local-default` 默认只解析到本地后端。
@@ -16,7 +25,7 @@
 - 异步 Smart Job：提交立即返回，顶级模型无需被长时间命令阻塞。
 - 欠费、额度、限流、权限、GPU 占用等错误只返回裁决选项，不自动调用另一个模型。
 - 任何云端调用都要求显式 `privacy.cloud_allowed=true`，包括 task 文本、source 片段与媒体。
-- agent mode 通过 aicli 调用原生 CLI：Codex 任务省略 `execution.policy` 时默认 `danger-full-access` 且不请求交互审批；调用方可显式收窄为 `workspace-write` 或 `read-only`。完全访问允许模型在当前用户权限内读写工作区外文件并执行命令，只应用于可信任务；API Key 仍只注入目标子进程。正式 personal skill 会把 `LLM_TOOLKIT_AICLI_ENTRY` 钉到其受管的当前源码入口；该入口缺失时明确失败，不会静默改用可能过期的安装态。`data_factory` 从 registry 解析精确 Profile 与模型，不做运行时猜测或 fallback。
+- agent mode 通过 aicli 调用原生 CLI：Codex 任务省略 `execution.policy` 时默认 `danger-full-access` 且不请求交互审批；当前 Codex machine 接口不支持收窄为 `workspace-write` 或 `read-only`；其他 runner 按 `backends.runner_capabilities` 选择已支持策略。完全访问允许模型在当前用户权限内读写工作区外文件并执行命令，只应用于可信任务；API Key 仍只注入目标子进程。正式 personal skill 会把 `LLM_TOOLKIT_AICLI_ENTRY` 钉到其受管的当前源码入口；该入口缺失时明确失败，不会静默改用可能过期的安装态。`data_factory` 从 registry 解析精确 Profile 与模型，不做运行时猜测或 fallback。
 
 ## 安装
 
@@ -40,7 +49,7 @@ python -m venv .venv
 
 注册表把 backend ID、adapter、模型、端点环境变量、数据去向、`routing_role`、AICLI Profile、route、runner 与版本绑定证据分离。替换 Ollama 模型、OpenAI Chat 兼容 API 或已有 AICLI Profile 只需改注册表；route 名称可以自定义并映射到已实现的 runner adapter，全新 wire protocol 或全新智能体 CLI 才需要增加代码 adapter。`reasoning_request` 用安全 JSON 字段路径与 `on`/`off` 标量声明顶层或嵌套的 thinking 参数，Qwen 与 DeepSeek 共用此机制，不含厂商分支。已验收模型的 digest/父模型一旦不匹配，`live_verified` 自动失效并阻止沿用旧验收。注册表禁止内嵌凭据；云端 `openai-chat` 地址必须使用 HTTPS。
 
-`local-default` 是免费、质量优先的本地 direct 默认：使用精确的 `aicli-qwen3.8-27b-256k:2026-09-15` artifact（基座 `qwen3.8:27b`、`Q4_K_M`、256K）。省略 `reasoning.mode` 时默认开启 thinking，并固定当前参数 `temperature=0.6`、`top_p=0.95`、`top_k=20`、`min_p=0`、`presence_penalty=0`、`repeat_penalty=1`、`num_ctx=262144`、`num_predict=32768`。新 tag 的 manifest 为 `885ca6e9d68fbda050eee055145891e7c45fa8a0bec8c62dc8cd90708f6bedcd`，参数为 `14bb2c63f1a0e61969a5bceba301ea9d60740ce64b72813cc018acfc63c940c2`；除 MTP draft 参数外，权重与 256K 运行合同不变。`qwen-main-v1` 仅保留为指向稳定 backend ID 的兼容 alias，不再描述当前 artifact。`data_factory` 和 `codex-cli` 从 registry 解析 `codex-ollama-main` 与同一精确模型；该主用 Profile 已通过 2026-09-15 的 AICLI 0.3.13 / Codex 0.154.0 Agent 验收，真实模型为新 tag、有效思考等级 max、4 次工具调用且独立 verifier 与清理通过。2026-08-15 回执、Profile fingerprint、verifier 和 cleanup 仅以 `historical_*` 字段保留，不能验证新 tag。只有明确追求低延迟的低价值任务才应显式写 `reasoning.mode=off`。`local-hard-reasoning` 使用同一 artifact 和参数，但声明 `required_reasoning_mode=on`，漏写或关闭 thinking 会在读取 source、处理媒体或调用 provider 前失败关闭；它不会创建或加载第二个模型别名。隐藏 thinking 在 provider 边界即丢弃，只保留公开回答和非正文计数。
+`local-default` 是质量优先的本地 direct 默认，具体模型 artifact、上下文与生成参数仅由当前 registry 给出。省略 `reasoning.mode` 时采用注册表质量设定；`qwen-main-v1` 是请求侧兼容 alias，不代表当前 artifact。`data_factory` 和 `codex-cli` 使用注册表中同一精确 Profile/模型。历史任务通过不能证明替换后模型或新接口通过，`configured` 与真实 live 验收必须分开。低价值低延迟任务可显式选择 `reasoning.mode=off`；`local-hard-reasoning` 则要求 `on`，错误请求在读取材料或调用模型前拒绝。隐藏 thinking 在 provider 边界丢弃，只保留公开回答和计数。
 
 `local-crosscheck-35b` 是显式、非默认的交叉验证角色：它的 Ollama/AICLI 模型名是 `qwen-main-v1`（Qwen3.6 35B），请求侧 selector alias 是 `qwen-crosscheck-35b`。不要混淆两层命名：请求 `backend=qwen-main-v1` 仍兼容解析到 Qwen3.8 27B 的 `local-default`，只有显式 `local-crosscheck-35b` 或 `qwen-crosscheck-35b` 才选择 35B。该 backend 在 catalog 中公开 `routing_role=crosscheck_only`，默认开启 thinking，固定 `temperature=0.6`、`top_p=0.95`、`top_k=20`、`min_p=0`、`presence_penalty=0`、`repeat_penalty=1`、`num_ctx=262144`、`num_predict=32768`，且只访问 LocalGpuBroker `127.0.0.1:32100`。它不能成为 `default_backend`、不参与 fallback；direct 可显式使用。唯一一次获授权的新模型 Agent Live 重新验收在 `2026-08-21T19:28:51.9871927Z` 以 `aicli.recovery.capture_exception` 失败关闭，没有 verified runtime identity，故精确 `codex-cli` route 仍保持 `unverified/pending_reacceptance` 并在调用 provider/runner 前拒绝执行。详细边界和非敏感 receipt 证据见 [35B 本地交叉验证角色](docs/local-crosscheck-35b.md)。
 
@@ -85,7 +94,7 @@ cache。Codex 的默认入口仍建议使用非阻塞的 `submit`。
 
 未提供声明的旧请求仍会进入私有 spool 并兼容执行，但引用只标为 `captured_unverified`、整体只标为 `spooled_unverified`，不能成为 cache hit；在非 Windows 平台，缺少等价不可变路径绑定时，带声明请求也会关闭失败而不是冒充已验证。安全回执只记录引用 ID、声明值、实测摘要和状态，不回显正文、原始路径或原始 cache key。worker 的 PID、进程创建身份和阶段写入耐久 lease；只有确认该进程已经死亡，`get`/`cleanup_inputs` 才会把运行中 job 原子转为 failed/cancelled 并清理 spool，活 worker 不会被误清理。进入终态后私有副本与 prepared request 会清理，并留下可重复验证的清理回执；撤回与接管可使用 Python `JobStore.cancel(job_id)` 和 `JobStore.cleanup_inputs(job_id)`，不提供绕过 owner 判断的公共批量 purge CLI。同步 `invoke` 与异步 `submit` 现在都经过同一套 job claim、输入消费边界、公开进度和清理回执；差别只在调用方是否等待结果。
 
-不含外部文件引用的相同请求默认复用已完成结果；agent workspace、source 或 media 等可变引用默认不缓存。只有调用者在 `execution.cache_key` 提供通过验证、绑定真实内容与派生版本的语义身份，才允许这类请求命中缓存。显式 key 会忽略 `target_tokens`、预算和 workspace 等调度/工作元数据，但仍强制绑定已解析 backend、model、agent route/profile、隐私、reasoning、媒体与输出协议，不能跨 provider/model 或隐私边界误命中。v2 回执的 `cache_identity.mode=explicit` 只公开原始 key 的 SHA-256 `caller_cache_key_hash`，从不回显原始 key；两种模式都声明 `canonicalization=stdlib-json-sort-compact-utf8-v1`，对应 `json.dumps(..., ensure_ascii=False, sort_keys=True, separators=(",", ":"))` 的 UTF-8 SHA-256。显式 `digest` 还绑定解析后的完整安全 scope，供调用方作为不透明身份比较，不要求仅凭精简回执字段复算；无显式 key 时，`mode=request_digest` 的 `digest` 仍等于当前 `JobStore.request_digest`。v1 或缺失身份的旧 job 仍可按 ID 查询，但不会被新 v2 提交当作缓存证明。失败、取消和非 cacheable 结果不会成为命中目标。明确需要一次新尝试时使用 `submit --force`。
+不含外部文件引用的相同请求默认复用已完成结果；agent workspace、source 或 media 等可变引用默认不缓存。只有调用者在 `execution.cache_key` 提供通过验证、绑定真实内容与派生版本的语义身份，才允许这类请求命中缓存。显式 key 会忽略 `target_tokens`、预算和 workspace 等调度/工作元数据，但仍强制绑定已解析 backend、model、agent route/profile、隐私、reasoning、媒体与输出协议，不能跨 provider/model 或隐私边界误命中。v2 回执的 `cache_identity.mode=explicit` 只公开原始 key 的 SHA-256 `caller_cache_key_hash`，从不回显原始 key；两种模式都声明 `canonicalization=stdlib-json-sort-compact-utf8-v1`，对应 `json.dumps(..., ensure_ascii=False, sort_keys=True, separators=(",", ":"))` 的 UTF-8 SHA-256。显式 `digest` 还绑定解析后的完整安全 scope，供调用方作为不透明身份比较，不要求仅凭精简回执字段复算；无显式 key 时，`mode=request_digest` 的 `request_sha256` 等于当前请求正文摘要，`digest` 还绑定已解析模型、后端配置与实际端点，因此换模型或端点不会误用旧结果。v1 或缺失身份的旧 job 仍可按 ID 查询，但不会被新 v2 提交当作缓存证明。只有完整且检查通过的 `ok` 结果可复用；`partial`、失败、取消和非 cacheable 结果不会成为命中目标。明确需要一次新尝试时使用 `submit --force`。
 回执同时给出 `recommended_check_utc` 与 `monitor_until_utc`。初次建议等待 30-60 秒，过早读取后指数退避；任务超过硬期限会显示 `stale`、停止建议轮询，并把重试或接管交回顶级模型。
 
 ## 模型调用观察台
@@ -120,7 +129,7 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 
 启动器只创建一个 loopback 服务和一个原生观察台窗口。快捷方式直接指向 `LlmBackendObserverHost.exe`，后台服务和 AICLI/PowerShell 子进程均用 `CREATE_NO_WINDOW` / Hidden 语义，失败只写本机诊断文件，不弹控制台或错误框。窗口打开后通过 SSE 自动接收后续 `invoke` / `submit` / `probe` 受管调用，不需要手动刷新；处于最新对话时会自动切换到新调用，手动回看历史时不会抢走页面。重复启动会把已有观察台带到前台。安装器会同时创建当前用户桌面和开始菜单中的“模型调用观察台”快捷方式；它只升级或删除能由启动目标、完整参数、工作目录和描述共同证明属于本工具的链接，同名第三方文件会冲突失败而不会被覆盖。首次全体预检会拦截开始时已经存在的冲突；每个目标在最终变更或状态确认前还会复验。桌面和开始菜单是两个独立 Known Folder，不能组成原子事务：若两处操作之间出现并发变化，安装器会停止且不覆盖或删除变化目标，已经完成的本工具链接操作可能保留，可在处理冲突后幂等重跑。需要移除这两个精确入口时使用 `-Remove`。`Show-LlmBackendDashboard.ps1` 继续作为 PowerShell 降级视图。
 
-观察台显示的是经过净化的可验证工作过程，不是隐藏 chain-of-thought。prompt、隐藏 thinking/reasoning 正文、原始命令和参数、工具输入输出、环境变量、OCR/ASR 正文及绝对私密路径都不会进入公开事件日志。正式 skill 只使用受管 AICLI 入口，不会因旧安装态缺少事件能力而静默降级。当前实装验收基线是 AICLI `0.3.5` 与 `codex-cli 0.147.0`；未来更新默认尝试，但必要字段、通知、生命周期或清理协议漂移会返回明确错误。
+观察台显示的是经过净化的可验证工作过程，不是隐藏 chain-of-thought。prompt、隐藏 thinking/reasoning 正文、原始命令和参数、工具输入输出、环境变量、OCR/ASR 正文及绝对私密路径都不会进入公开事件日志。正式 skill 只使用受管 AICLI 入口，不会因旧安装态缺少事件能力而静默降级。原观察台验收记录中的 AICLI `0.3.5` 与 `codex-cli 0.147.0` 是历史证据；当前入口与版本通过 `version` / `preflight` 回读，协议、生命周期或清理语义不匹配会返回明确错误。
 
 受管 Codex harness 默认可发现并可多次调用 `public_web_search`；AICLI 提供搜索能力和显式 `--no-web-search` 关闭合同，Toolkit/GUI 只消费其安全 lifecycle。观察台仅在 `tool_name=public_web_search`、`search_provider=bing-rss-v1` 与运行期回执闭合时显示真实调用次数，不公开 query 或结果正文，也不会把“调用结束”伪称为“取得有效结果”。
 
@@ -138,14 +147,14 @@ pwsh -NoProfile -File .\scripts\Install-LlmBackendObserverShortcut.ps1
 
 - `execution.mode=agent`
 - `execution.runner=data_factory`（可省略；从 backend registry 锁定精确 Profile/模型）
-- `execution.policy=danger-full-access|workspace-write|read-only`（省略时默认 `danger-full-access`）
-- `execution.budget`（当前 AICLI `0.3.5` 兼容默认是 `limit_mode=watchdog_only`、`timeout_seconds=900`，不设置 step 或 tool-call 上限；调用方可显式调整 wall-clock watchdog。`bounded` 只有显式选择时才配置 step/tool-call 硬上限。旧 `completion_driven` 输入只为兼容保留；当前 AICLI 未声明可续期 idle lease，因而会在模型启动前明确失败，绝不静默改成 watchdog。）
+- `execution.policy`：当前 Codex machine 仅支持 `danger-full-access`；其他 runner 使用 catalog 中声明的 `workspace-write` / `read-only`，不伪装成已支持的隔离。
+- `execution.budget`（当前 AICLI machine 接口兼容默认是 `limit_mode=watchdog_only`、`timeout_seconds=900`，不设置 step 或 tool-call 上限；调用方可显式调整 wall-clock watchdog。`bounded` 只有显式选择时才配置 step/tool-call 硬上限。旧 `completion_driven` 输入只为兼容保留；当前 AICLI 未声明可续期 idle lease，因而会在模型启动前明确失败，绝不静默改成 watchdog。）
 
-默认 `danger-full-access` 是执行权限默认值，不是扩大任务授权：它允许 Codex 在当前用户权限范围访问工作区外路径，因此只用于可信项目和可信任务。显式 `workspace-write` 应指向隔离 worktree 或暂存任务目录；`read-only` 用于只读分析。工作模型的 operational admission 必须在全新隔离目录、声明的实际权限下证明真实写入和确定性结果；若要宣称窄权限边界有效，还必须另做显式 `workspace-write` 验收，并分别记录测试所用权限。可变工作区默认不复用已完成 job；只有调用者提供绑定输入内容 hash 的 `execution.cache_key` 才允许 cache hit。
+默认 `danger-full-access` 只属于 Codex 执行权限，不扩大任务授权。只用于可信任务，明确授权的输出仍应限定在隔离目录。其他 runner 的窄权限由各自实际接口决定，不能把 Codex 拒绝的 `workspace-write` 写入示例。普通配置同步使用 `configured`，不会复用旧实测证据，也不因此强制重跑 E2E；能力承诺才需要对应真实任务验收。可变工作区默认不复用已完成 job；显式 `execution.cache_key` 必须绑定真实输入内容。
 
 显式候选 `qwen-code`、`opencode`、`codex-cli`、`claude-code` 供顶级模型有理由时选择，工具不会自行换 harness；其中三个 legacy route 当前为 `unverified` / `pending_reacceptance`，在新精确模型回执前会失败关闭，不能继承旧 Qwen3.6 35B 验收。任何失败都返回当前 runner、exit code、墙钟时间和顶级模型裁决选项，不回传事件流或隐藏 chain-of-thought。watchdog-only/bounded 任务只接受实际回执证明的相应约束；未知事件、无法确认完整进程树清理或越限都会失败关闭，不会把未执行的约束写成成功。
 
-当前 `local-default` 的 `data_factory` 与 `codex-cli` 都解析到 `codex-ollama-main + aicli-qwen3.8-27b-256k:2026-09-15`。新 tag 已绑定 manifest/parameter hash，以及 2026-09-15 对主用 Profile 的真实 Agent receipt；两个 route 共用这份完全相同的 model/Profile/Provider 身份，实时模型摘要不一致时仍会失败关闭；2026-08-15 的 exact-model receipt 与 Profile fingerprint 仅保留为失效的历史身份。省略 backend 以及兼容 selector `qwen-main-v1` 永远只走这个免费本地默认；`local-crosscheck-35b` / `qwen-crosscheck-35b` 是非默认、`crosscheck_only`、no fallback 的显式 Qwen3.6 35B 路线。其 direct 路径可显式使用，`codex-cli + codex-ollama-review + qwen-main-v1` agent 路径已通过 2026-09-15 的真实 Codex Agent 验收（13 次工具调用、独立 verifier 与清理通过），与 27B 各自绑定独立模型身份。独立的 `benchmark_only` 临时 route 仍须由运行时以单独的精确 registry 创建，不能借用默认或交叉验证身份。其他显式 harness route 保持各自 registry 绑定，不能借用这份 Qwen3.8 Codex 验收。任何付费 API 都必须显式选择 exact backend 并同时允许云端传输。`cloud-qwen-flash` 与 `cloud-deepseek-v4-flash` 都是显式 direct-only backend，不会自动 fallback。DeepSeek 路由没有 Pro alias/backend，也不会读取 AICLI/OpenClaw credential。`qwen3.7-plus` 已于 2026-07-29 从别名、内置 backend 和专用 provider 退役，只保留历史评测证据。2026-07-28 的 Codex 云端 Agent 复测暴露 `workspace-write` 沙箱故障：模型可以返回文本，但无法写入验收 workspace，因此 4/30 记录作废且 Qwen Flash Agent route 继续禁用。将来只有连接合同经无付费本地测试和有界真实验收重新通过后才可恢复；历史报告不会自动继承到新指纹。
+`local-default` 的 `data_factory` 与 `codex-cli` 通过版本化注册表绑定精确 AICLI Profile 和模型。当前身份、上下文、配置状态及历史验收标签以 `backends` 为准，README 不再复制易过时的模型 tag、摘要或“当前已验收”结论。`local-crosscheck-35b` 仍是非默认、`crosscheck_only`、no fallback 的显式交叉验证路线。普通配置变更撤销旧 live 证据；失败或没有可核验身份的历史记录不成为当前通过。临时历史 `routing_role=benchmark_only` 的 `codex-cli` route 仍受其独立指纹合同约束，保持 no fallback，不会借用普通 route 身份。任何付费 API 都必须显式选择 exact backend、提供调用者临时环境变量并设置真正的 JSON 布尔值 `privacy.cloud_allowed=true`；没有自动 fallback，也不读取其他应用的私有凭据。
 `status` 会在不发模型生成请求的情况下返回当前 backend、模型指纹、agent 默认路由、证据状态和支持的 runner；实际任务回执同时记录精确 Profile、模型与是否采用默认。
 
 旧 `cloud-qwen3-8-max-agent` / `qwen3.8-max` 路线仍从可选注册表移除：AICLI catalog 中出现同名 Profile 不会自行激活 Toolkit backend、fallback 或本地默认。保留的 reserved 记录为 `unverified/selectable=false`；旧请求会以 Unknown backend 失败关闭，不会静默改投 Qwen 3.7、其他付费模型或本地模型。这个本地 Qwen3.8 27B 切换不改变云端 route 的独立验收与激活边界。
@@ -208,7 +217,7 @@ python scripts/run_general_agent_benchmark.py --aicli-entry C:\path\to\aicli.ps1
 
 ## 媒体路线
 
-- `native`：把图片直接交给声明支持视觉的后端。
+- `native`：direct 模式把图片直接交给声明支持视觉的后端。AICLI machine Agent 当前不接受原生图片，启动前明确拒绝；需要图中文字时显式选择 OCR，不能静默丢弃图片。
 - `specialist`：图片交给 LocalOCR，音频交给 ChineseASR，再把文本交给后端。
 - `auto`：一般图片优先原生视觉；精确文字、表格、公式、扫描件优先 OCR；音频使用 ASR。
 
@@ -221,7 +230,7 @@ LLM_TOOLKIT_CHINESEASR_ENTRY
 
 本地 Ollama 默认访问 `http://127.0.0.1:32100`。该入口应由机器自己的 GPU broker 管理。
 专项媒体在后台 worker 内串行完成；OCR 使用 `-StopAfter` 释放 GPU 后才启动本地 Qwen，ASR 完成并释放 Broker 租约后才进入模型阶段。
-agent mode 的默认 Codex CLI 会用原生 `--image` 附加一般图片；OpenCode 使用文件附件。精确 OCR 仍走 LocalOCR，音频仍走 ChineseASR。Qwen Code/Claude Code 对本地图片的 CLI 传递能力标为有限制，不把“能看到路径”冒充原生多模态已验证。
+当前 AICLI machine Agent 接口不接收原生图片，预检和执行都会在启动前明确拒绝。原生视觉走 direct provider；精确 OCR 仍走 LocalOCR，音频仍走 ChineseASR。不能把“能看到图片路径”冒充原生多模态已验证。
 
 ## 云端与其他 API 平台
 

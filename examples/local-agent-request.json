@@ -29,8 +29,7 @@
     "mode": "agent",
     "runner": "data_factory",
     "workspace": "C:/staging/job-001",
-    "policy": "workspace-write",
-    "cache_key": "raw-sha256:<replace-with-real-input-hash>",
+    "policy": "danger-full-access",
     "budget": {
       "limit_mode": "watchdog_only",
       "timeout_seconds": 900

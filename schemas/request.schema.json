@@ -71,9 +71,9 @@
     },
     "reasoning": {
       "type": "object",
-      "description": "Thinking is opt-in. Hidden reasoning is never returned or persisted; only public output and safe progress metadata are exposed.",
+      "description": "Omitted thinking mode uses the selected backend reasoning.default_mode. Hidden reasoning is never returned or persisted; only public output and safe progress metadata are exposed.",
       "properties": {
-        "mode": {"enum": ["off", "on"], "default": "off"}
+        "mode": {"enum": ["off", "on"]}
       },
       "additionalProperties": false
     },
@@ -171,7 +171,7 @@
         "policy": {
           "enum": ["read-only", "workspace-write", "danger-full-access"],
           "default": "danger-full-access",
-          "description": "Codex agent runs default to full local access. Use workspace-write or read-only only as an explicit restriction."
+          "description": "Codex machine routes support danger-full-access only. Other declared runners may support workspace-write or read-only; preflight verifies the exact interface."
         },
         "cache_key": {
           "type": "string",

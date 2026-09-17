@@ -20,23 +20,49 @@ from .errors import ProviderCallError, ToolError, classify_provider_error
 class ProviderResponse:
     content: str
     model: str
-    finish_reason: str = ""
+    finish_reason: str = "stop"
     usage: dict[str, Any] = field(default_factory=dict)
     reasoning: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
+def _protocol_error() -> ProviderCallError:
+    # Provider payloads can contain prompts, credentials or hidden reasoning.
+    # Report the structural failure, never the untrusted response body.
+    return ProviderCallError(ToolError(
+        category="provider_unavailable", summary="Provider returned an invalid response structure.",
+        retryable=False, options=("inspect-provider", "handle-in-codex"),
+    ))
+
+
+def _response_message(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise _protocol_error()
+    for name in ("content", "thinking"):
+        field = value.get(name)
+        if field is not None and not isinstance(field, str):
+            raise _protocol_error()
+    calls = value.get("tool_calls")
+    if calls is not None and (not isinstance(calls, list)
+                              or any(not isinstance(call, dict) for call in calls)):
+        raise _protocol_error()
+    return value
+
+
 def _read_json_response(request: urllib.request.Request, timeout: int) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+            payload = json.loads(response.read().decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise _protocol_error()
+            return payload
     except urllib.error.HTTPError as exc:
         try:
             payload = json.loads(exc.read().decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
             payload = {}
         raise ProviderCallError(classify_provider_error(exc.code, payload)) from exc
-    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ProviderCallError(
             ToolError(
                 category="provider_unavailable",
@@ -151,8 +177,13 @@ class OpenAIChatProvider:
             method="POST",
         )
         response = _read_json_response(request, self.timeout)
-        choice = (response.get("choices") or [{}])[0]
-        message = choice.get("message") or {}
+        choices = response.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise _protocol_error()
+        choice = choices[0]
+        message = _response_message(choice.get("message"))
+        if response.get("usage") is not None and not isinstance(response["usage"], dict):
+            raise _protocol_error()
         return ProviderResponse(
             content=str(message.get("content") or ""),
             model=str(response.get("model") or self.model),
@@ -220,6 +251,7 @@ class OllamaProvider:
         thinking_chars = 0
         token_events = 0
         final_chunk: dict[str, Any] = {}
+        stream_completed = False
         self._emit_progress(
             progress_callback,
             {
@@ -238,8 +270,16 @@ class OllamaProvider:
                     if not line:
                         continue
                     chunk = json.loads(line)
+                    if not isinstance(chunk, dict):
+                        raise ValueError("Invalid stream object")
+                    if chunk.get("error"):
+                        raise ProviderCallError(ToolError(
+                            category="provider_unavailable",
+                            summary="Provider reported a stream error.",
+                            retryable=True, options=("retry-later", "handle-in-codex"),
+                        ))
                     final_chunk = chunk
-                    message = chunk.get("message") or {}
+                    message = _response_message(chunk.get("message", {}))
                     thinking_delta = str(message.get("thinking") or "")
                     content_delta = str(message.get("content") or "")
                     if thinking_delta:
@@ -265,6 +305,9 @@ class OllamaProvider:
                     if content_delta:
                         event["content_delta"] = content_delta
                     self._emit_progress(progress_callback, event)
+                    if chunk.get("done") is True:
+                        stream_completed = True
+                        break
         except urllib.error.HTTPError as exc:
             try:
                 payload = json.loads(exc.read().decode("utf-8"))
@@ -275,7 +318,7 @@ class OllamaProvider:
             urllib.error.URLError,
             TimeoutError,
             OSError,
-            json.JSONDecodeError,
+            ValueError,
             UnicodeDecodeError,
         ) as exc:
             raise ProviderCallError(
@@ -287,10 +330,12 @@ class OllamaProvider:
                 )
             ) from exc
 
+        finish_reason = (str(final_chunk.get("done_reason") or "stop")
+                         if stream_completed else "stream_incomplete")
         self._emit_progress(
             progress_callback,
             {
-                "phase": "completed",
+                "phase": "completed" if finish_reason in {"stop", "end_turn"} and not tool_calls else "failed",
                 "elapsed_seconds": round(time.monotonic() - started, 3),
                 "content_chars": public_chars,
                 "thinking_active": False,
@@ -301,7 +346,7 @@ class OllamaProvider:
         return ProviderResponse(
             content="".join(public_chunks),
             model=str(final_chunk.get("model") or self.model),
-            finish_reason=str(final_chunk.get("done_reason") or ""),
+            finish_reason=finish_reason,
             usage={
                 "prompt_tokens": final_chunk.get("prompt_eval_count"),
                 "completion_tokens": final_chunk.get("eval_count"),
@@ -343,11 +388,11 @@ class OllamaProvider:
         if progress_callback is not None:
             return self._invoke_streaming(request, progress_callback)
         response = _read_json_response(request, self.timeout)
-        response_message = response.get("message") or {}
+        response_message = _response_message(response.get("message"))
         return ProviderResponse(
             content=str(response_message.get("content") or ""),
             model=str(response.get("model") or self.model),
-            finish_reason=str(response.get("done_reason") or ""),
+            finish_reason=(str(response.get("done_reason") or "stop") if response.get("done") is True else "response_incomplete"),
             usage={
                 "prompt_tokens": response.get("prompt_eval_count"),
                 "completion_tokens": response.get("eval_count"),

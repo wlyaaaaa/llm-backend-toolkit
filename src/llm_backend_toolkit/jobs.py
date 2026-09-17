@@ -49,7 +49,8 @@ BeforeSpawn = Callable[[str], None]
 EXPLICIT_CACHE_IDENTITY_SCHEMA = "llm-backend-toolkit.explicit-cache-identity.v2"
 CACHE_INDEX_SCHEMA = "llm-backend-toolkit.cache-index.v1"
 CACHE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+/=-]{0,511}$")
-CACHEABLE_RESULT_STATUSES = frozenset({"ok", "partial"})
+CACHEABLE_RESULT_STATUSES = frozenset({"ok"})
+CAPTURED_RESULT_STATUSES = frozenset({"ok", "partial"})
 REQUEST_DIGEST_CANONICALIZATION = "stdlib-json-sort-compact-utf8-v1"
 OBSERVER_LOCAL_SCHEMA = "llm-backend-toolkit.observer-local.v1"
 CONTROLLED_CANCEL_SCHEMA = "llm-backend-toolkit.controlled-cancel.v1"
@@ -335,13 +336,13 @@ class JobStore:
                 request, explicit_cache_key
             )
         else:
-            cache_digest = request_digest
-            cache_identity = {
-                "schema": EXPLICIT_CACHE_IDENTITY_SCHEMA,
-                "mode": "request_digest",
-                "digest": f"sha256:{cache_digest}",
-                "canonicalization": REQUEST_DIGEST_CANONICALIZATION,
-            }
+            # A stable backend alias must not reuse a previous model's answer.
+            cache_identity, cache_digest = self._explicit_cache_identity(
+                request, "request:" + request_digest
+            )
+            cache_identity["mode"] = "request_digest"
+            cache_identity["request_sha256"] = "sha256:" + request_digest
+            cache_identity.pop("caller_cache_key_hash", None)
         initial_poll_ms = self._initial_poll_ms(request)
         if force or not cacheable:
             job_id = self._new_attempt_id(cache_digest)
@@ -473,6 +474,10 @@ class JobStore:
                 }
             )
         reference_integrity = declaration_scope(request)
+        endpoint_env = str(config.get("base_url_env") or "")
+        effective_endpoint = os.environ.get(endpoint_env) if endpoint_env else None
+        if effective_endpoint:
+            config["base_url_default"] = effective_endpoint
         config_fingerprint = self.request_digest(config)
         route_fingerprint = self.request_digest(route) if route else ""
         caller_cache_key_hash = hashlib.sha256(
@@ -482,6 +487,7 @@ class JobStore:
             "schema": EXPLICIT_CACHE_IDENTITY_SCHEMA,
             "canonicalization": REQUEST_DIGEST_CANONICALIZATION,
             "request_protocol": "llm-backend-toolkit.request.v1",
+            "execution_contract": "llm-backend-toolkit.execution.v2",
             "caller_cache_key_hash": f"sha256:{caller_cache_key_hash}",
             "backend": {
                 "id": resolved.backend_id,
@@ -1959,14 +1965,14 @@ class JobStore:
                 )
             )
             if (
-                result_status in CACHEABLE_RESULT_STATUSES
+                result_status in CAPTURED_RESULT_STATUSES
                 and not inputs_captured
             ):
                 raise ValueError(
                     "Successful completion requires captured or verified "
                     "job input integrity"
                 )
-            if result_status in CACHEABLE_RESULT_STATUSES:
+            if result_status in CAPTURED_RESULT_STATUSES:
                 self._input_lifecycle.assert_provider_completion(
                     job_id,
                     state=state,

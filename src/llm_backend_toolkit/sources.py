@@ -108,17 +108,20 @@ class SourceLoader:
                 excerpt = chunk.text[:remaining]
                 if not excerpt:
                     continue
+                excerpt_line_end = chunk.line_start + len(excerpt.splitlines()) - 1
                 inputs.append(
                     {
                         "source_id": source_id,
                         "line_start": chunk.line_start,
-                        "line_end": chunk.line_end,
+                        "line_end": excerpt_line_end,
+                        "chunk_line_end": chunk.line_end,
+                        "excerpt_truncated": len(excerpt) < len(chunk.text),
                         "sha256": digest,
                         "excerpt": excerpt,
                     }
                 )
                 used += len(excerpt)
-                ranges.append({"line_start": chunk.line_start, "line_end": chunk.line_end})
+                ranges.append({"line_start": chunk.line_start, "line_end": excerpt_line_end})
             receipt.append(
                 {
                     "id": source_id,

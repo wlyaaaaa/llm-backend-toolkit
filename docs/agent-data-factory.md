@@ -76,8 +76,8 @@
 ## 沙箱与预算
 
 - 本报告 2026-07-22 的历史验收使用当时的 Codex Windows 外层沙箱；因此 21/21 只证明上方版本锚点，不冒充现行沙箱合同的重复验收。
-- Codex machine run 省略策略时默认使用原生 `danger-full-access` 与 `approvalPolicy=never`；显式 `read-only` / `workspace-write` 仍用于主动收窄。默认完全访问只改变执行沙箱，不扩大任务授权，且 API Key 仍只注入目标子进程。
-- `read-only` 运行把 CLI 状态放在临时可写根，来源工作区只读；`workspace-write` 应只指向隔离 worktree/暂存目录。声明 agent-capable 时，仍须在隔离目录完成一次真实可写任务，而不能用 PONG 代替。
+- Codex machine run 省略策略时默认使用原生 `danger-full-access` 与 `approvalPolicy=never`；当前 Codex machine 接口不支持 `read-only` / `workspace-write`；其他 runner 的策略以实际能力声明为准。默认完全访问只改变执行沙箱，不扩大任务授权，且 API Key 仍只注入目标子进程。
+- 支持 `read-only` / `workspace-write` 的其他 runner 应使用隔离任务目录，不把这些策略冒充当前 Codex machine 能力。声明 agent-capable 时，仍须在隔离目录完成一次真实可写任务，而不能用 PONG 代替。
 - 历史四 harness 的统一硬上限只有墙钟 timeout；当时 Qwen Code 另有 turns/tool calls、Claude 有 max turns，Codex/OpenCode 未被该版本证明可硬限制 step/tool-call。现行 AICLI Codex app-server 路径新增版本化安全事件投影与硬限制，但新的验收仍必须以该次结果回执为准，不能用现行能力追溯改写历史测试。
 
 ## Qwen3.7 Plus：历史资料判断（已被直连实测取代）
