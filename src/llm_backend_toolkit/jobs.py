@@ -10,7 +10,7 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -36,6 +36,7 @@ from .public_progress import (
     is_safe_public_progress_text,
 )
 from .request_validation import validate_request_object_sections
+from .run_control import runtime_cleanup_pending
 from .workspace_observer import (
     WorkspaceRootError,
     revalidate_workspace_root,
@@ -488,6 +489,7 @@ class JobStore:
             "canonicalization": REQUEST_DIGEST_CANONICALIZATION,
             "request_protocol": "llm-backend-toolkit.request.v1",
             "execution_contract": "llm-backend-toolkit.execution.v2",
+            "provider_identity_contract": "reported-model-v1",
             "caller_cache_key_hash": f"sha256:{caller_cache_key_hash}",
             "backend": {
                 "id": resolved.backend_id,
@@ -988,6 +990,32 @@ class JobStore:
     def begin_execution(self, job_id: str) -> bool:
         return self._input_lifecycle.begin_execution(job_id)
 
+    def runtime_control_context(self, job_id: str) -> dict[str, Any]:
+        """Trusted worker callbacks, never serialized or accepted in a request."""
+        path = self._input_lifecycle.safe_job_dir(job_id) / "aicli-control.json"
+        assert_safe_job_path(path.parent, path, require_exists=False)
+        def register(value):
+            with self._job_lock(job_id):
+                state = self._read_state(job_id)
+                lease = state.get("worker_lease") or {}
+                if (state.get("job_status") != "running" or state.get("worker_phase") != "provider_running"
+                        or lease.get("owner_pid") != os.getpid()):
+                    raise JobNotRunnableError("Native run registration requires its running worker")
+                if state.get("runtime_control") is not None:
+                    raise JobNotRunnableError("Native run control is already bound")
+                state["runtime_control"] = dict(value)
+                self._input_lifecycle.persist_state_locked(job_id, state)
+        def publish(value):
+            with self._job_lock(job_id):
+                state = self._read_state(job_id)
+                if not isinstance(state.get("runtime_control"), dict):
+                    raise JobNotRunnableError("Native run control was not registered")
+                state["runtime_control"] = dict(value)
+                self._input_lifecycle.persist_state_locked(job_id, state)
+        def cancelled():
+            return self._read_state(job_id).get("cancellation_requested") is True
+        return {"path": path, "register": register, "publish": publish, "cancel_requested": cancelled}
+
     def cancel(self, job_id: str) -> dict[str, Any]:
         state = self._read_state(job_id)
         if self._has_controlled_cancel(state):
@@ -1020,6 +1048,8 @@ class JobStore:
 
     @classmethod
     def _controlled_cancel_pending(cls, state: dict[str, Any]) -> bool:
+        if runtime_cleanup_pending(state):
+            return True
         if not cls._has_controlled_cancel(state):
             return False
         value = state.get("controlled_cancel") or {}
@@ -1942,6 +1972,15 @@ class JobStore:
                     state=state,
                 )
                 return
+            if runtime_cleanup_pending(state):
+                state["job_status"] = "cleanup_unconfirmed"
+                state["result_status"] = str(result.get("status") or "unknown")
+                state["cache_result_eligible"] = False
+                state["error"] = {"category": "runtime_cleanup_unconfirmed", "retryable": False,
+                    "summary": "The worker returned without proving native run cleanup; inspect its exact AICLI run."}
+                state["decision"] = {"owner": "top_model", "options": ["inspect-aicli-run", "reconcile-exact-run"]}
+                self._input_lifecycle.persist_state_locked(job_id, state)
+                return
             input_integrity = state.get("input_integrity")
             reference_count = (
                 int(input_integrity.get("reference_count") or 0)
@@ -1996,6 +2035,7 @@ class JobStore:
             state["cache_result_eligible"] = (
                 bool(state.get("cacheable"))
                 and state["result_status"] in CACHEABLE_RESULT_STATUSES
+                and result.get("cache_eligible", True) is True
                 and integrity_verified
             )
             state["worker_phase"] = "terminal"
@@ -2063,45 +2103,76 @@ class JobStore:
             },
         )
 
+    def inspect(
+        self, job_id: str, *, include_result: bool = False, full_result: bool = False,
+    ) -> dict[str, Any]:
+        """Observe only: no polling counter, recovery, cleanup, lock file or event."""
+        return self.get(job_id, include_result=include_result, full_result=full_result, read_only=True)
+
+    def list_jobs(self, *, limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("Job list limit must be between 1 and 200")
+        if cursor is not None:
+            self._job_dir(cursor)
+        output = {"status": "ok", "write_mode": "zero_write", "jobs": [], "next_cursor": None}
+        if not self.root.exists():
+            return output
+        names = sorted(path.name for path in self.root.iterdir()
+                       if len(path.name) == 24 and all(c in "0123456789abcdef" for c in path.name)
+                       and (cursor is None or path.name > cursor))
+        selected = names[:limit]
+        for job_id in selected:
+            try:
+                job = self.inspect(job_id)
+                fields = ("job_id", "job_status", "result_status", "backend", "created_utc", "updated_utc")
+                output["jobs"].append({key: job.get(key) for key in fields})
+            except (ValueError, OSError, RuntimeError):
+                output["jobs"].append({"job_id": job_id, "job_status": "unavailable"})
+        if len(names) > limit:
+            output["next_cursor"] = selected[-1]
+        return output
+
     def get(
         self,
         job_id: str,
         *,
         include_result: bool = False,
         full_result: bool = False,
+        read_only: bool = False,
     ) -> dict[str, Any]:
-        initial_state = self._read_state(job_id)
-        if not self._controlled_cancel_pending(initial_state):
-            self._input_lifecycle.recover_if_dead(job_id)
-        state = self._read_state(job_id)
-        terminal_statuses = {"completed", "failed", "cancelled"}
-        if str(state.get("job_status") or "") in terminal_statuses:
-            cleanup = dict(state.get("input_spool_cleanup") or {})
-            if not bool(cleanup.get("verified_absent")):
-                self.cleanup_inputs(job_id)
-                state = self._read_state(job_id)
-        stale = (
-            state.get("job_status") not in terminal_statuses
-            and state.get("job_status") != "cancellation_requested"
-            and _is_expired(state.get("monitor_until_utc"))
-        )
-        effective_status = "stale" if stale else state.get("job_status")
-        poll_after_ms = 0
-        if effective_status not in {
-            "completed",
-            "failed",
-            "cancelled",
-            "stale",
-        }:
-            state["poll_count"] = int(state.get("poll_count") or 0) + 1
-            poll_after_ms = min(
-                self._initial_poll_ms_from_state(state) * (2 ** min(state["poll_count"], 3)),
-                300_000,
+        job_dir = self._input_lifecycle.safe_job_dir(job_id)
+        assert_safe_job_path(job_dir, job_dir / "state.json", require_exists=True)
+        if not read_only:
+            initial_state = self._read_state(job_id)
+            if not self._controlled_cancel_pending(initial_state):
+                self._input_lifecycle.recover_if_dead(job_id)
+            state = self._read_state(job_id)
+            if state.get("job_status") in {"completed", "failed", "cancelled"}:
+                cleanup = dict(state.get("input_spool_cleanup") or {})
+                if not bool(cleanup.get("verified_absent")):
+                    self.cleanup_inputs(job_id)
+        # The same lock is used by completion/cancellation. Re-read under it:
+        # atomic file replacement alone cannot prevent lost state updates.
+        with nullcontext() if read_only else self._job_lock(job_id):
+            state = self._read_state(job_id)
+            terminal_statuses = {"completed", "failed", "cancelled"}
+            stale = (
+                state.get("job_status") not in terminal_statuses
+                and state.get("job_status") != "cancellation_requested"
+                and _is_expired(state.get("monitor_until_utc"))
             )
-            state["updated_utc"] = _utc_now()
-            _atomic_json(self._job_dir(job_id) / "state.json", state)
+            effective_status = "stale" if stale else state.get("job_status")
+            poll_after_ms = 0
+            if effective_status not in {*terminal_statuses, "stale", "cleanup_unconfirmed"}:
+                count = int(state.get("poll_count") or 0) + (0 if read_only else 1)
+                poll_after_ms = min(self._initial_poll_ms_from_state(state) * (2 ** min(count, 3)), 300_000)
+                if not read_only:
+                    state["poll_count"] = count
+                    state["updated_utc"] = _utc_now()
+                    _atomic_json(job_dir / "state.json", state)
         output = {
             "status": "ok",
+            "write_mode": "zero_write" if read_only else "job_maintenance",
             "job_id": job_id,
             "job_status": effective_status,
             "backend": state.get("backend") or state.get("provider"),
@@ -2132,6 +2203,8 @@ class JobStore:
             output["worker_lease"] = dict(state["worker_lease"])
         if isinstance(state.get("controlled_cancel"), dict):
             output["controlled_cancel"] = dict(state["controlled_cancel"])
+        if isinstance(state.get("runtime_control"), dict):
+            output["runtime_control"] = dict(state["runtime_control"])
         if poll_after_ms:
             output["recommended_check_utc"] = _utc_after(poll_after_ms // 1000)
         if stale:
@@ -2144,6 +2217,10 @@ class JobStore:
                 "owner": "top_model",
                 "options": ["inspect-job", "retry-with-force", "handle-in-codex"],
             }
+        if (stale or effective_status == "cleanup_unconfirmed") and runtime_cleanup_pending(state):
+            output["error"] = {"category": "runtime_cleanup_unconfirmed", "retryable": False,
+                "summary": "The native run cleanup is unconfirmed; inspect its exact AICLI run before retrying work."}
+            output["decision"] = {"owner": "top_model", "options": ["inspect-aicli-run", "reconcile-exact-run"]}
         elif effective_status == "failed":
             output["error"] = dict(
                 state.get("error")
@@ -2168,6 +2245,7 @@ class JobStore:
             }
         result_path = self._job_dir(job_id) / "result.json"
         if include_result and state.get("job_status") == "completed" and result_path.is_file():
+            assert_safe_job_path(job_dir, result_path, require_exists=True)
             result = json.loads(result_path.read_text(encoding="utf-8"))
             if not full_result:
                 result = self._compact_result_view(self._job_dir(job_id), result)

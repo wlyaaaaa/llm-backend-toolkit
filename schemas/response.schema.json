@@ -3,25 +3,89 @@
   "$id": "https://github.com/wlyaaaaa/llm-backend-toolkit/schemas/response.schema.json",
   "title": "LLM Backend Toolkit Result",
   "type": "object",
-  "required": ["status"],
+  "required": [
+    "status"
+  ],
   "properties": {
     "status": {
-      "enum": ["ok", "partial", "blocked", "failed", "accepted", "running", "cache_hit"]
+      "enum": [
+        "ok",
+        "partial",
+        "blocked",
+        "failed",
+        "accepted",
+        "running",
+        "cache_hit"
+      ]
     },
     "output": {},
-    "backend": {"type": "object"},
-    "backend_catalog": {"type": "object"},
-    "provider": {},
-    "context_receipt": {"type": "object"},
-    "delegation_receipt": {"type": "object"},
-    "delivery_receipt": {"type": "object"},
-    "source_receipt": {"type": "array"},
-    "usage": {"type": "object"},
-    "checks": {"type": "array"},
-    "uncertainties": {"type": "array"},
-    "artifacts": {"type": "array"},
-    "media_routes": {"type": "array"},
-    "execution_receipt": {"type": "object"},
+    "backend": {
+      "type": "object"
+    },
+    "backend_catalog": {
+      "type": "object"
+    },
+    "provider": {
+      "type": "object",
+      "description": "Requested selector, provider-reported model and independently verified identity are different facts. Actual may be null when the provider omitted it.",
+      "properties": {
+        "actual": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requested_model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_reported_model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "identity_state": {
+          "type": "string"
+        },
+        "independently_verified": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "context_receipt": {
+      "type": "object"
+    },
+    "delegation_receipt": {
+      "type": "object"
+    },
+    "delivery_receipt": {
+      "type": "object"
+    },
+    "source_receipt": {
+      "type": "array"
+    },
+    "usage": {
+      "type": "object"
+    },
+    "checks": {
+      "type": "array"
+    },
+    "uncertainties": {
+      "type": "array"
+    },
+    "artifacts": {
+      "type": "array"
+    },
+    "media_routes": {
+      "type": "array"
+    },
+    "execution_receipt": {
+      "type": "object"
+    },
     "cache_identity": {
       "oneOf": [
         {
@@ -41,7 +105,9 @@
             "schema": {
               "const": "llm-backend-toolkit.explicit-cache-identity.v2"
             },
-            "mode": {"const": "explicit"},
+            "mode": {
+              "const": "explicit"
+            },
             "digest": {
               "type": "string",
               "pattern": "^sha256:[0-9a-f]{64}$"
@@ -53,10 +119,25 @@
               "type": "string",
               "pattern": "^sha256:[0-9a-f]{64}$"
             },
-            "backend": {"type": "string", "minLength": 1},
-            "model": {"type": "string"},
-            "route": {"type": ["string", "null"]},
-            "profile": {"type": ["string", "null"]}
+            "backend": {
+              "type": "string",
+              "minLength": 1
+            },
+            "model": {
+              "type": "string"
+            },
+            "route": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "profile": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           },
           "additionalProperties": false
         },
@@ -72,7 +153,9 @@
             "schema": {
               "const": "llm-backend-toolkit.explicit-cache-identity.v2"
             },
-            "mode": {"const": "request_digest"},
+            "mode": {
+              "const": "request_digest"
+            },
             "digest": {
               "type": "string",
               "pattern": "^sha256:[0-9a-f]{64}$"
@@ -99,15 +182,32 @@
             "schema": {
               "const": "llm-backend-toolkit.explicit-cache-identity.v1"
             },
-            "mode": {"const": "explicit"},
+            "mode": {
+              "const": "explicit"
+            },
             "digest": {
               "type": "string",
               "pattern": "^sha256:[0-9a-f]{64}$"
             },
-            "backend": {"type": "string", "minLength": 1},
-            "model": {"type": "string"},
-            "route": {"type": ["string", "null"]},
-            "profile": {"type": ["string", "null"]}
+            "backend": {
+              "type": "string",
+              "minLength": 1
+            },
+            "model": {
+              "type": "string"
+            },
+            "route": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "profile": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           },
           "additionalProperties": false
         },
@@ -123,7 +223,9 @@
             "schema": {
               "const": "llm-backend-toolkit.explicit-cache-identity.v1"
             },
-            "mode": {"const": "request_digest"},
+            "mode": {
+              "const": "request_digest"
+            },
             "digest": {
               "type": "string",
               "pattern": "^sha256:[0-9a-f]{64}$"
@@ -133,16 +235,35 @@
         }
       ]
     },
-    "error": {"type": "object"},
+    "error": {
+      "type": "object"
+    },
     "decision": {},
-    "job_id": {"type": "string"},
-    "job_status": {"type": "string"},
-    "poll_after_ms": {"type": "integer"},
-    "recommended_check_utc": {"type": "string"},
-    "conversation": {"type": "object"},
+    "job_id": {
+      "type": "string"
+    },
+    "job_status": {
+      "type": "string"
+    },
+    "poll_after_ms": {
+      "type": "integer"
+    },
+    "recommended_check_utc": {
+      "type": "string"
+    },
+    "conversation": {
+      "type": "object"
+    },
     "monitor_until_utc": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Null for completion-driven jobs, which remain monitorable until completion or explicit cancellation."
+    },
+    "cache_eligible": {
+      "type": "boolean",
+      "description": "False for direct results without an exact matching reported model, even when output checks pass."
     }
   },
   "additionalProperties": true

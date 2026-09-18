@@ -584,6 +584,7 @@ class AiCliProfileRunner:
         self.default_profile = default_profile
         self.entry = entry or os.environ.get("LLM_TOOLKIT_AICLI_ENTRY")
         self._machine_events_supported: bool | None = None
+        self._cooperative_control_supported = False
 
     def _prefix(self) -> list[str]:
         entry_value = self.entry
@@ -620,7 +621,7 @@ class AiCliProfileRunner:
 
     def _run_command(
         self, execution: dict[str, Any], *, prefix: list[str] | None = None,
-        event_path: Path | None = None, dry_run: bool = False,
+        event_path: Path | None = None, dry_run: bool = False, control_path: Path | None = None,
     ) -> list[str]:
         if self.engine not in {"codex", "claude", "opencode", "qwen-code"}:
             raise _runner_error("agent_runner_unavailable", "Unsupported AICLI engine.")
@@ -665,6 +666,8 @@ class AiCliProfileRunner:
             command.append("--no-web-search")
         if event_path is not None:
             command.extend(["--event-file", str(event_path)])
+        if control_path is not None:
+            command.extend(["--control-file", str(control_path)])
         if dry_run:
             command.append("--dry-run")
         return command
@@ -1117,6 +1120,7 @@ class AiCliProfileRunner:
                 "Codex aicli capability probing failed closed.",
             ) from exc
         self._machine_events_supported = supported
+        self._cooperative_control_supported = isinstance(capabilities, dict) and capabilities.get("runControlReceipt") == "aicli.run-control.v1"
         if not supported:
             raise _runner_error(
                 "agent_runner_incompatible",
@@ -1474,8 +1478,22 @@ class AiCliProfileRunner:
             )
             event_path = Path(event_temp.name) / "events.jsonl"
             event_path.touch()
-        command = self._run_command(execution, prefix=prefix, event_path=event_path)
+        control = None
+        control_path = None
+        context = execution.get("_job_control")
+        if self.engine == "codex" and self._cooperative_control_supported and isinstance(context, dict):
+            from .run_control import CooperativeRunControl
+            control_path = Path(context["path"])
+            control = CooperativeRunControl(control_path, {"profile": profile, "model": model, "workspace": str(workspace)}, context)
+            def call_abort(run_id):
+                _, output, _, _ = _bounded_process(prefix + ["run", "abort", run_id, "--json"],
+                    cwd=workspace, stdin_text="", timeout_seconds=20, max_output_chars=100_000)
+                values = _json_values(output)
+                return values[-1] if values else {}
+        command = self._run_command(execution, prefix=prefix, event_path=event_path, control_path=control_path)
         try:
+            if control is not None:
+                control.start(call_abort)
             code, stdout, stderr, duration_ms = _bounded_process(
                 command,
                 cwd=workspace,
@@ -1497,12 +1515,19 @@ class AiCliProfileRunner:
                 ),
             )
         finally:
+            if control is not None:
+                control.close()
             if event_temp is not None:
                 event_temp.cleanup()
         envelopes = _json_values(stdout)
         if not envelopes:
             raise _runner_error("agent_failed", f"aicli returned no JSON envelope: {stderr.strip()[:500]}", retryable=True)
         envelope = envelopes[-1]
+        if control is not None:
+            control.observe(envelope, requires_gpu=not bool(execution.get("cloud")))
+            if not control.observation.get("cleanup_confirmed"):
+                raise _runner_error("agent_cleanup_unconfirmed", "Native process or GPU cleanup was not verified.",
+                                    receipt={"runtime_control": dict(control.observation)})
         run = envelope.get("run") or {}
         effective_model = str(run.get("model") or "")
         if execution.get("cloud") and not effective_model:

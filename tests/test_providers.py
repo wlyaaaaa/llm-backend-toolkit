@@ -114,7 +114,7 @@ class ProviderContractTests(unittest.TestCase):
             base_url="https://example.invalid/v1",
             thinking_field="enable_thinking",
         )
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("llm_backend_toolkit.providers.open_response", side_effect=fake_urlopen):
             response = provider.invoke("task", [], "off")
 
         payload = json.loads(seen[0][0].data.decode("utf-8"))
@@ -159,7 +159,7 @@ class ProviderContractTests(unittest.TestCase):
         config = BackendRegistry.load().resolve("cloud-deepseek-v4-flash").config
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": fixture_key}):
             provider = provider_from_config(config)
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("llm_backend_toolkit.providers.open_response", side_effect=fake_urlopen):
             enabled = provider.invoke("task", [], "on", events.append)
             disabled = provider.invoke("task", [], "off", events.append)
 
@@ -173,7 +173,7 @@ class ProviderContractTests(unittest.TestCase):
         )
         self.assertEqual("POST", enabled_request.method)
         self.assertEqual(f"Bearer {fixture_key}", enabled_request.get_header("Authorization"))
-        self.assertEqual("deepseek-v4-flash", enabled_payload["model"])
+        self.assertEqual("deepseek-flash", enabled_payload["model"])
         self.assertEqual({"type": "enabled"}, enabled_payload["thinking"])
         self.assertEqual({"type": "disabled"}, disabled_payload["thinking"])
         self.assertEqual("public answer", enabled.content)
@@ -192,7 +192,7 @@ class ProviderContractTests(unittest.TestCase):
 
         with patch.dict(os.environ, {}, clear=True):
             provider = provider_from_config(config)
-        with patch("urllib.request.urlopen") as urlopen:
+        with patch("llm_backend_toolkit.providers.open_response") as urlopen:
             with self.assertRaises(ProviderCallError) as caught:
                 provider.invoke("task", [], "on")
 
@@ -223,7 +223,7 @@ class ProviderContractTests(unittest.TestCase):
             )
 
         provider = OllamaProvider(base_url="http://127.0.0.1:32100")
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("llm_backend_toolkit.providers.open_response", side_effect=fake_urlopen):
             response = provider.invoke("task", [], "off")
 
         request = seen[0][0]
@@ -278,7 +278,7 @@ class ProviderContractTests(unittest.TestCase):
                 "ollama_options": options,
             }
         )
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("llm_backend_toolkit.providers.open_response", side_effect=fake_urlopen):
             without_thinking = provider.invoke("task", [], "off")
             with_thinking = provider.invoke("task", [], "on")
 
@@ -335,7 +335,7 @@ class ProviderContractTests(unittest.TestCase):
             return FakeStreamingHttpResponse(chunks)
 
         provider = OllamaProvider(base_url="http://127.0.0.1:32100")
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("llm_backend_toolkit.providers.open_response", side_effect=fake_urlopen):
             response = provider.invoke("task", [], "on", events.append)
 
         payload = json.loads(seen[0][0].data.decode("utf-8"))
@@ -387,7 +387,7 @@ class ProviderContractTests(unittest.TestCase):
             raise RuntimeError("display unavailable")
 
         provider = OllamaProvider(base_url="http://127.0.0.1:32100")
-        with patch("urllib.request.urlopen", return_value=FakeStreamingHttpResponse(chunks)):
+        with patch("llm_backend_toolkit.providers.open_response", return_value=FakeStreamingHttpResponse(chunks)):
             response = provider.invoke("task", [], "off", fail_progress)
 
         self.assertEqual("safe", response.content)
@@ -422,7 +422,7 @@ class ProviderContractTests(unittest.TestCase):
             return FakeHttpResponse(payloads[path])
 
         provider = OllamaProvider(base_url="http://127.0.0.1:32100")
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("llm_backend_toolkit.providers.open_response", side_effect=fake_urlopen):
             status = provider.status()
 
         self.assertEqual("a" * 64, status["model"]["digest"])

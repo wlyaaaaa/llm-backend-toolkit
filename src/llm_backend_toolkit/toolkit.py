@@ -191,6 +191,7 @@ class Toolkit:
         request: dict[str, Any],
         *,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        job_control: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._emit_progress(progress_callback, {"phase": "preparing"})
         try:
@@ -320,6 +321,7 @@ class Toolkit:
                 media=media,
                 sources=sources,
                 progress_callback=progress_callback,
+                job_control=job_control,
             )
             self._emit_progress(
                 progress_callback,
@@ -340,7 +342,8 @@ class Toolkit:
             self._emit_progress(progress_callback, {"phase": "failed"})
             result = self._from_error("failed", exc.error)
             result["backend"] = self._backend_receipt(resolved)
-            result["provider"] = {"requested": resolved.requested, "actual": resolved.backend_id}
+            result["provider"] = {"requested": resolved.requested, "actual": None,
+                                  "resolved_backend": resolved.backend_id, "identity_state": "not_reported"}
             result["context_receipt"] = compacted.receipt
             result["media_routes"] = media.routes
             result["source_receipt"] = sources.receipt
@@ -361,7 +364,13 @@ class Toolkit:
             "status": status,
             "output": output,
             "backend": self._backend_receipt(resolved),
-            "provider": {"requested": resolved.requested, "actual": response.model or resolved.backend_id},
+            "provider": {"requested": resolved.requested, "actual": response.model,
+                         "requested_model": resolved.config.get("model"),
+                         "provider_reported_model": response.model,
+                         "identity_state": "not_reported" if not response.model else
+                             "reported_same_id" if response.model == resolved.config.get("model") else "reported_different_id",
+                         "independently_verified": False},
+            "cache_eligible": bool(response.model) and response.model == resolved.config.get("model"),
             "context_receipt": compacted.receipt,
             "delegation_receipt": self._delegation_receipt(compacted.receipt, sources.receipt),
             "usage": response.usage,
@@ -396,7 +405,7 @@ class Toolkit:
             resolved, provider = self._resolve_provider(
                 str(request.get("backend") or request.get("provider") or "") or None
             )
-            if resolved.config.get("cloud") and (request.get("privacy") or {}).get("cloud_allowed") is not True:
+            if bool(getattr(provider, "cloud", resolved.config.get("cloud"))) and (request.get("privacy") or {}).get("cloud_allowed") is not True:
                 return self._blocked("privacy_block", "This request requires privacy.cloud_allowed=true.")
             reasoning_mode = self._resolve_reasoning_mode(request, resolved)
             execution = request.get("execution") or {}
@@ -409,6 +418,10 @@ class Toolkit:
             result = {"status": "ok", "runtime": self.runtime_identity(),
                       "backend": self._backend_receipt(resolved), "preflight": detail}
             if mode == "direct":
+                for item in (request.get("media") or {}).get("attachments") or []:
+                    if isinstance(item, dict) and (item.get("route") or (request.get("media") or {}).get("mode")) == "native":
+                        if item.get("kind") != "image" or not bool(getattr(provider, "supports_vision", False)):
+                            return self._blocked("media_route_unavailable", "This provider cannot accept the requested native media.")
                 if resolved.config.get("adapter") == "agent-only":
                     return self._blocked("direct_mode_unavailable", "This backend supports agent mode only.")
                 env_name = str(resolved.config.get("api_key_env") or "")
@@ -508,6 +521,7 @@ class Toolkit:
         media: Any,
         sources: Any,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        job_control: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         requested_workspace = Path(
             str(execution.get("workspace") or "")
@@ -616,6 +630,7 @@ class Toolkit:
         if not execution.get("policy") and callable(getattr(runner, "capabilities", None)):
             policy = runner.capabilities()["default_policy"]
         resolved_execution = dict(execution)
+        resolved_execution["_job_control"] = job_control
         declared_route_evidence = dict(route.get("evidence") or {})
         resolved_execution.update(
             {
@@ -862,6 +877,13 @@ class Toolkit:
     def _resolve_provider(self, name: str | None) -> tuple[ResolvedBackend, Any]:
         resolved = self.registry.resolve(name)
         provider = self.providers.get(resolved.backend_id) or self.providers.get(resolved.requested)
+        if provider is not None and hasattr(provider, "base_url"):
+            from dataclasses import replace
+            config = dict(resolved.config)
+            config.update(cloud=bool(getattr(provider, "cloud", config.get("cloud"))),
+                          supports_vision=bool(getattr(provider, "supports_vision", False)),
+                          effective_endpoint=provider.base_url)
+            resolved = replace(resolved, config=config)
         if provider is None:
             raise ValueError(f"Backend has no provider adapter: {resolved.backend_id}")
         return resolved, provider
@@ -1036,6 +1058,9 @@ class Toolkit:
             "cloud": bool(resolved.config.get("cloud")),
             "default_applied": resolved.default_applied,
             "alias_applied": resolved.alias_applied,
+            "supports_vision": bool(resolved.config.get("supports_vision")),
+            "effective_endpoint": resolved.config.get("effective_endpoint"),
+            "identity_verification": "not_checked",
         }
         context_window_tokens = resolved.config.get("context_window_tokens")
         if type(context_window_tokens) is int:

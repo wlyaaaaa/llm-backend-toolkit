@@ -1126,7 +1126,7 @@ class LocalCodexBenchmarkBridgeTests(unittest.TestCase):
             def __init__(self, *, registry=None):
                 captured["registry"] = registry
 
-            def invoke(self, request, progress_callback=None):
+            def invoke(self, request, progress_callback=None, job_control=None):
                 del request, progress_callback
                 return {"status": "ok", "output": "fixture"}
 
@@ -1274,7 +1274,7 @@ class LocalCodexBenchmarkBridgeTests(unittest.TestCase):
             def __init__(self, *, registry=None):
                 del registry
 
-            def invoke(self, request, progress_callback=None):
+            def invoke(self, request, progress_callback=None, job_control=None):
                 del request, progress_callback
                 invocations.append("invoked")
                 return {"status": "ok", "output": "tampered"}

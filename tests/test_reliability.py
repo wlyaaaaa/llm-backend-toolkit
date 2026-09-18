@@ -90,7 +90,7 @@ class ReliabilityTests(unittest.TestCase):
         body = json.dumps({"model": "model-a", "message": {"content": "PARTIAL"}, "done": False}).encode() + b"\n"
         tool = Toolkit(registry=registry(), providers={"local": OllamaProvider(model="model-a")}, runners={})
         events = []
-        with patch("urllib.request.urlopen", return_value=io.BytesIO(body)):
+        with patch("llm_backend_toolkit.providers.open_response", return_value=io.BytesIO(body)):
             result = tool.invoke({"task": {"goal": "public fixture"}}, progress_callback=events.append)
         self.assertEqual("partial", result["status"])
         self.assertEqual("PARTIAL", result["output"])
@@ -250,7 +250,7 @@ class ProviderBoundaryReliabilityTests(unittest.TestCase):
                 with self.subTest(streaming=streaming, payload_type=type(payload).__name__):
                     tool = Toolkit(registry=registry(), providers={"local": OllamaProvider(model="model-a")}, runners={})
                     events = []
-                    with patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps(payload).encode() + b"\n")):
+                    with patch("llm_backend_toolkit.providers.open_response", return_value=io.BytesIO(json.dumps(payload).encode() + b"\n")):
                         result = tool.invoke({"task": {"goal": "Public fixture"}},
                                              progress_callback=events.append if streaming else None)
                     self.assertEqual("failed", result["status"])
@@ -264,7 +264,7 @@ class ProviderBoundaryReliabilityTests(unittest.TestCase):
                         {"choices": [{"message": {"content": {"secret": "PRIVATE_INVALID_BODY"}}}]}):
             with self.subTest(payload_type=type(payload).__name__):
                 provider = OpenAIChatProvider(model="public", base_url="https://example.invalid", api_key="fixture")
-                with patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps(payload).encode())):
+                with patch("llm_backend_toolkit.providers.open_response", return_value=io.BytesIO(json.dumps(payload).encode())):
                     with self.assertRaises(ProviderCallError) as raised:
                         provider.invoke("public", [], "off")
                 self.assertEqual("provider_unavailable", raised.exception.error.category)
@@ -274,7 +274,7 @@ class ProviderBoundaryReliabilityTests(unittest.TestCase):
         payload = {"message": {"content": "Public partial"}, "done": True, "done_reason": "length"}
         events = []
         tool = Toolkit(registry=registry(), providers={"local": OllamaProvider(model="model-a")}, runners={})
-        with patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps(payload).encode() + b"\n")):
+        with patch("llm_backend_toolkit.providers.open_response", return_value=io.BytesIO(json.dumps(payload).encode() + b"\n")):
             result = tool.invoke({"task": {"goal": "public"}}, progress_callback=events.append)
         self.assertEqual("partial", result["status"])
         self.assertNotIn("completed", [event.get("phase") for event in events])

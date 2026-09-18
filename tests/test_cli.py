@@ -124,7 +124,7 @@ class CliContractTests(unittest.TestCase):
             def __init__(self, *, registry=None):
                 self.registry = registry
 
-            def invoke(self, request, *, progress_callback=None):
+            def invoke(self, request, *, progress_callback=None, job_control=None):
                 self.assert_request = request
                 progress_callback({"phase": "generating", "content_delta": "RECORDED_"})
                 progress_callback({"phase": "generating", "content_delta": "OK"})

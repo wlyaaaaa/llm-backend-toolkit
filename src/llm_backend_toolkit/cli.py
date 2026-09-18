@@ -98,6 +98,18 @@ def build_parser() -> argparse.ArgumentParser:
     job.add_argument("--state-dir")
     job.add_argument("--result", action="store_true", help="Include the completed result")
     job.add_argument("--full-result", action="store_true", help="Return full output instead of an artifact preview")
+    inspect = subparsers.add_parser("inspect", help="Read one job without state changes, cleanup or recovery")
+    inspect.add_argument("--id", required=True)
+    inspect.add_argument("--state-dir")
+    inspect.add_argument("--result", action="store_true")
+    inspect.add_argument("--full-result", action="store_true")
+    listing = subparsers.add_parser("jobs", help="List bounded job metadata without state changes")
+    listing.add_argument("--state-dir")
+    listing.add_argument("--limit", type=int, default=50)
+    listing.add_argument("--cursor")
+    cancel = subparsers.add_parser("cancel", help="Request cancellation; success is not inferred before actual cleanup")
+    cancel.add_argument("--id", required=True)
+    cancel.add_argument("--state-dir")
     status = subparsers.add_parser("status", help="Read provider metadata without generation")
     status_target = status.add_mutually_exclusive_group()
     status_target.add_argument("--backend", help="Backend registry ID; omitted means the local default")
@@ -106,6 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("version", help="Show package and interpreter origins")
     preflight = subparsers.add_parser("preflight", help="Check routing without starting a model or job")
     preflight.add_argument("--request", default="-", help="JSON request path or - for stdin")
+    diagnose = subparsers.add_parser("diagnose", help="Read route, source/install and desktop metadata without generation or state changes")
+    diagnose.add_argument("--backend")
+    diagnose.add_argument("--aicli-entry")
+    diagnose.add_argument("--installed-aicli-entry")
+    diagnose.add_argument("--bridge-registry")
     probe = subparsers.add_parser("probe", help="Run one bounded capability probe")
     probe_target = probe.add_mutually_exclusive_group()
     probe_target.add_argument("--backend", help="Backend registry ID; omitted means the local default")
@@ -163,6 +180,7 @@ def _execute_job(store: JobStore, job_id: str) -> None:
         result = Toolkit(registry=worker_registry).invoke(
             request,
             progress_callback=progress,
+            job_control=store.runtime_control_context(job_id),
         )
         if registry_source is not None:
             if not isinstance(result, dict):
@@ -233,6 +251,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 result = store.get(args.id)
+        elif args.command == "inspect":
+            result = JobStore(args.state_dir).inspect(args.id, include_result=args.result or args.full_result,
+                                                     full_result=args.full_result)
+        elif args.command == "jobs":
+            result = JobStore(args.state_dir).list_jobs(limit=args.limit, cursor=args.cursor)
+        elif args.command == "cancel":
+            result = JobStore(args.state_dir).cancel(args.id)
         elif args.command == "status":
             toolkit = Toolkit()
             result = toolkit.status(args.backend or args.provider)
@@ -242,6 +267,10 @@ def main(argv: list[str] | None = None) -> int:
             result = {"status": "ok", "runtime": Toolkit.runtime_identity()}
         elif args.command == "preflight":
             result = Toolkit().preflight(_read_request(args.request))
+        elif args.command == "diagnose":
+            from .diagnostics import diagnose
+            result = diagnose(Toolkit(), args.backend, aicli_entry=args.aicli_entry,
+                              installed_aicli_entry=args.installed_aicli_entry, bridge_registry=args.bridge_registry)
         elif args.command == "probe":
             backend = args.backend or args.provider
             request = _probe_request(

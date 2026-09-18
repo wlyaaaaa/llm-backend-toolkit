@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from llm_backend_toolkit.backends import BackendRegistry
 from llm_backend_toolkit.input_integrity import release_job_input_lease
 from llm_backend_toolkit.jobs import JobNotRunnableError, JobStore
 from llm_backend_toolkit.providers import ProviderResponse
@@ -104,7 +105,7 @@ class _ReadingProvider:
                 "media_bytes": [Path(path).read_bytes() for path in media],
             }
         )
-        return ProviderResponse(content="SYNTHETIC_OK", model="fixture-model")
+        return ProviderResponse(content="SYNTHETIC_OK", model=BackendRegistry.load().resolve("qwen-main-v1").config["model"])
 
 
 class JobInputIntegrityTests(unittest.TestCase):

@@ -422,7 +422,7 @@ class BackendRegistryTests(unittest.TestCase):
         self.assertTrue(flash.alias_applied)
         self.assertFalse(flash.default_applied)
         self.assertEqual("openai-chat", flash.config["adapter"])
-        self.assertEqual("deepseek-v4-flash", flash.config["model"])
+        self.assertEqual("deepseek-flash", flash.config["model"])
         self.assertTrue(flash.config["cloud"])
         self.assertEqual("direct_only", flash.config["routing_role"])
         self.assertEqual("on", flash.config["default_reasoning_mode"])

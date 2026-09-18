@@ -294,3 +294,9 @@ DeepSeek V4 Flash 0731 路由固定使用 `deepseek-v4-flash` 与 `POST https://
 $env:PYTHONPATH = "$PWD\src"
 python -m unittest discover -s tests -v
 ```
+
+## Runtime diagnosis and cancellation
+
+Use `diagnose`, `inspect`, `jobs`, and `cancel` through the existing CLI.
+See [runtime diagnostics and task control](docs/runtime-diagnostics.md) for
+zero-write observation, cancellation evidence, endpoint and model identity semantics.

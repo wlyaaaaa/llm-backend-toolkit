@@ -6,6 +6,7 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from .run_control import runtime_cleanup_pending
 
 from .input_integrity import (
     INPUT_SPOOL_CLEANUP_SCHEMA,
@@ -30,6 +31,8 @@ class JobNotRunnableError(ValueError):
 
 
 def _controlled_cancel_pending(state: dict[str, Any]) -> bool:
+    if runtime_cleanup_pending(state):
+        return True
     controlled = state.get("controlled_cancel")
     if (
         not isinstance(controlled, dict)

@@ -46,7 +46,8 @@
     "qwen-crosscheck-35b": "local-crosscheck-35b",
     "qwen3.7-flash": "cloud-qwen-flash",
     "deepseek-v4-flash": "cloud-deepseek-v4-flash",
-    "gpt-5.3-codex-spark": "fast-middle-agent"
+    "gpt-5.3-codex-spark": "fast-middle-agent",
+    "deepseek-flash": "cloud-deepseek-v4-flash"
   },
   "backends": {
     "local-default": {
@@ -321,9 +322,9 @@
     },
     "cloud-deepseek-v4-flash": {
       "adapter": "openai-chat",
-      "model": "deepseek-v4-flash",
+      "model": "deepseek-flash",
       "cloud": true,
-      "supports_vision": false,
+      "supports_vision": true,
       "context_window_tokens": 1000000,
       "routing_role": "direct_only",
       "default_reasoning_mode": "on",
@@ -338,7 +339,8 @@
         "off": "disabled"
       },
       "data_destination": "DeepSeek API",
-      "agent_routes": {}
+      "agent_routes": {},
+      "display_name": "DeepSeek V4.1 Flash"
     },
     "local-qwen3-8-27b-abliterated": {
       "adapter": "ollama",

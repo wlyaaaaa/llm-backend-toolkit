@@ -11,15 +11,17 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+from collections.abc import MutableMapping
 
 from .backends import BackendRegistry, validate_ollama_options, validate_reasoning_request
 from .errors import ProviderCallError, ToolError, classify_provider_error
+from .transport import normalize_endpoint, open_response
 
 
 @dataclass(frozen=True)
 class ProviderResponse:
     content: str
-    model: str
+    model: str | None
     finish_reason: str = "stop"
     usage: dict[str, Any] = field(default_factory=dict)
     reasoning: str = ""
@@ -33,6 +35,18 @@ def _protocol_error() -> ProviderCallError:
         category="provider_unavailable", summary="Provider returned an invalid response structure.",
         retryable=False, options=("inspect-provider", "handle-in-codex"),
     ))
+
+
+def _reported_model(payload: dict[str, Any]) -> str | None:
+    value = payload.get("model")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise _protocol_error()
+    value = value.strip()
+    if len(value) > 256 or any(ord(char) < 32 for char in value):
+        raise _protocol_error()
+    return value or None
 
 
 def _response_message(value: Any) -> dict[str, Any]:
@@ -51,7 +65,7 @@ def _response_message(value: Any) -> dict[str, Any]:
 
 def _read_json_response(request: urllib.request.Request, timeout: int) -> dict[str, Any]:
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with open_response(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
             if not isinstance(payload, dict):
                 raise _protocol_error()
@@ -115,11 +129,13 @@ class OpenAIChatProvider:
         reasoning_request: dict[str, Any] | None = None,
     ) -> None:
         self.model = model
-        self.base_url = base_url.rstrip("/")
+        self.base_url, local_endpoint = normalize_endpoint(base_url)
+        if not local_endpoint and not self.base_url.startswith("https://"):
+            raise ValueError("Cloud openai-chat backend requires an HTTPS base URL")
         self.api_key_env = api_key_env
         self.api_key = api_key if api_key is not None else os.environ.get(api_key_env, "")
         self.timeout = timeout
-        self.cloud = cloud
+        self.cloud = bool(cloud) or not local_endpoint
         self.supports_vision = supports_vision
         if thinking_field and reasoning_request is not None:
             raise ValueError("Configure either thinking_field or reasoning_request, not both")
@@ -171,11 +187,11 @@ class OpenAIChatProvider:
             f"{self.base_url}/chat/completions",
             data=body,
             headers={
-                "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json; charset=utf-8",
             },
             method="POST",
         )
+        request.add_unredirected_header("Authorization", f"Bearer {self.api_key}")
         response = _read_json_response(request, self.timeout)
         choices = response.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
@@ -186,7 +202,7 @@ class OpenAIChatProvider:
             raise _protocol_error()
         return ProviderResponse(
             content=str(message.get("content") or ""),
-            model=str(response.get("model") or self.model),
+            model=_reported_model(response),
             finish_reason=str(choice.get("finish_reason") or ""),
             usage=dict(response.get("usage") or {}),
             reasoning="",
@@ -213,12 +229,20 @@ class OllamaProvider:
         model: str = "qwen-main-v1",
         timeout: int = 900,
         ollama_options: dict[str, Any] | None = None,
+        supports_vision: bool = True,
+        managed_base_url: str = "http://127.0.0.1:32100",
     ) -> None:
         self.model = model
-        self.base_url = (base_url or os.environ.get("LLM_TOOLKIT_OLLAMA_BASE_URL") or "http://127.0.0.1:32100").rstrip("/")
-        parsed = urllib.parse.urlparse(self.base_url)
-        if (parsed.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"} and parsed.port == 32101:
-            raise ValueError("Internal Ollama backend 32101 is forbidden; use the managed public endpoint.")
+        managed, managed_local = normalize_endpoint(managed_base_url)
+        self.base_url, local = normalize_endpoint(
+            base_url or os.environ.get("LLM_TOOLKIT_OLLAMA_BASE_URL") or managed
+        )
+        if not managed_local or not local or self.base_url != managed:
+            raise ValueError("Local Ollama requires the managed public endpoint registered for LocalGpuBroker; update its owning configuration for a migration")
+        if urllib.parse.urlsplit(self.base_url).port in {32101, 11434}:
+            raise ValueError("Internal Ollama backend is forbidden; use the managed public endpoint")
+        self.cloud = False
+        self.supports_vision = bool(supports_vision)
         self.timeout = timeout
         self.keep_alive: int | str = os.environ.get("LLM_TOOLKIT_OLLAMA_KEEP_ALIVE", "0")
         self.ollama_options = (
@@ -264,7 +288,7 @@ class OllamaProvider:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with open_response(request, timeout=self.timeout) as response:
                 for raw_line in response:
                     line = raw_line.decode("utf-8").strip()
                     if not line:
@@ -345,7 +369,7 @@ class OllamaProvider:
         )
         return ProviderResponse(
             content="".join(public_chunks),
-            model=str(final_chunk.get("model") or self.model),
+            model=_reported_model(final_chunk),
             finish_reason=finish_reason,
             usage={
                 "prompt_tokens": final_chunk.get("prompt_eval_count"),
@@ -391,7 +415,7 @@ class OllamaProvider:
         response_message = _response_message(response.get("message"))
         return ProviderResponse(
             content=str(response_message.get("content") or ""),
-            model=str(response.get("model") or self.model),
+            model=_reported_model(response),
             finish_reason=(str(response.get("done_reason") or "stop") if response.get("done") is True else "response_incomplete"),
             usage={
                 "prompt_tokens": response.get("prompt_eval_count"),
@@ -507,6 +531,8 @@ def provider_from_config(config: dict[str, Any]) -> Any:
             model=model,
             timeout=int(config.get("timeout_seconds") or 900),
             ollama_options=config.get("ollama_options"),
+            supports_vision=supports_vision,
+            managed_base_url=str(config.get("base_url_default") or "http://127.0.0.1:32100"),
         )
     if adapter == "openai-chat":
         base_url = os.environ.get(str(config.get("base_url_env") or "")) or str(config.get("base_url_default") or "")
@@ -530,6 +556,35 @@ def provider_from_config(config: dict[str, Any]) -> Any:
     raise ValueError(f"Unsupported provider adapter: {adapter}")
 
 
-def default_providers(registry: BackendRegistry | None = None) -> dict[str, Any]:
-    active = registry or BackendRegistry.load()
-    return {backend_id: provider_from_config(config) for backend_id, config in active.backends.items()}
+class LazyProviders(MutableMapping):
+    """Keep optional provider failures local to the selected route."""
+    def __init__(self, registry: BackendRegistry):
+        self.configs = dict(registry.backends)
+        self.instances: dict[str, Any] = {}
+
+    def __getitem__(self, key):
+        if key not in self.instances:
+            self.instances[key] = provider_from_config(self.configs[key])
+        return self.instances[key]
+
+    def __setitem__(self, key, value):
+        self.instances[key] = value
+
+    def __delitem__(self, key):
+        if key not in self:
+            raise KeyError(key)
+        self.instances.pop(key, None)
+        self.configs.pop(key, None)
+
+    def __iter__(self):
+        return iter(dict.fromkeys((*self.configs, *self.instances)))
+
+    def __len__(self):
+        return len(set(self.configs) | set(self.instances))
+
+    def __contains__(self, key):
+        return key in self.configs or key in self.instances
+
+
+def default_providers(registry: BackendRegistry | None = None) -> LazyProviders:
+    return LazyProviders(registry or BackendRegistry.load())
