@@ -2769,6 +2769,7 @@ class AgentExecutionTests(unittest.TestCase):
         self.assertEqual("agent_budget_exceeded", result["error"]["category"])
         self.assertEqual("maxToolCalls", result["execution_receipt"]["limit_hit"])
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows process-tree behavior")
     @patch.object(subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True)
     @patch.object(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, create=True)
     @patch("llm_backend_toolkit.agent_runners.os.name", "nt")
@@ -2814,6 +2815,7 @@ class AgentExecutionTests(unittest.TestCase):
             native_run.call_args.kwargs["creationflags"],
         )
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows process-tree behavior")
     @patch("llm_backend_toolkit.agent_runners.os.name", "nt")
     @patch("llm_backend_toolkit.agent_runners.subprocess.run")
     @patch("llm_backend_toolkit.agent_runners.subprocess.Popen")

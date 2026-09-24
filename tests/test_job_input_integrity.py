@@ -109,6 +109,24 @@ class _ReadingProvider:
 
 
 class JobInputIntegrityTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "requires a non-Windows platform")
+    def test_declared_input_fails_closed_without_immutable_path_binding(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source.txt"
+            value = b"DECLARED-INPUT"
+            source.write_bytes(value)
+            store = JobStore(root / "jobs", spawner=lambda *_: None)
+            receipt = store.submit(_request(_reference(source, value, reference_id="source-a")))
+
+            with self.assertRaisesRegex(ValueError, "integrity"):
+                store.claim(receipt["job_id"])
+
+            state = store.get(receipt["job_id"])
+            self.assertEqual("failed", state["job_status"])
+            self.assertEqual("failed", state["input_integrity"]["status"])
+            self.assertFalse((root / "jobs" / receipt["job_id"] / "result.json").exists())
+
     def test_same_size_replacement_fails_before_running_or_cache_publication(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -231,6 +249,7 @@ class JobInputIntegrityTests(unittest.TestCase):
                     store.submit(_request(reference))
             self.assertFalse((root / "jobs").exists())
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows immutable path binding")
     def test_sources_and_media_are_spooled_and_receipts_are_path_and_body_free(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -308,6 +327,7 @@ class JobInputIntegrityTests(unittest.TestCase):
             self.assertIn(_sha256(source_bytes), serialized_receipts)
             self.assertIn(str(len(source_bytes)), serialized_receipts)
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows immutable path binding")
     def test_declared_integrity_is_part_of_explicit_cache_identity(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -408,6 +428,7 @@ class JobInputIntegrityTests(unittest.TestCase):
             ).splitlines()
             self.assertEqual(1, len(spawned))
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows immutable path binding")
     def test_cancel_before_provider_removes_spool_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -437,6 +458,7 @@ class JobInputIntegrityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "cancelled"):
                 store.claim(receipt["job_id"])
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows immutable path binding")
     def test_cancel_during_provider_suppresses_result_and_cache_then_cleans(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -471,6 +493,7 @@ class JobInputIntegrityTests(unittest.TestCase):
             )
             self.assertEqual("accepted", retry["status"])
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows immutable path binding")
     def test_cancel_during_spooling_does_not_wait_on_the_job_lock(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -519,6 +542,7 @@ class JobInputIntegrityTests(unittest.TestCase):
                 state["input_spool_cleanup"]["verified_absent"]
             )
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows immutable path binding")
     def test_provider_execution_cannot_begin_before_spooling_finishes(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -634,6 +658,7 @@ class JobInputIntegrityTests(unittest.TestCase):
             self.assertEqual([image_a], provider.calls[0]["media_bytes"])
             self.assertNotIn(image_b, provider.calls[0]["media_bytes"])
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows immutable path binding")
     def test_lost_protected_handle_blocks_modified_spool_before_provider_and_result(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -871,6 +896,7 @@ class JobInputIntegrityTests(unittest.TestCase):
                         recovered["error"]["category"],
                     )
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows immutable path binding")
     def test_live_worker_lease_blocks_takeover_and_cleanup(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -895,6 +921,7 @@ class JobInputIntegrityTests(unittest.TestCase):
             self.assertEqual("cancelled", cancelled["job_status"])
             self.assertFalse(spool_root.exists())
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows immutable path binding")
     def test_manifest_write_failure_is_terminal_sanitized_and_fully_cleaned(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -956,6 +983,7 @@ class JobInputIntegrityTests(unittest.TestCase):
             self.assertNotIn(str(source), serialized_error)
             self.assertNotIn(private_value.decode("ascii"), serialized_error)
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows immutable path binding")
     def test_prepared_request_write_failure_is_terminal_sanitized_and_fully_cleaned(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1053,6 +1081,7 @@ class JobInputIntegrityTests(unittest.TestCase):
                 )
                 self.assertFalse((job_dir / "request.json").exists())
 
+    @unittest.skipUnless(os.name == "nt", "requires Windows immutable path binding")
     def test_get_repairs_a_crash_between_terminal_state_and_spool_cleanup(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
