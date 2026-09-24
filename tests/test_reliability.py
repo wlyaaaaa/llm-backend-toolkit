@@ -1,5 +1,4 @@
 """Behavior regressions for the public tool's cross-layer reliability contract."""
-import copy
 import io
 import json
 import os
@@ -225,7 +224,7 @@ class RequestBoundaryReliabilityTests(unittest.TestCase):
                 self.assertEqual(0, provider.calls)
                 with tempfile.TemporaryDirectory() as directory:
                     spawned = []
-                    store = JobStore(Path(directory), registry=registry(), spawner=lambda *args: spawned.append(args))
+                    store = JobStore(Path(directory), registry=registry(), spawner=lambda *args, spawned=spawned: spawned.append(args))
                     with self.assertRaises(ValueError):
                         store.submit(request)
                     self.assertEqual([], spawned)

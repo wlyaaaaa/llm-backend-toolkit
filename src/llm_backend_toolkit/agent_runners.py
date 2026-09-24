@@ -1419,7 +1419,6 @@ class AiCliProfileRunner:
             )
         model = str(execution.get("model") or "qwen-main-v1")
         profile = str(execution.get("profile") or self.default_profile)
-        native_images = [str(path) for path in execution.get("native_images") or []]
         # Validate the same structured arguments used by preflight before IO.
         self._run_command(execution)
         prefix = self._prefix()

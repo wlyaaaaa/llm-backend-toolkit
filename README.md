@@ -51,7 +51,7 @@ python -m venv .venv
 
 `local-default` 是质量优先的本地 direct 默认，具体模型 artifact、上下文与生成参数仅由当前 registry 给出。省略 `reasoning.mode` 时采用注册表质量设定；`qwen-main-v1` 是请求侧兼容 alias，不代表当前 artifact。`data_factory` 和 `codex-cli` 使用注册表中同一精确 Profile/模型。历史任务通过不能证明替换后模型或新接口通过，`configured` 与真实 live 验收必须分开。低价值低延迟任务可显式选择 `reasoning.mode=off`；`local-hard-reasoning` 则要求 `on`，错误请求在读取材料或调用模型前拒绝。隐藏 thinking 在 provider 边界丢弃，只保留公开回答和计数。
 
-`local-crosscheck-35b` 是显式、非默认的交叉验证角色：它的 Ollama/AICLI 模型名是 `qwen-main-v1`（Qwen3.6 35B），请求侧 selector alias 是 `qwen-crosscheck-35b`。不要混淆两层命名：请求 `backend=qwen-main-v1` 仍兼容解析到 Qwen3.8 27B 的 `local-default`，只有显式 `local-crosscheck-35b` 或 `qwen-crosscheck-35b` 才选择 35B。该 backend 在 catalog 中公开 `routing_role=crosscheck_only`，默认开启 thinking，固定 `temperature=0.6`、`top_p=0.95`、`top_k=20`、`min_p=0`、`presence_penalty=0`、`repeat_penalty=1`、`num_ctx=262144`、`num_predict=32768`，且只访问 LocalGpuBroker `127.0.0.1:32100`。它不能成为 `default_backend`、不参与 fallback；direct 可显式使用。唯一一次获授权的新模型 Agent Live 重新验收在 `2026-08-21T19:28:51.9871927Z` 以 `aicli.recovery.capture_exception` 失败关闭，没有 verified runtime identity，故精确 `codex-cli` route 仍保持 `unverified/pending_reacceptance` 并在调用 provider/runner 前拒绝执行。详细边界和非敏感 receipt 证据见 [35B 本地交叉验证角色](docs/local-crosscheck-35b.md)。
+`local-crosscheck-35b` 是显式、非默认的交叉验证角色：它的当前 Ollama/AICLI 模型名是 `qwen3.6-35b:256k`，请求侧 selector alias 是 `qwen-crosscheck-35b`。不要混淆两层命名：请求 `backend=qwen-main-v1` 仍兼容解析到 Qwen3.8 27B 的 `local-default`，只有显式 `local-crosscheck-35b` 或 `qwen-crosscheck-35b` 才选择 35B。该 backend 在 catalog 中公开 `routing_role=crosscheck_only`，默认开启 thinking，当前注册表设置 `temperature=0.6`、`top_p=0.95`、`top_k=20`、`min_p=0`、`presence_penalty=1.5`、`repeat_penalty=1`、`num_ctx=262144`、`num_predict=32768`，且只访问 LocalGpuBroker `127.0.0.1:32100`。它不能成为 `default_backend`、不参与 fallback；direct 可显式使用。当前 `codex-cli` route 是否可用，以注册表的精确绑定和验收状态为准；2026-08-21 的历史 Agent Live 曾以 `aicli.recovery.capture_exception` 失败关闭，不能证明当前模型已验收。详细边界和非敏感历史 receipt 见 [35B 本地交叉验证角色](docs/local-crosscheck-35b.md)。
 
 `ollama_options` 只允许出现在本地 Ollama backend 配置中，并且只接受 `temperature`、`top_p`、`top_k`、`min_p`、`presence_penalty`、`repeat_penalty`、`num_ctx` 与 `num_predict` 的有界数值。请求本身不能任意注入这些参数，云端 adapter 也会拒绝该字段。
 
@@ -243,6 +243,7 @@ DEEPSEEK_API_KEY
 ```
 
 当前内置 direct 云端 backend 是 Qwen `cloud-qwen-flash` 与 DeepSeek `cloud-deepseek-v4-flash`；`openai-chat` adapter 也可通过外部注册表接入其他兼容平台，只有全新协议才需要新增 adapter。API key 只写环境变量名，远程云端地址必须是 HTTPS。自动测试套件不会发起真实云端调用；云端请求格式和错误分类使用 mock 验证。
+`cloud-deepseek-v4-flash` 是保持兼容的稳定 backend ID；当前实际 API 模型以注册表的 `model=deepseek-flash` 为准。这个 ID 与 AICLI 的 Profile/alias 是不同命名空间。
 选择任何云端 backend 仍不等于授权传输；请求必须同时设置 `privacy.cloud_allowed=true`。云端 probe 还需显式传入 `--cloud-allowed`。
 Flash 当前仅支持显式 direct API；Agent 模式会因没有已验收 route 而失败关闭，不会调用云端或自动改投其他模型。欠费会归一化为 `billing_unavailable` 并把本地调用、顶级模型接管或账务处理选项返回调用者，不会自动降级。Plus 名称在内置 registry 中会返回 unknown backend。
 

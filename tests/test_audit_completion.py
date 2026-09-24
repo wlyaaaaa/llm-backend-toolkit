@@ -37,7 +37,8 @@ class AuditJobTests(unittest.TestCase):
                 original_lock = store._job_lock
                 fired = []
                 @contextmanager
-                def interleaving(job_id):
+                def interleaving(job_id, *, fired=fired, original_lock=original_lock,
+                                 store=store, terminal=terminal):
                     if not fired:
                         fired.append(True)
                         with original_lock(job_id):

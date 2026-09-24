@@ -467,7 +467,7 @@ def prepare_job_inputs(
     try:
         for reference_index, (
             reference_kind,
-            ordinal,
+            _ordinal,
             reference,
         ) in enumerate(mutable_references):
             reference_id = str(reference.get("id") or "")
@@ -481,12 +481,12 @@ def prepare_job_inputs(
                 source = Path(
                     str(reference.get("path") or "")
                 ).expanduser().resolve()
-            except (OSError, RuntimeError, ValueError):
+            except (OSError, RuntimeError, ValueError) as exc:
                 raise _fail_reference(
                     references,
                     index=reference_index,
                     reason="reference path is invalid",
-                )
+                ) from exc
             suffix = _safe_suffix(source, reference_kind)
             destination = (
                 spool_root
@@ -567,7 +567,7 @@ def prepare_job_inputs(
                 protected_stream = None
             except InputIntegrityError:
                 raise
-            except (FileNotFoundError, OSError, PermissionError, ValueError):
+            except (FileNotFoundError, OSError, PermissionError, ValueError) as exc:
                 raise _fail_reference(
                     references,
                     index=reference_index,
@@ -577,7 +577,7 @@ def prepare_job_inputs(
                     ),
                     actual_sha256=actual_sha256,
                     actual_bytes=actual_bytes,
-                )
+                ) from exc
             finally:
                 if protected_stream is not None:
                     protected_stream.close()

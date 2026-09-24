@@ -1037,8 +1037,8 @@ class LocalAsyncWorker:
 
         workspace_binding = {
             "canonical_path": str(canonical_workspace),
-            "device": int(getattr(validated_workspace, "_device")),
-            "inode": int(getattr(validated_workspace, "_inode")),
+            "device": int(validated_workspace._device),
+            "inode": int(validated_workspace._inode),
             "identity_current": True,
         }
         envelope_scope = {

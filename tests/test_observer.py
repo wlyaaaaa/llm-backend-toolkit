@@ -1871,6 +1871,30 @@ class ObserverStoreTests(unittest.TestCase):
             self.assertTrue(marker.is_file())
             self.assertTrue(signature.startswith("generation:"))
 
+    def test_http_observer_accepts_local_ipv6_host_and_rejects_other_hosts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            server = create_observer_server(Path(temp), port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            url = f"http://127.0.0.1:{server.server_port}/api/health"
+            try:
+                for host in ("[::1]", f"[::1]:{server.server_port}", "localhost"):
+                    with self.subTest(host=host):
+                        request = urllib.request.Request(url, headers={"Host": host})
+                        with urllib.request.urlopen(request, timeout=3) as response:
+                            self.assertEqual(200, response.status)
+                for host in ("evil.example", "localhost.evil.example", "[::2]"):
+                    with self.subTest(host=host):
+                        request = urllib.request.Request(url, headers={"Host": host})
+                        with self.assertRaises(urllib.error.HTTPError) as error:
+                            urllib.request.urlopen(request, timeout=3)
+                        self.assertEqual(421, error.exception.code)
+                        error.exception.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
     def test_http_observer_serves_health_runs_detail_and_gui(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = JobStore(Path(temp), spawner=lambda *_: None)

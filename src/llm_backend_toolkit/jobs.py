@@ -855,7 +855,7 @@ class JobStore:
                             if time.monotonic() >= deadline:
                                 raise TimeoutError(
                                     "Timed out acquiring the cache identity lock"
-                                )
+                                ) from error
                             time.sleep(_CACHE_LOCK_POLL_SECONDS)
                             continue
                         raise
@@ -913,7 +913,7 @@ class JobStore:
                             if time.monotonic() >= deadline:
                                 raise TimeoutError(
                                     "Timed out acquiring the job state lock"
-                                )
+                                ) from error
                             time.sleep(_CACHE_LOCK_POLL_SECONDS)
                             continue
                         raise

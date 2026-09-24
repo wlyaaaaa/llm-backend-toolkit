@@ -18,14 +18,14 @@
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\sync_aicli_backends.py `
-  --aicli-root E:\Projects\Tools\ai-cli-profile-manager
+  --aicli-root '<AICLI 根目录>'
 ```
 
 预览确认差异后，才写 Toolkit 的唯一 canonical registry：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\sync_aicli_backends.py `
-  --aicli-root E:\Projects\Tools\ai-cli-profile-manager `
+  --aicli-root '<AICLI 根目录>' `
   --apply
 ```
 
@@ -37,7 +37,7 @@
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\sync_aicli_backends.py `
-  --aicli-root E:\Projects\Tools\ai-cli-profile-manager `
+  --aicli-root '<AICLI 根目录>' `
   --main-direct-vision true `
   --apply
 ```

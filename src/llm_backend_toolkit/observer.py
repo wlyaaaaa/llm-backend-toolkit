@@ -1695,8 +1695,12 @@ def create_observer_server(
             del format, args
 
         def _host_allowed(self) -> bool:
-            host_value = str(self.headers.get("Host") or "").split(":", 1)[0].lower()
-            return host_value in {"127.0.0.1", "localhost", "[::1]"}
+            host_value = str(self.headers.get("Host") or "")
+            return re.fullmatch(
+                r"(?:127\.0\.0\.1|localhost|\[::1\])(?::[0-9]{1,5})?",
+                host_value,
+                flags=re.IGNORECASE,
+            ) is not None
 
         def _send_bytes(
             self,

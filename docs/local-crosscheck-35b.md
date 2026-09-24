@@ -8,7 +8,7 @@
 | --- | --- |
 | backend ID | `local-crosscheck-35b` |
 | request selector alias | `qwen-crosscheck-35b` |
-| Ollama/AICLI model | `qwen-main-v1` |
+| Ollama/AICLI model | `qwen3.6-35b:256k` |
 | parent model | Qwen3.6 35B |
 | adapter | `ollama` |
 | cloud | `false` |
@@ -17,11 +17,11 @@
 | routing role | `crosscheck_only` |
 | default reasoning | `on` |
 | endpoint | LocalGpuBroker `http://127.0.0.1:32100` |
-| Agent route | `codex-cli` / `codex-ollama-review`，当前 `unverified/pending_reacceptance` |
+| Agent route | `codex-cli` / `codex-ollama-review`，当前 `unverified/configured` |
 
-这里的 `qwen-main-v1` 是 35B backend 交给 Ollama/AICLI 的模型名，不是请求侧 selector。为保持默认路线兼容，注册表的 selector alias `qwen-main-v1` 仍指向 Qwen3.8 27B `local-default`；请求必须显式写 `local-crosscheck-35b` 或 `qwen-crosscheck-35b` 才会选择 35B。
+当前 35B backend 交给 Ollama/AICLI 的模型名是 `qwen3.6-35b:256k`。为保持默认路线兼容，注册表的请求侧 selector alias `qwen-main-v1` 仍指向 Qwen3.8 27B `local-default`；请求必须显式写 `local-crosscheck-35b` 或 `qwen-crosscheck-35b` 才会选择 35B。下文验收记录中的 `qwen-main-v1` 是当时的历史绑定。
 
-冻结的 direct 参数为：
+当前注册表的 direct 参数为：
 
 ```json
 {
@@ -29,14 +29,14 @@
   "top_p": 0.95,
   "top_k": 20,
   "min_p": 0.0,
-  "presence_penalty": 0.0,
+  "presence_penalty": 1.5,
   "repeat_penalty": 1.0,
   "num_ctx": 262144,
   "num_predict": 32768
 }
 ```
 
-注册表会拒绝把 `routing_role=crosscheck_only` 的 backend 设为 `default_backend`，也禁止它参与 fallback。Qwen3.6 27B 的 `qwen-review-v1` / `local-crosscheck-27b` 已退役并从 live selector/backend surface 移除。35B direct 路径可显式调用；精确 `codex-cli` route 保留 Profile/模型绑定，但旧 27B 回执不迁移。只要 evidence 仍是 `pending_reacceptance`，agent 请求就在 provider 生成或 runner 调用前以 `route_evidence_pending_reacceptance` 失败关闭。只有取得并登记新的精确 AICLI acceptance 后，agent 路径才可执行。
+注册表会拒绝把 `routing_role=crosscheck_only` 的 backend 设为 `default_backend`，也禁止它参与 fallback。Qwen3.6 27B 的 `qwen-review-v1` / `local-crosscheck-27b` 已退役并从 live selector/backend surface 移除。35B direct 路径可显式调用；精确 `codex-cli` route 保留 Profile/模型绑定，但旧回执不迁移。当前注册表把 route 标为 `configured`、`live_verified=false`：配置可供尝试，不代表已经取得当前模型的真实 Agent 验收。后续模型或 Profile 变动若使状态变为 `pending_reacceptance`，则按注册表约束失败关闭。
 
 ## 2026-08-21 Agent 重新验收
 
@@ -53,7 +53,7 @@
 | agent | exit `4`；`aicli.recovery.capture_exception`；steps `0`；tool calls `0`；cleanup confirmed `false` |
 | runtime / verifier | 没有 verified runtime identity；verifier failed |
 
-这不是 PASS，也没有可继承的 verified model identity。`capability_acceptance_state` 因此继续为 `pending_reacceptance`，`live_verified=false`、`evidence_state=unverified`；不存在当前 35B 的 `receipt_id`、`model_digest` 或 `parent_model` 验证声明。本次失败后没有再次执行 Live。
+这次历史尝试不是 PASS，也没有可继承的 verified model identity。当前注册表的配置同步已登记新模型 digest，但 `capability_acceptance_state=configured`、`live_verified=false`、`evidence_state=unverified`，不能把 digest 当作真实 Agent 验收。本次失败后没有再次执行 Live。
 
 ## 何时选择
 

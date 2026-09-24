@@ -626,7 +626,6 @@ class Toolkit:
             budget = self._agent_budget(execution)
         except ValueError as exc:
             return self._blocked("invalid_request", str(exc))
-        limit_mode = budget["limit_mode"]
         if not execution.get("policy") and callable(getattr(runner, "capabilities", None)):
             policy = runner.capabilities()["default_policy"]
         resolved_execution = dict(execution)
@@ -973,8 +972,8 @@ class Toolkit:
             },
             "workspace": {
                 "canonical_path": str(workspace.canonical_path),
-                "device": int(getattr(workspace, "_device")),
-                "inode": int(getattr(workspace, "_inode")),
+                "device": int(workspace._device),
+                "inode": int(workspace._inode),
                 "identity_current": workspace_identity_current,
             },
             "task": {"request_sha256": _canonical_digest(request)},

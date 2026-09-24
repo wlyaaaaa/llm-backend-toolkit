@@ -1258,7 +1258,7 @@ class JobStoreTests(unittest.TestCase):
                 spawned = []
                 store = JobStore(
                     Path(temp),
-                    spawner=lambda job_id, _root: spawned.append(job_id),
+                    spawner=lambda job_id, _root, spawned=spawned: spawned.append(job_id),
                     registry=_registry(),
                 )
                 request = _explicit_agent_request()

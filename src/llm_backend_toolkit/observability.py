@@ -200,7 +200,7 @@ def file_lock(path: Path, *, timeout_seconds: float = 5.0) -> Iterator[None]:
                                 pass
                             stream = None
                         if time.monotonic() >= deadline:
-                            raise TimeoutError(f"Timed out acquiring lock: {path.name}")
+                            raise TimeoutError(f"Timed out acquiring lock: {path.name}") from error
                         time.sleep(_LOCK_POLL_SECONDS)
                         continue
                     raise
