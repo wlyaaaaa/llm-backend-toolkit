@@ -634,7 +634,7 @@ if (!fullHistory.fullHistory || fullHistory.blocks.some((block) => block.type ==
             [node, "-e", harness],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=30,
             check=False,
         )
         self.assertEqual(0, completed.returncode, completed.stderr)

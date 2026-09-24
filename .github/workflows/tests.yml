@@ -57,7 +57,9 @@ jobs:
           $OutputEncoding = [Text.UTF8Encoding]::new($false)
           [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
           $env:LLM_TOOLKIT_CONTRACT_AICLI_ROOT = (Resolve-Path ./aicli).Path
-          python -m unittest discover -s ./toolkit/tests -v
+          Push-Location ./toolkit
+          try { python -m unittest discover -s tests -v }
+          finally { Pop-Location }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - if: github.event_name == 'schedule'
         shell: pwsh

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import os
 import re
@@ -66,6 +67,25 @@ def _run_powershell(command: str) -> subprocess.CompletedProcess[str]:
         text=True,
         encoding="utf-8",
     )
+
+
+@functools.lru_cache(maxsize=1)
+def _desktop_shortcut_shell_available() -> bool:
+    with tempfile.TemporaryDirectory() as temp:
+        folder = Path(temp) / "中文快捷方式"
+        folder.mkdir()
+        shortcut = folder / "测试.lnk"
+        command = (
+            "$shell = New-Object -ComObject WScript.Shell; "
+            f"$link = $shell.CreateShortcut({_ps_quote(shortcut)}); "
+            "$link.TargetPath = Join-Path $env:WINDIR 'System32\\notepad.exe'; "
+            "$link.Save(); "
+            "$app = New-Object -ComObject Shell.Application; "
+            f"$folder = $app.Namespace({_ps_quote(folder)}); "
+            "if ($null -eq $folder -or $null -eq $folder.ParseName('测试.lnk')) { exit 1 }"
+        )
+        completed = _run_powershell(command)
+        return completed.returncode == 0 and shortcut.is_file()
 
 
 def _read_shortcut(path: Path) -> dict[str, object]:
@@ -287,6 +307,14 @@ class ObserverWindowsSourceTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt" and shutil.which("pwsh"), "Windows PowerShell 7 is required")
 class ObserverWindowsBehaviorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        if (
+            self._testMethodName.startswith("test_shortcut_")
+            and self._testMethodName != "test_shortcut_test_mode_reports_owned_host_target_without_creating_link"
+            and not _desktop_shortcut_shell_available()
+        ):
+            self.skipTest("desktop Shell.Application shortcut namespace is unavailable")
+
     def test_native_host_passes_invisible_webview_and_window_identity_self_test(self) -> None:
         result = _run_for_json(
             f"& {_ps_quote(HOST_BUILDER)} -ValidateRuntime -PassThru"
