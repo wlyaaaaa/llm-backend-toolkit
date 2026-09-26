@@ -1,31 +1,13 @@
-# Project rules
+# 模型任务工具的项目约定
 
-This is a public, secret-free tool project. Collaborate with the owner in Simplified Chinese.
-
-## Product boundary
-
-- Keep this a tool for a top-level model, not an autonomous agent.
-- Toolkit is an explicit non-native task tool. Its `local-default` is only this registry's default, never a global model default or a reason to replace Luna because a local route is available. Model configuration remains replaceable; use the low-frequency [AICLI backend sync guide](docs/aicli-backend-sync.md) for a deliberate model change and do not create another long-lived model configuration source.
-- Resolve backends from the versioned registry. Omitted selection means the registry's local-only `default_backend`; concrete model, endpoint, platform, and aicli Profile IDs must remain replaceable without changing core routing code. Never add automatic fallback.
-- Keep machine-facing backend IDs and route fields stable. In user-visible Toolkit output, job titles, observer cards, and dashboard prompts, show the registry's `display_name` (or the concrete model identifier when no name exists); do not present an internal alias or routing role such as `local-default`, `main`, primary, or auxiliary as the model name.
-- Keep context compaction visible through receipts and keep reasoning output disabled by default.
-- Prefer result-side checks and compact artifacts over continuous process monitoring.
-- Use asynchronous `submit` plus `job` as the normal AI entry. Keep synchronous `invoke` as a low-level interface.
-- In agent mode, `data_factory` resolves through an exact backend-bound Profile and model from the registry. Accepted evidence is fingerprint-bound; a replaced model must invalidate old live verification. Cloud recommendations remain explicitly unverified unless their exact fingerprint was tested.
-- Keep native multimodal input, LocalOCR, and ChineseASR as distinct selectable routes.
-- Never bypass LocalGpuBroker or call an internal Ollama backend directly.
-- Require explicit `privacy.cloud_allowed=true` for all cloud-bound text, source excerpts, and media.
-
-## Public safety
-
-- Never commit API keys, authorization headers, private configuration, raw prompts/results, media, transcripts, OCR output, job state, logs, or machine snapshots.
-- Use environment-variable names and public-safe examples only.
-- Do not make another application's private configuration a project dependency.
-- Do not perform a live cloud-model call in automated tests. Use mocks for cloud protocol and error behavior.
-
-## Engineering
-
-- Keep the Python core dependency-free when practical.
-- Preserve stable JSON request, result, job, and error contracts.
-- Add focused tests for behavior changes and run `python -m unittest discover -s tests -v`.
-- Run `git diff --check` and a public-exposure scan before every push.
+- 本库供顶层 AI 显式调用，不自行决定任务或模型。默认路线只属于本库登记表，不是全局模型默认，也不能用本地模型替换已选原生子代理。
+- 模型、地址、平台和 AICLI 配置从现有登记表解析；省略选择时走登记的本地默认。机器字段保持稳定，面向人的界面用 `display_name` 或实际模型名，不展示内部别名；失败不自动换模型。
+- 模型变更按 [AICLI 同步说明](docs/aicli-backend-sync.md) 更新，不再建立另一份长期配置来源。模型或配置指纹变化后，旧的真实验证结果失效。
+- 日常 AI 入口为异步 `submit` 与 `job`；同步 `invoke` 仅保留为底层接口。上下文压缩须在回执可见，默认不输出推理内容，以结果核对代替持续监视过程。
+- `data_factory` 按登记的精确模型与配置执行；云端推荐在对应指纹真实验证前仍标未验证。`benchmark_only` 只供基准测试，不作为日常模型路线。
+- 原生多模态、LocalOCR 和 ChineseASR 保持可独立选择；本机 GPU 必须经现有 LocalGpuBroker，不直连内部 Ollama 后端。
+- 发送到云端的正文、来源摘录和媒体均要求请求里明确 `privacy.cloud_allowed=true`。自动测试用模拟云协议，不发真实云调用。
+- JSON 请求、结果、任务与错误接口保持兼容；源代码不依赖别的应用的私人配置。真实提示、结果、媒体、转录、任务状态与日志不入库。
+- 初次安装：`python -m venv .venv`，再用 `.\.venv\Scripts\python.exe -m pip install -e .`；用生成的 `llm-backend-toolkit.exe submit --request examples/local-request.json` 提交，`job --id <编号> --result` 取回结果。
+- `version` 查安装来源，`preflight --request <请求文件>` 检查路线；单测用 `python -m unittest discover -s tests -v`。命令运行通过不能代替真实任务结果核对。
+- 根 README 的注释保留现有测试直接读取的路线说明；跨库合同和基准输入在 `docs/`、`schemas/`、`benchmarks/`，历史报告只描述当时结论，不作为当前模型验收。

@@ -1,7 +1,10 @@
-# LLM Backend Toolkit（模型任务工具）
+# AI 模型任务工具
 
-1. 这是什么：让 AI 把明确的任务交给选定的本地或云端模型，并拿回可检查的结果；它不会自己决定换模型。
-2. 我怎么用：请 AI 代用；自己用时先运行 `python -m venv .venv` 和 `.\.venv\Scripts\python.exe -m pip install -e .`；用 `.\.venv\Scripts\llm-backend-toolkit.exe submit --request examples/local-request.json` 提交，再用同一个程序的 `job --id <编号> --result` 查询。
-3. 怎么知道它正常：`llm-backend-toolkit version` 能查安装来源，`llm-backend-toolkit preflight --request examples/local-request.json` 能预查路线；具体任务仍要看完成回执和结果。
-4. 坏了怎么提醒我：没有自动提醒；任务失败会在查询结果和模型调用观察台（看任务状态的窗口）显示，出问题直接跟 AI 说。
-5. 让 AI 做什么：按 [项目约定](AGENTS.md) 选模型、核对结果，云端请求须显式允许发送材料；`benchmark_only` 是基准专用路线，`codex-cli` 是 Codex 运行路线，`no fallback` 表示失败不自动换模型。
+1. 这是什么：让 AI 把明确的任务交给选定的本地或云端模型，再取回结果；工具不会自行换模型。
+2. 我怎么用：直接告诉 AI 要做什么、想用哪个模型，由 AI 调用这个工具。
+3. 怎么知道它正常：让 AI 查看任务是否完成，并核对返回的内容；任务发出去了不代表已经做完。
+4. 坏了怎么提醒我：任务查询和状态窗口会显示失败，没有自动提醒，出问题直接跟 AI 说。
+5. 让 AI 做什么：按约定选择模型、提交任务、检查结果；需要发材料到云端时先确认允许发送。
+
+安装与 AI 维护约定见 [AGENTS.md](AGENTS.md)，任务状态窗口见 [使用说明](docs/model-observer.md)。
+<!-- 现有合同测试读取的路线约定：benchmark_only 仅供基准测试；codex-cli 是显式选择的执行路线；no fallback 表示失败不自动换模型。完整接口见 docs/local-async-worker-contract.md。 -->
